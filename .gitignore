@@ -9,17 +9,14 @@ venv/
 env/
 *.egg-info/
 .eggs/
-dist/
 build/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .coverage
 htmlcov/
-.tox/
-.nox/
 
-# Runtime / local data (keep bundled dashboard dist under data/dist and t2i templates)
+# Runtime / local data (keep bundled dashboard dist)
 data/config/
 data/plugins/
 data/plugin_data/
@@ -36,8 +33,6 @@ data/imgs/
 data/knowledge_base/
 !data/dist/
 !data/dist/**
-!data/t2i_templates/
-!data/t2i_templates/**
 
 # Env & secrets
 .env
@@ -56,6 +51,5 @@ Thumbs.db
 # Logs & misc
 *.log
 logs/
-uv.lock.bak
 ldmbot.zip
 *.bak

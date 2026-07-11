@@ -1,198 +1,316 @@
-# ldm · AstrBot 个人魔改版
+# 🚀 **ldm** · 个人魔改版 AstrBot
 
-基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的二次修改，面向**长期自用、可定制、不被官方更新覆盖**的场景。
-
-品牌与日志显示为 **ldm**。当前主力代码目录：`~/AstrBot`。
-
----
-
-## 和官方 AstrBot 比，改了什么？
-
-### 一图对比
-
-| | 官方 AstrBot | 本魔改（ldm） |
-|--|--------------|---------------|
-| **品牌** | AstrBot | **ldm**（WebUI / 日志 / CLI / `/help`） |
-| **`/help`** | 官方帮助样式 | **保留旧版 AstrBot 风格**：实时列出已启用内置指令 |
-| **`/llm`** | 简单开关或无完整会话管理 | **重写**：群/私聊/全局开关 + list + help + 请求拦截 |
-| **语言** | 启动/日志偏英文 | **启动主路径与界面中文化** |
-| **WebUI** | 可自动下载官方面板 | **自定义面板 + 禁止自动覆盖** |
-| **自动更新** | 可更新核心 / WebUI / pip | **默认全禁用** |
-| **登录** | 随机强密码 + 强制改密 | 自用凭据 + **去掉强制改密** |
-| **Agent 发消息** | 发送后常再次唤醒 LLM | **默认发送即结束**，少一句废话 |
-| **模型兼容** | 标准 OpenAI 路径 | **强制流式兼容**（部分上游只认 stream） |
-| **配置 UI** | 默认模型 / 回退模型分开 | **可拖拽对话模型链** |
+> **长期自用 · 高度定制 · 拒绝官方覆盖**  
+> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5 二次修改  
+> **对照基线**：本地 `/home/ldm/AstrBot` ↔ 官方 `/home/ldm/__tmp/AstrBot`
 
 ---
 
-## 突出特性
+## 📥 一键安装（推荐）
 
-### 1. 保留旧版 AstrBot 的 `/help` 体验
+在终端执行以下命令，自动下载并运行安装脚本：
 
-官方新版本帮助输出会随上游变化；本魔改**刻意保留旧版 AstrBot 的 help 风格**：
+```bash
+curl -fsSL -o ldm_AstrBot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh && chmod +x ldm_AstrBot_install.sh && ./ldm_AstrBot_install.sh
+```
 
-- 实时从指令注册表生成列表（改名/禁用后仍准确）
-- 只展示已启用的内置顶级指令
-- 输出品牌改为 `ldm v{版本}(WebUI: …)`
-- 结构清晰：版本行 →「内置指令:」→ 指令清单
+脚本会自动解压项目、配置依赖并启动。首次运行后再次执行可**直接启动**或**重建**。
 
-```text
+> 如需**手动安装**（分步控制），请跳转到文档末尾的 [📄 手动安装教程](#-手动安装教程)。
+
+---
+
+
+## ✨ 突出特性一览
+
+- ⚙️ **旧版 `/help` 回归** – 列表式指令预览，隐藏冗余命令  
+- 🔇 **`/llm` 会话级开关** – 精准控制群聊/私聊/全局 LLM 开关  
+- 📦 **`/plugin` 完全体** – 列表/启用/禁用/安装 + **重启/更新插件**（演示模式禁用）  
+- 🛡️ **自动更新彻底封锁** – 核心 / WebUI / pip 全部 no‑op，固守当前版本  
+- 🎨 **自定义 WebUI 面板** – 品牌 Logo + 侧栏重排 + 模型链拖拽 + 固定默认密码  
+- 🌐 **全链路中文** – 启动日志、帮助文本、错误提示、仪表盘 UI 全面中文化  
+- 🔄 **Agent 消息不发回** – 默认不再把确认串回灌 LLM，避免循环  
+- 🧩 **兼容流式降级** – 对异常非流式响应自动切换流式并聚合，零影响正常上游  
+- 🖥️ **高饱和控制台** – 后端 ANSI + 前端 CSS 双重亮色，一目了然  
+- 🔌 **端口友好** – TTY 下端口被占可交互更换，立即生效  
+- 💾 **备份恢复** – 可恢复不同版本的备份数据。
+
+---
+
+## 🔍 核心魔改详解
+
+### ⚙️ 1. 旧版 `/help` 体验
+
+- 从指令注册表**动态生成列表**（改名/禁用后仍准确）  
+- 隐藏集合：`set` / `unset` / `websearch`（与官方不同）  
+- 品牌头：`ldm v{VERSION}(WebUI: …)`  
+- 分区「内置指令:」 + 中文空列表提示  
+
+```
 ldm v4.26.5(WebUI: v4.26.5)
 内置指令:
 /help - 查看帮助
 /llm - 开关会话 LLM
-/provider - ...
 ...
 ```
 
-### 2. 重写 `/llm`：会话级 LLM 开关
+---
 
-官方 `/llm` 能力有限。本版按「关闭 LLM」类插件思路**整指令重写**：
+### 🔇 2. 重写 `/llm` – 会话级 LLM 开关
 
-```text
-/llm              → 切换当前会话（群聊/私聊）
-/llm <id> -q      → 开关指定群
-/llm <id> -s      → 开关指定私聊
-/llm list [-s|-a] → 查看已关闭会话
-/llm all [on|off] → 全局禁用/启用
-/llm help         → 中文帮助
-```
+**文件**：`commands/llm.py` + `_conf_schema.json` + `main.py` 注册拦截
 
-- 配置持久化（关闭的群 / 私聊 / 全局关闭）
-- 通过 `on_llm_request` **真正拦截**被关闭会话的 LLM 请求
-- 日志会提示：`全局 LLM 已关闭` / `群 xxx 的 LLM 功能已关闭`
+- `/llm` – 切换当前会话（群/私聊）  
+- `/llm <id> -q` – 开关指定群  
+- `/llm <id> -s` – 开关指定私聊  
+- `/llm list [-s|-a]` – 列出已关闭会话  
+- `/llm all [on|off]` – 全局禁用/启用  
+- `/llm help` – 中文帮助  
 
-### 3. 中文化
+**真正拦截**：通过 `@filter.on_llm_request()` 拒绝被关闭会话的 LLM 请求，日志明确记录。
 
-相对官方偏英文的启动与提示：
+---
 
-- 启动主路径日志中文：`ldm 版本`、`正在加载…`、`ldm 启动完成`、`WebUI 已就绪`
-- 控制台 / WebUI 文案中文化
-- 日志里打印所用模型：`正在请求 LLM，使用模型: xxx（提供商: yyy）`
-- 内置指令说明、`/llm help` 等用户可见文案中文
-- 逻辑标识（类名、API、配置键）保持英文，避免破坏兼容
+### 📦 3. 增强 `/plugin` – 完整插件管理（含 restart/update）
 
-### 4. WebUI 深度定制（相对官方最大差异之一）
+**文件**：`commands/plugin.py` + `main.py` 注册组
 
-**品牌**
-- 顶栏 / 登录页 / Chat 侧栏显示 **ldm**
-- 自定义 favicon / logo
-- 页面标题：`ldm - 仪表盘`
+| 子命令 | 功能 | 增强点 |
+|--------|------|--------|
+| `ls` | 已加载插件列表（含启用状态） | 提示 `restart`/`update` 用法 |
+| `on <插件名>` | 启用插件（ADMIN） | |
+| `off <插件名>` | 禁用插件（ADMIN） | |
+| `get <仓库地址>` | 安装插件（ADMIN） | |
+| `help <插件名>` | 插件作者/版本 + 注册指令列表 | |
+| `restart <插件名>` | **重启插件**（ADMIN） | 调用 `PluginManager.reload()`，演示模式拒绝 |
+| `update <插件名>` | **更新插件**（ADMIN） | 调用 `PluginManager.update_plugin()`，演示模式拒绝 |
 
-**防覆盖（官方会自动下官方面板，这里关掉）**
-- 禁用启动时自动下载 WebUI
-- 禁用更新流程覆盖 `data/dist`
-- 禁用 `/dashboard_update` 拉官方包
-- 禁用 WebUI 触发的 pip 更新
-- 禁用核心源码自动更新
+> 注意：此处的更新/重启是**已安装插件**，与核心/WebUI 自动更新无关。
 
-**交互与配置**
-- 去掉首次登录强制改密 / 自动弹改密框
-- 侧栏顺序按自用频率调整（插件、控制台、模型、配置更靠前）
-- 控制台日志高饱和配色（后端 ANSI + 前端 CSS 同步）
-- 统一「对话模型链」：主模型 + 回退模型拖拽排序
+---
 
-**部署约定（和官方不一样，务必记住）**
+### 🛡️ 4. 自动更新封锁（全链路）
 
+| 入口 | 行为 |
+|------|------|
+| 启动检查 WebUI | **不再** `download_dashboard` / 覆盖 `data/dist`；有 `index.html` 则警告并使用现有面板 |
+| 下载/解压函数 | `download_dashboard` / `extract_dashboard` 仅打警告，不联网不写盘 |
+| 核心更新器 | `check_update` / `get_releases` / `update` / `download_update_package` / `apply_update_package` **全部 no‑op** |
+| 仪表盘更新服务 | `update_project` blocked；`call_download_dashboard` / `call_pip_install` no‑op |
+| 管理员指令 | `/dashboard_update` 拒绝自动下载，提示手动构建 |
+
+---
+
+### 🎨 5. WebUI 定制 & 登录策略
+
+#### 🏷️ 品牌替换
+- 页面标题 / meta / 图标 / Logo / 顶栏 / 聊天侧栏 → **ldm**  
+- i18n 值中的 `AstrBot` → `ldm`（key 不变）
+
+#### 🔐 登录与密码（简化）
+| 项目 | 官方 | ldm |
+|------|------|-----|
+| 首登 Setup | 可能要求 | **永远 False** |
+| 强制改密 | 登录后弹窗 | **清除 flags，不弹** |
+| 密码复杂度 | 长度+大小写+数字 | **仅非空** |
+| 随机初始密码 | 强随机 | **固定默认密码** |
+| 默认用户名 | `astrbot` | `ldm` |
+
+#### 🧩 侧栏与配置 UI
+- `sidebarItem.ts`：**插件、控制台、模型、配置**前移，其余放入「更多」  
+- 模型配置：主模型 + 回退模型链**可拖拽**（`ChatModelChainSelector.vue`）  
+
+#### 🎨 控制台高饱和配色
+- **后端 ANSI**：DEBUG=亮青，INFO=亮绿，WARNING=亮黄，ERROR=亮红  
+- **前端 CSS**：对应 `#39C5BB` / `#00FFFF` / `#FFFF00` / `#FF0000` / `#00FF00` / 白色  
+（官方为低饱和灰蓝/暗黄/暗红）
+
+#### 📦 部署约定（重要！）
 ```bash
 cd ~/AstrBot/dashboard
 pnpm build
 cp -r dist/* ../data/dist/
-# 必须保留 version，否则官方逻辑可能判定异常
-echo -n "v4.26.5" > ../data/dist/assets/version
+echo -n "v4.26.5" > ../data/dist/assets/version   # 务必保留 version 文件
 ```
-
-实际服务目录是 **`data/dist/`**，不是 `dashboard/dist/`。
-
-### 5. Agent：发完消息默认不再二次唤醒
-
-官方工具发送消息后，常把结果回灌 LLM，容易多一句。  
-本版 `SendMessageToUser`：
-
-- 默认 `receive_result=false` → 返回 `None` → **Agent 循环结束**
-- 需要继续对话时再显式 `receive_result=true`
-
-### 6. 模型提供商兼容
-
-针对部分上游「`stream=false` 空响应 / 强行返回 stream」：
-
-- OpenAI 兼容层自动聚合 stream
-- 可按提供商开启 `force_stream_on_query`
-
-### 7. 内置指令集更贴近旧版/自用习惯
-
-相对官方当前指令集，本版额外保留/强化例如：
-
-- `/llm`（重写）
-- `/plugin` 插件管理组
-- `/persona`、`/t2i`、`/tts`、`/alter_cmd` 等
-- `/help` 旧版列表风格
+> **服务路径**：`data/dist/`（不是 `dashboard/dist/`）  
+> **修改后需手动重启**（本项目禁用自动重启）
 
 ---
 
-## Linux 一键安装
+### 🔄 6. Agent 发消息不再二次唤醒
 
-下载 Release 自解压安装脚本并执行（内含完整源码 + WebUI 静态资源）：
+**文件**：`message_tools.py`  
+- 工具 `SendMessageToUserTool` 新增参数 `receive_result`（默认 `False`）  
+- `False` → 返回 `None` → **Agent 循环结束**，不回灌确认串  
+- `True` → 返回 `Message sent to session …`，继续对话（用于需要反馈的场景）  
 
-```bash
-curl -fsSL -o ldm_AstrBot_install.sh \
-  https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh \
-  && chmod +x ldm_AstrBot_install.sh \
-  && ./ldm_AstrBot_install.sh
+配套单元测试已同步调整。
+
+---
+
+### 🧩 7. 模型提供商强制流式兼容
+
+**文件**：`openai_source.py`  
+- 上游有时忽略 `stream=False` 返回流式，或返回非法类型（如空响应 / 字符串 SSE）  
+- 本地策略：  
+  - 可配置 `force_stream_on_query` 强制开启流式  
+  - 否则先尝试非流式，检测到异常则**自动降级**为流式并聚合为 `ChatCompletion`  
+- 对正常上游零影响  
+- 请求前打印中文模型日志  
+
+OpenAI 兼容继承类（Groq / xAI / Zhipu 等）自动受益；Gemini / Anthropic 路径独立增加模型日志。
+
+---
+
+### 🔌 8. 端口占用交互
+
+**文件**：`dashboard/server.py`  
+- TTY 下端口被占用时：询问是否换端口 → 校验可用 → 写入 `dashboard.port` → 提示重启并 `sys.exit(0)`  
+（不自动拉起新进程，遵守「禁止自动重启」约定）
+
+---
+
+## 📂 文件差异速查
+
+### ✅ 仅本地存在（新增/替换）
+
+```
+astrbot/builtin_stars/builtin_commands/commands/
+├── llm.py              # 会话级 LLM 开关
+├── plugin.py           # 完整插件管理（含 restart/update）
+├── persona.py          # /persona
+├── t2i.py              # /t2i
+├── tts.py              # /tts
+└── alter_cmd.py        # /alter_cmd
+astrbot/builtin_stars/builtin_commands/_conf_schema.json   # 中文键
+dashboard/src/components/shared/ChatModelChainSelector.vue  # 模型链拖拽
+dashboard/src/assets/images/ldm-logo.svg                   # 品牌图标
+README_LDM.md                                             # 本文档
 ```
 
-非交互（默认同意提示 / 已存在目录时默认删除重建）：
+### ❌ 仅官方存在（本地删除/未使用）
 
-```bash
-curl -fsSL -o ldm_AstrBot_install.sh \
-  https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh \
-  && chmod +x ldm_AstrBot_install.sh \
-  && LDM_ASTRBOT_YES=1 ./ldm_AstrBot_install.sh
+```
+astrbot/builtin_stars/builtin_commands/commands/name.py    # /name 被替换为管理指令集强化
 ```
 
-说明：
-- 安装脚本为「脚本头 + 内嵌 zip」，**必须先下载到本地再执行**（不要用 `curl | bash`）
-- 解压目录：`./ldm_AstrBot`
-- 也可将 `.sh` 后缀改成 `.zip` 后手动解压安装
-- Release 页：https://github.com/landamao/ldm_AstrBot/releases
+> 其他修改以 **品牌中文化**、**防更新**、**兼容性补丁** 为主，散见于各核心模块（CLI、核心生命周期、仪表盘服务、前端等）。
 
-## 快速启动（已有源码）
+---
+
+## 🔧 其他改动区域（简要）
+
+- **CLI**：`cmd_run` / `cmd_conf` / `cmd_init` / `cmd_plug` 等 – 品牌显示及中文提示  
+- **核心**：`config/astrbot_config.py`、`cron/manager.py`、`db/migration`、`persona_mgr`、`platform/*`、`provider/*`、`star/*`、`knowledge_base` 等 – 日志中文化及配置兼容  
+- **仪表盘后端**：`plugin_service.py`、`stat_service.py` 等 – 与前端品牌联动  
+- **前端组件**：`ExtensionCard.vue`、`SessionManagementPage.vue`、TOTP 对话框等 – 登录流程简化  
+
+完整差异可执行（排除无关目录）：
+```bash
+diff -rq \
+  --exclude='.git' --exclude='.venv' --exclude='node_modules' \
+  --exclude='__pycache__' --exclude='dist' --exclude='data' \
+  /home/ldm/__tmp/AstrBot /home/ldm/AstrBot
+```
+
+---
+
+## 🚀 快速启动（开发/已有源码）
+
+如果你已通过其他方式获取源码（如克隆仓库或手动解压），可直接进入项目目录：
 
 ```bash
-# 克隆仓库
-git clone https://github.com/landamao/ldm_AstrBot.git
-cd ldm_AstrBot
-
-# 方式 A：仓库内脚本
-bash scripts/install_or_run.sh
-
-# 方式 B：uv（推荐）
-uv sync
+cd ldmbot          # 或你的项目目录
+uv sync            # 若使用 uv
 uv run main.py
 ```
 
-修改后端或 WebUI 后请**手动重启**（本项目约定不自动重启服务）。
+若使用传统 `pip`：
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
+```
 
 ---
 
-## 自用约定
+## 📌 自用约定
 
-1. **不自动更新覆盖** — 核心、WebUI、pip 默认都锁死  
-2. **WebUI 只认 `data/dist`** — 构建后必须部署并保留 `assets/version`  
-3. **迁移** — 优先整目录复制（排除 `.venv` / `node_modules` / 缓存 / 日志）  
-4. **显示名可改，逻辑标识慎改** — 例如不乱改 `AstrBotConfig`、事件名、配置键  
-
----
-
-## 许可
-
-- 上游：https://github.com/AstrBotDevs/AstrBot  
-- 许可证：遵循上游 AGPL v3 等条款（见 `LICENSE` / `EULA.md`）  
-- 本说明描述的是**个人魔改行为**，不是官方分支
+1. **🔒 不自动更新** – 核心、WebUI、pip 全部锁死  
+2. **📁 WebUI 只认 `data/dist`** – 构建后必须部署并保留 `assets/version`  
+3. **📦 迁移** – 整目录复制（排除 `.venv` / `node_modules` / 缓存 / 日志）  
+4. **🖊️ 显示名可改，逻辑标识慎改** – 不擅改 `AstrBotConfig`、事件名、配置键、i18n key  
+5. **🔄 重启需手动** – 助手/脚本不自动 `restart`  
+6. **🧪 合入上游时** – 在干净官方树重放补丁点，再 `diff` 校验  
 
 ---
 
-## 说明
+## 📜 许可 & 文档维护
 
-本文档对标 **AstrBot 官方上游行为**，列出本机魔改点。  
-若与代码不一致，以 `~/AstrBot` 源码和 `data/dist` 实际部署为准。
+- 上游遵循 **AGPL v3**（见 `LICENSE` / `EULA.md`）  
+- 本说明仅描述**个人魔改行为**，非官方分支  
+- **对照目录**：本地 `/home/ldm/AstrBot` ↔ 官方 `/home/ldm/__tmp/AstrBot`  
+- 刷新差异时排除：`.git`、`.venv`、`node_modules`、`__pycache__`、`dist`、`data`  
+- 若本文与代码不一致，以 `~/AstrBot` 源码和 `data/dist` 实际部署为准  
+
+---
+
+## 📄 手动安装教程
+
+> 以下步骤基于 `ldm_AstrBot_install.sh` 脚本的逻辑，适合希望完全掌控每个环节的用户。
+
+### 1. 下载安装脚本
+```bash
+wget https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh
+# 或 curl
+curl -LO https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh
+```
+
+### 2. 赋予执行权限
+```bash
+chmod +x ldm_AstrBot_install.sh
+```
+
+### 3. 运行脚本（自动解压 + 环境配置）
+```bash
+./ldm_AstrBot_install.sh
+```
+
+脚本会自动执行以下操作：
+- 解压内嵌的 `ldmbot.zip` 到当前目录
+- 检测本地代理（端口 `7890` 或 `7897`），询问是否启用
+- 检查 `uv` 包管理器，若缺失则自动安装
+- 优先使用 `uv sync` 安装依赖并启动
+- 若 `uv` 失败，回退到 `pip`：自动创建 Python 3.12 虚拟环境，安装 `requirements.txt` 并启动
+
+### 4. （可选）手动解压部署与启动
+若只想解压不自动启动，可将脚本后缀改为 `.zip` 后解压：
+```bash
+cp ldm_AstrBot_install.sh ldmbot.zip
+unzip ldmbot.zip -d ldmbot
+cd ldmbot
+```
+- **部署**
+使用uv（推荐）
+  ```bash
+  uv sync  # 同步依赖
+  ```
+  ```bash
+  uv run main.py  # 启动 （后续启动）
+  ```
+- **使用 pip**：
+  ```bash
+  python3.12 -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+  python main.py
+  ```
+
+### 5. 后续维护
+- 再次执行同一安装脚本，会检测到已存在 `ldmbot` 目录，提供 **直接启动** / **删除重建** / **重命名重建** 选项。
+- 如需更新，建议备份数据后删除旧目录再运行脚本（或重命名旧目录）。
+
+---
+
+**🌟 享受你的 ldm 之旅！**

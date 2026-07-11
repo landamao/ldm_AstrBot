@@ -2,8 +2,8 @@
 
 负责从 ZIP 备份文件恢复所有数据。
 导入时进行版本校验：
-- 主版本（前两位）不同时直接拒绝导入
-- 小版本（第三位）不同时提示警告，用户可选择强制导入
+- 主版本（前两位）不同时提示警告，仍允许用户确认后导入
+- 小版本（第三位）不同时提示警告，用户可选择继续导入
 - 版本匹配时也需要用户确认
 """
 
@@ -153,7 +153,7 @@ class ImportPreCheckResult:
     valid: bool = False
     # 是否可以导入（版本兼容）
     can_import: bool = False
-    # 版本状态: match（完全匹配）, minor_diff（小版本差异）, major_diff（主版本不同，拒绝）
+    # 版本状态: match（完全匹配）, minor_diff（小版本差异）, major_diff（主版本不同，仅提示）
     version_status: str = ""
     # 备份文件中的 AstrBot 版本
     backup_version: str = ""
@@ -316,8 +316,9 @@ class AstrBotImporter:
         """检查版本兼容性
 
         规则：
-        - 主版本（前两位，如 4.9）必须一致，否则拒绝
-        - 小版本（第三位，如 4.9.1 vs 4.9.2）不同时，警告但允许导入
+        - 版本不同时仅提示警告，仍允许用户确认后导入
+        - 主版本（前两位，如 4.9）不同时标记为 major_diff
+        - 小版本（第三位，如 4.9.1 vs 4.9.2）不同时标记为 minor_diff
 
         Returns:
             dict: {status, can_import, message}
@@ -325,22 +326,25 @@ class AstrBotImporter:
         if not backup_version:
             return {
                 "status": "major_diff",
-                "can_import": False,
-                "message": "备份文件缺少版本信息",
+                "can_import": True,
+                "message": (
+                    "备份文件缺少版本信息，无法确认兼容性。"
+                    "导入可能导致数据异常，请谨慎操作。"
+                ),
             }
 
         # 提取主版本（前两位）进行比较
         backup_major = _get_major_version(backup_version)
         current_major = _get_major_version(VERSION)
 
-        # 比较主版本
+        # 比较主版本：仅提示，不拒绝
         if VersionComparator.compare_version(backup_major, current_major) != 0:
             return {
                 "status": "major_diff",
-                "can_import": False,
+                "can_import": True,
                 "message": (
-                    f"主版本不兼容: 备份版本 {backup_version}, 当前版本 {VERSION}。"
-                    f"跨主版本导入可能导致数据损坏，请使用相同主版本的 ldm。"
+                    f"主版本不同: 备份版本 {backup_version}, 当前版本 {VERSION}。"
+                    f"跨主版本导入可能导致数据异常，请确认后继续。"
                 ),
             }
 
@@ -509,23 +513,20 @@ class AstrBotImporter:
             return result
 
     def _validate_version(self, manifest: dict) -> None:
-        """验证版本兼容性 - 仅允许相同主版本导入
+        """验证版本兼容性 - 版本不同仅记录警告，不阻止导入
 
         注意：此方法仅在 import_all 中调用，用于双重校验。
         前端应先调用 pre_check 获取详细的版本信息并让用户确认。
         """
         backup_version = manifest.get("astrbot_version")
         if not backup_version:
-            raise ValueError("备份文件缺少版本信息")
+            logger.warning("备份文件缺少版本信息，仍将继续导入")
+            return
 
-        # 使用新的版本兼容性检查
+        # 使用版本兼容性检查；任何差异都只告警，不拒绝
         version_check = self._check_version_compatibility(backup_version)
 
-        if version_check["status"] == "major_diff":
-            raise ValueError(version_check["message"])
-
-        # minor_diff 和 match 都允许导入
-        if version_check["status"] == "minor_diff":
+        if version_check["status"] in {"major_diff", "minor_diff"}:
             logger.warning(f"版本差异警告: {version_check['message']}")
 
     async def _clear_main_db(self) -> None:

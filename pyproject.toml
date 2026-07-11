@@ -1,7 +1,7 @@
 [project]
 name = "AstrBot"
 version = "4.26.5"
-description = "ldm_AstrBot — fork/optimization of AstrBot (multi-platform LLM chatbot framework)"
+description = "Easy-to-use multi-platform LLM chatbot and development framework"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.12"
@@ -82,7 +82,7 @@ dev = [
 astrbot = "astrbot.cli.__main__:cli"
 
 [project.urls]
-Repository = "https://github.com/landamao/ldm_AstrBot"
+Repository = "https://github.com/AstrBotDevs/AstrBot"
 
 [tool.ruff]
 exclude = ["astrbot/core/utils/t2i/local_strategy.py", "astrbot/api/all.py", "tests"]
