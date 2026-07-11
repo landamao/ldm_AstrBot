@@ -1,0 +1,20 @@
+{
+    "关闭的群组": {
+        "description": "关闭LLM的群组",
+        "type": "list",
+        "default": [],
+        "hint": "填入群号，每行一个，这些群将不会触发LLM回复"
+    },
+    "关闭的私聊": {
+        "description": "关闭LLM的私聊用户",
+        "type": "list",
+        "default": [],
+        "hint": "填入用户QQ号，每行一个，这些用户的私聊将不会触发LLM回复"
+    },
+    "全局关闭": {
+        "description": "全局禁用 LLM（开启后将拦截所有 LLM 请求）",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，所有会话都不会触发 LLM 回复，优先级高于单独设置"
+    }
+}
