@@ -130,10 +130,43 @@ echo -n "v4.26.5" > ../data/dist/assets/version
 
 ---
 
-## 快速启动
+## Linux 一键安装
+
+下载 Release 自解压安装脚本并执行（内含完整源码 + WebUI 静态资源）：
 
 ```bash
-cd ~/AstrBot
+curl -fsSL -o ldm_AstrBot_install.sh \
+  https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh \
+  && chmod +x ldm_AstrBot_install.sh \
+  && ./ldm_AstrBot_install.sh
+```
+
+非交互（默认同意提示 / 已存在目录时默认删除重建）：
+
+```bash
+curl -fsSL -o ldm_AstrBot_install.sh \
+  https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh \
+  && chmod +x ldm_AstrBot_install.sh \
+  && LDM_ASTRBOT_YES=1 ./ldm_AstrBot_install.sh
+```
+
+说明：
+- 安装脚本为「脚本头 + 内嵌 zip」，**必须先下载到本地再执行**（不要用 `curl | bash`）
+- 解压目录：`./ldm_AstrBot`
+- 也可将 `.sh` 后缀改成 `.zip` 后手动解压安装
+- Release 页：https://github.com/landamao/ldm_AstrBot/releases
+
+## 快速启动（已有源码）
+
+```bash
+# 克隆仓库
+git clone https://github.com/landamao/ldm_AstrBot.git
+cd ldm_AstrBot
+
+# 方式 A：仓库内脚本
+bash scripts/install_or_run.sh
+
+# 方式 B：uv（推荐）
 uv sync
 uv run main.py
 ```
