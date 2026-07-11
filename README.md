@@ -1,116 +1,165 @@
-# ldm_AstrBot
+# ldm · AstrBot 个人魔改版
 
-基于开源项目 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的二次修改与优化版本（亦称 ldmbot / LDMBOT）。
+基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的二次修改，面向**长期自用、可定制、不被官方更新覆盖**的场景。
 
-本仓库用于公开分发源码与安装脚本，方便自行部署与二次开发。
+品牌与日志显示为 **ldm**。当前主力代码目录：`~/AstrBot`。
 
-## 与上游的关系
+---
 
-- 上游项目：AstrBot（AGPL-3.0）
-- 本仓库：在 AstrBot 基础上的个人/社区优化发行版
-- 许可证：继承上游 **AGPL-3.0-or-later**（见 `LICENSE`）
-- 使用 / 分发 / 修改网络服务时，请遵守 AGPL 义务（含对应源码提供）
+## 和官方 AstrBot 比，改了什么？
 
-## 功能概览
+### 一图对比
 
-与 AstrBot 主体能力一致，包括但不限于：
+| | 官方 AstrBot | 本魔改（ldm） |
+|--|--------------|---------------|
+| **品牌** | AstrBot | **ldm**（WebUI / 日志 / CLI / `/help`） |
+| **`/help`** | 官方帮助样式 | **保留旧版 AstrBot 风格**：实时列出已启用内置指令 |
+| **`/llm`** | 简单开关或无完整会话管理 | **重写**：群/私聊/全局开关 + list + help + 请求拦截 |
+| **语言** | 启动/日志偏英文 | **启动主路径与界面中文化** |
+| **WebUI** | 可自动下载官方面板 | **自定义面板 + 禁止自动覆盖** |
+| **自动更新** | 可更新核心 / WebUI / pip | **默认全禁用** |
+| **登录** | 随机强密码 + 强制改密 | 自用凭据 + **去掉强制改密** |
+| **Agent 发消息** | 发送后常再次唤醒 LLM | **默认发送即结束**，少一句废话 |
+| **模型兼容** | 标准 OpenAI 路径 | **强制流式兼容**（部分上游只认 stream） |
+| **配置 UI** | 默认模型 / 回退模型分开 | **可拖拽对话模型链** |
 
-- 多平台接入（QQ / 微信生态 / 飞书 / 钉钉 / Telegram / Discord / Slack 等）
-- LLM 对话、Agent、MCP、插件市场、知识库、人格、WebUI
-- 内置管理面板静态资源（`data/dist`），克隆后可直接启动
+---
 
-## 环境要求
+## 突出特性
 
-- Python 3.12+
-- 推荐安装 [uv](https://docs.astral.sh/uv/)
-- Linux / macOS / Windows（WSL 更佳）
+### 1. 保留旧版 AstrBot 的 `/help` 体验
 
-## 快速开始
+官方新版本帮助输出会随上游变化；本魔改**刻意保留旧版 AstrBot 的 help 风格**：
 
-### 方式一：克隆源码 + 安装脚本
+- 实时从指令注册表生成列表（改名/禁用后仍准确）
+- 只展示已启用的内置顶级指令
+- 输出品牌改为 `ldm v{版本}(WebUI: …)`
+- 结构清晰：版本行 →「内置指令:」→ 指令清单
 
-```bash
-git clone https://github.com/landamao/ldm_AstrBot.git
-cd ldm_AstrBot
-bash scripts/install_or_run.sh
+```text
+ldm v4.26.5(WebUI: v4.26.5)
+内置指令:
+/help - 查看帮助
+/llm - 开关会话 LLM
+/provider - ...
+...
 ```
 
-### 方式二：uv（推荐）
+### 2. 重写 `/llm`：会话级 LLM 开关
+
+官方 `/llm` 能力有限。本版按「关闭 LLM」类插件思路**整指令重写**：
+
+```text
+/llm              → 切换当前会话（群聊/私聊）
+/llm <id> -q      → 开关指定群
+/llm <id> -s      → 开关指定私聊
+/llm list [-s|-a] → 查看已关闭会话
+/llm all [on|off] → 全局禁用/启用
+/llm help         → 中文帮助
+```
+
+- 配置持久化（关闭的群 / 私聊 / 全局关闭）
+- 通过 `on_llm_request` **真正拦截**被关闭会话的 LLM 请求
+- 日志会提示：`全局 LLM 已关闭` / `群 xxx 的 LLM 功能已关闭`
+
+### 3. 中文化
+
+相对官方偏英文的启动与提示：
+
+- 启动主路径日志中文：`ldm 版本`、`正在加载…`、`ldm 启动完成`、`WebUI 已就绪`
+- 控制台 / WebUI 文案中文化
+- 日志里打印所用模型：`正在请求 LLM，使用模型: xxx（提供商: yyy）`
+- 内置指令说明、`/llm help` 等用户可见文案中文
+- 逻辑标识（类名、API、配置键）保持英文，避免破坏兼容
+
+### 4. WebUI 深度定制（相对官方最大差异之一）
+
+**品牌**
+- 顶栏 / 登录页 / Chat 侧栏显示 **ldm**
+- 自定义 favicon / logo
+- 页面标题：`ldm - 仪表盘`
+
+**防覆盖（官方会自动下官方面板，这里关掉）**
+- 禁用启动时自动下载 WebUI
+- 禁用更新流程覆盖 `data/dist`
+- 禁用 `/dashboard_update` 拉官方包
+- 禁用 WebUI 触发的 pip 更新
+- 禁用核心源码自动更新
+
+**交互与配置**
+- 去掉首次登录强制改密 / 自动弹改密框
+- 侧栏顺序按自用频率调整（插件、控制台、模型、配置更靠前）
+- 控制台日志高饱和配色（后端 ANSI + 前端 CSS 同步）
+- 统一「对话模型链」：主模型 + 回退模型拖拽排序
+
+**部署约定（和官方不一样，务必记住）**
 
 ```bash
-git clone https://github.com/landamao/ldm_AstrBot.git
-cd ldm_AstrBot
+cd ~/AstrBot/dashboard
+pnpm build
+cp -r dist/* ../data/dist/
+# 必须保留 version，否则官方逻辑可能判定异常
+echo -n "v4.26.5" > ../data/dist/assets/version
+```
+
+实际服务目录是 **`data/dist/`**，不是 `dashboard/dist/`。
+
+### 5. Agent：发完消息默认不再二次唤醒
+
+官方工具发送消息后，常把结果回灌 LLM，容易多一句。  
+本版 `SendMessageToUser`：
+
+- 默认 `receive_result=false` → 返回 `None` → **Agent 循环结束**
+- 需要继续对话时再显式 `receive_result=true`
+
+### 6. 模型提供商兼容
+
+针对部分上游「`stream=false` 空响应 / 强行返回 stream」：
+
+- OpenAI 兼容层自动聚合 stream
+- 可按提供商开启 `force_stream_on_query`
+
+### 7. 内置指令集更贴近旧版/自用习惯
+
+相对官方当前指令集，本版额外保留/强化例如：
+
+- `/llm`（重写）
+- `/plugin` 插件管理组
+- `/persona`、`/t2i`、`/tts`、`/alter_cmd` 等
+- `/help` 旧版列表风格
+
+---
+
+## 快速启动
+
+```bash
+cd ~/AstrBot
 uv sync
 uv run main.py
 ```
 
-### 方式三：venv + pip
+修改后端或 WebUI 后请**手动重启**（本项目约定不自动重启服务）。
 
-```bash
-git clone https://github.com/landamao/ldm_AstrBot.git
-cd ldm_AstrBot
-python3.12 -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -U pip
-pip install -r requirements.txt
-pip install -e .
-python main.py
-```
+---
 
-默认会启动 API / WebUI（常见端口以实际日志为准，AstrBot 默认可为 `6185`）。
+## 自用约定
 
-重置面板密码示例：
+1. **不自动更新覆盖** — 核心、WebUI、pip 默认都锁死  
+2. **WebUI 只认 `data/dist`** — 构建后必须部署并保留 `assets/version`  
+3. **迁移** — 优先整目录复制（排除 `.venv` / `node_modules` / 缓存 / 日志）  
+4. **显示名可改，逻辑标识慎改** — 例如不乱改 `AstrBotConfig`、事件名、配置键  
 
-```bash
-python main.py --reset-password
-```
+---
 
-## 代理说明
+## 许可
 
-国内环境若拉取依赖困难，可先设置代理，例如：
+- 上游：https://github.com/AstrBotDevs/AstrBot  
+- 许可证：遵循上游 AGPL v3 等条款（见 `LICENSE` / `EULA.md`）  
+- 本说明描述的是**个人魔改行为**，不是官方分支
 
-```bash
-export http_proxy=http://127.0.0.1:7890
-export https_proxy=http://127.0.0.1:7890
-```
+---
 
-`scripts/install_or_run.sh` 会自动探测本机 `7890` / `7897` 代理端口并询问是否启用。
+## 说明
 
-## 目录结构（简要）
-
-```
-ldm_AstrBot/
-├── main.py                 # 入口
-├── runtime_bootstrap.py
-├── pyproject.toml
-├── requirements.txt
-├── LICENSE                 # AGPL-3.0
-├── astrbot/                # 核心代码
-├── data/
-│   ├── dist/               # 预置 WebUI 静态资源
-│   └── t2i_templates/      # 文生图模板
-└── scripts/
-    ├── install_or_run.sh   # 一键安装/启动
-    └── hatch_build.py
-```
-
-运行后会在数据目录生成配置、插件、数据库等（默认位于项目 `data/` 或用户目录下的数据路径，以版本逻辑为准）。**请勿把含密钥的 `data/config`、`.env` 提交到 Git。**
-
-## 配置与安全
-
-- 首次启动后请立刻修改 Dashboard 密码
-- API Key / Token / Cookie 只放在本地配置或环境变量中
-- 开源仓库不包含任何个人密钥与运行时数据库
-
-## 致谢
-
-- 上游：[AstrBotDevs/AstrBot](https://github.com/AstrBotDevs/AstrBot)
-- 以及 AstrBot 社区插件与贡献者
-
-## 免责声明
-
-本项目按「原样」提供，作者不对使用本软件造成的任何损失负责。请遵守各即时通讯平台与模型服务商的服务条款与当地法律法规。
-
-## 许可证
-
-AGPL-3.0-or-later — 详见 [LICENSE](./LICENSE)。
+本文档对标 **AstrBot 官方上游行为**，列出本机魔改点。  
+若与代码不一致，以 `~/AstrBot` 源码和 `data/dist` 实际部署为准。
