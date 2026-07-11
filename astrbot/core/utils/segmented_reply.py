@@ -11,7 +11,74 @@ import random
 import re
 from typing import Iterable
 
-from astrbot.core.message.components import BaseMessageComponent, Plain
+from astrbot.core.message.components import BaseMessageComponent, Plain, Reply
+
+
+class SegmentedReplySessionTracker:
+    """Track recent message IDs per conversation for smart reply.
+
+    Inspired by astrbot_plugin_splitter: if newer messages arrived after the
+    source message, prepend a Reply to the first segment.
+    """
+
+    def __init__(self, max_len: int = 200) -> None:
+        from collections import defaultdict, deque
+
+        self._queues: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=max_len))
+        self._last_bot_mark: dict[str, str] = {}
+
+    def remember_incoming(self, conversation_key: str, message_id: str | None) -> None:
+        if not conversation_key or not message_id:
+            return
+        self._queues[conversation_key].append(str(message_id))
+
+    def mark_bot_reply(self, conversation_key: str, base_message_id: str | None) -> None:
+        if not conversation_key or not base_message_id:
+            return
+        mark = f"__bot_reply__{base_message_id}"
+        if self._last_bot_mark.get(conversation_key) == mark:
+            return
+        self._queues[conversation_key].append(mark)
+        self._last_bot_mark[conversation_key] = mark
+
+    def should_add_smart_reply(
+        self,
+        conversation_key: str,
+        message_id: str | None,
+        *,
+        platform_name: str = "",
+    ) -> bool:
+        if not conversation_key or not message_id:
+            return False
+        if str(platform_name or "").lower() == "dingtalk":
+            return False
+        queue = list(self._queues.get(conversation_key) or [])
+        msg_id = str(message_id)
+        if msg_id not in queue:
+            return False
+        idx = queue.index(msg_id)
+        return (len(queue) - idx - 1) > 0
+
+
+_SESSION_TRACKER = SegmentedReplySessionTracker()
+
+
+def get_segmented_reply_session_tracker() -> SegmentedReplySessionTracker:
+    return _SESSION_TRACKER
+
+
+def has_reply_component(chain: list[BaseMessageComponent]) -> bool:
+    return any(isinstance(c, Reply) for c in chain)
+
+
+def prepend_reply(chain: list[BaseMessageComponent], message_id: str | None) -> None:
+    if message_id and not has_reply_component(chain):
+        chain.insert(0, Reply(id=str(message_id)))
+
+
+def strip_reply_components(chain: list[BaseMessageComponent]) -> list[BaseMessageComponent]:
+    return [c for c in chain if not isinstance(c, Reply)]
+
 
 
 # Paired openers -> closers. Avoid cutting inside matched pairs when smart split is on.
@@ -436,8 +503,12 @@ class SegmentedReplySplitter:
         return segments
 
 
-def apply_send_speed(cfg: dict, speed: str) -> None:
-    """Map user-facing send_speed to interval fields in-place."""
+def apply_send_speed(cfg: dict, speed: str, *, template: dict | None = None) -> None:
+    """Map user-facing send_speed to interval fields in-place.
+
+    When speed is natural, linear_base/linear_factor come from template defaults
+    (not leftover pro values), unless template is None (then keep cfg values).
+    """
     speed = (speed or "natural").strip().lower()
     # Chinese aliases
     speed_map = {
@@ -449,6 +520,7 @@ def apply_send_speed(cfg: dict, speed: str) -> None:
         "slow": "slow",
     }
     speed = speed_map.get(speed, "natural")
+    tpl = template or {}
     if speed == "fast":
         cfg["interval_method"] = "fixed"
         cfg["fixed_delay"] = 0.3
@@ -457,17 +529,108 @@ def apply_send_speed(cfg: dict, speed: str) -> None:
         cfg["fixed_delay"] = 2.5
     else:
         cfg["interval_method"] = "linear"
-        cfg["linear_base"] = float(cfg.get("linear_base", 0.5) or 0.5)
-        cfg["linear_factor"] = float(cfg.get("linear_factor", 0.08) or 0.08)
+        cfg["linear_base"] = float(
+            tpl.get("linear_base", cfg.get("linear_base", 0.5)) or 0.5
+        )
+        cfg["linear_factor"] = float(
+            tpl.get("linear_factor", cfg.get("linear_factor", 0.08)) or 0.08
+        )
+
+
+# Keys editable in each WebUI mode (must stay aligned with CONFIG_METADATA_3).
+# Keys not listed for the current mode are forced to DEFAULT_CONFIG template values
+# so leftovers from advanced/pro never leak into simpler modes.
+_SEGMENTED_REPLY_MODE_EDITABLE: dict[str, frozenset[str]] = {
+    "simple": frozenset(
+        {
+            "enable",
+            "config_mode",
+            "max_segments",
+            "send_speed",
+            "clean_before_items",
+            "words_count_threshold",
+        }
+    ),
+    "advanced": frozenset(
+        {
+            "enable",
+            "config_mode",
+            "max_segments",
+            "send_speed",
+            "clean_before_items",
+            "words_count_threshold",
+            "enable_smart_reply",
+            "enable_keep_reply",
+            "only_llm_result",
+            "split_words",
+            "no_split_around",
+            "balanced_split",
+            "clean_after_items",
+        }
+    ),
+    # pro: all keys from raw + template; no forced hide
+    "pro": frozenset(),
+}
+
+
+def _segmented_reply_template() -> dict:
+    """Template defaults for segmented_reply (DEFAULT_CONFIG)."""
+    try:
+        from astrbot.core.config.default import DEFAULT_CONFIG
+
+        tpl = dict(
+            DEFAULT_CONFIG.get("platform_settings", {}).get("segmented_reply", {})
+            or {}
+        )
+        if tpl:
+            return tpl
+    except Exception:
+        pass
+    # Fallback if import fails (should not happen in normal runtime)
+    return {
+        "enable": False,
+        "config_mode": "simple",
+        "only_llm_result": True,
+        "send_speed": "natural",
+        "interval_method": "linear",
+        "interval": "1.5,3.5",
+        "log_base": 2.6,
+        "linear_base": 0.5,
+        "linear_factor": 0.08,
+        "fixed_delay": 1.5,
+        "words_count_threshold": 0,
+        "max_length_to_disable": 0,
+        "min_length_to_split": 0,
+        "split_mode": "chars",
+        "regex": r"[。？！?!…\n]+",
+        "split_words": ["。", "？", "！", "?", "!", "；", ";", "\n", "…"],
+        "content_cleanup_rule": "",
+        "clean_before_items": [],
+        "clean_after_items": [],
+        "enable_smart_split": True,
+        "balanced_split": True,
+        "max_segments": 5,
+        "min_segment_length": 10,
+        "balanced_ratio_min": 0.4,
+        "balanced_ratio_max": 0.9,
+        "no_split_around": [],
+        "trim_edge_blank_lines": True,
+        "enable_smart_reply": True,
+        "enable_keep_reply": True,
+    }
 
 
 def resolve_segmented_reply_config(raw: dict | None) -> dict:
     """Resolve effective segmented-reply settings by config_mode.
 
     Modes:
-        - simple: few knobs, smart defaults
-        - advanced: list-based split/cleanup without regex
-        - pro: full control
+        - simple: few knobs; hidden fields always use template defaults
+        - advanced: list-based split/cleanup; pro-only leftovers reset to template
+        - pro: full control (user values kept)
+
+    For simple/advanced, any key not shown in the current WebUI mode is taken
+    from DEFAULT_CONFIG.platform_settings.segmented_reply, never from leftover
+    advanced/pro values stored in the same dict.
 
     Args:
         raw: platform_settings.segmented_reply dict.
@@ -476,7 +639,9 @@ def resolve_segmented_reply_config(raw: dict | None) -> dict:
         Normalized config dict for splitter/delay.
     """
     raw = dict(raw or {})
-    mode = str(raw.get("config_mode", "simple") or "simple").strip().lower()
+    template = _segmented_reply_template()
+    mode = str(raw.get("config_mode", template.get("config_mode", "simple")) or "simple")
+    mode = mode.strip().lower()
     mode_map = {
         "简易": "simple",
         "简易模式": "simple",
@@ -491,76 +656,142 @@ def resolve_segmented_reply_config(raw: dict | None) -> dict:
     }
     mode = mode_map.get(mode, "simple")
 
-    default_chars = ["。", "？", "！", "?", "!", "；", ";", "\n", "…"]
+    editable = _SEGMENTED_REPLY_MODE_EDITABLE.get(mode, frozenset())
+
+    def pick(key: str, *, cast=None, default=None):
+        """Read raw only if key is editable in this mode; else template."""
+        if mode == "pro" or key in editable:
+            if key in raw:
+                val = raw[key]
+            elif default is not None:
+                val = default
+            else:
+                val = template.get(key)
+        else:
+            val = template.get(key) if default is None else template.get(key, default)
+            if val is None and default is not None:
+                val = default
+        if cast is bool:
+            return bool(val)
+        if cast is int:
+            try:
+                return int(val or 0)
+            except (TypeError, ValueError):
+                return int(default or 0)
+        if cast is float:
+            try:
+                return float(val if val is not None else (default or 0.0))
+            except (TypeError, ValueError):
+                return float(default or 0.0)
+        if cast is list:
+            return list(val or [])
+        if cast is str:
+            if val is None:
+                return str(default or "")
+            return str(val)
+        return val
+
+    default_chars = list(
+        template.get("split_words")
+        or ["。", "？", "！", "?", "!", "；", ";", "\n", "…"]
+    )
+
     out = {
-        "enable": bool(raw.get("enable", False)),
-        "only_llm_result": bool(raw.get("only_llm_result", True)),
+        "enable": pick("enable", cast=bool, default=False),
+        "only_llm_result": pick("only_llm_result", cast=bool, default=True),
         "config_mode": mode,
-        "interval_method": str(raw.get("interval_method", "linear") or "linear"),
-        "interval": str(raw.get("interval", "1.5,3.5") or "1.5,3.5"),
-        "log_base": float(raw.get("log_base", 2.6) or 2.6),
-        "linear_base": float(raw.get("linear_base", 0.5) or 0.5),
-        "linear_factor": float(raw.get("linear_factor", 0.08) or 0.08),
-        "fixed_delay": float(raw.get("fixed_delay", 1.5) or 1.5),
-        "words_count_threshold": int(raw.get("words_count_threshold", 0) or 0),
-        "max_length_to_disable": int(raw.get("max_length_to_disable", 0) or 0),
-        "min_length_to_split": int(raw.get("min_length_to_split", 0) or 0),
-        "split_mode": str(raw.get("split_mode", "chars") or "chars"),
-        "regex": str(raw.get("regex") or r"[。？！?!…\n]+"),
-        "split_words": list(raw.get("split_words") or default_chars),
-        "content_cleanup_rule": str(raw.get("content_cleanup_rule") or ""),
-        "clean_before_items": list(raw.get("clean_before_items") or []),
-        "clean_after_items": list(raw.get("clean_after_items") or []),
-        "enable_smart_split": bool(raw.get("enable_smart_split", True)),
-        "balanced_split": bool(raw.get("balanced_split", True)),
-        "max_segments": int(raw.get("max_segments", 7) or 0),
-        "min_segment_length": int(raw.get("min_segment_length", 10) or 0),
-        "balanced_ratio_min": float(raw.get("balanced_ratio_min", 0.4) or 0.4),
-        "balanced_ratio_max": float(raw.get("balanced_ratio_max", 0.9) or 0.9),
-        "no_split_around": list(raw.get("no_split_around") or []),
-        "trim_edge_blank_lines": bool(raw.get("trim_edge_blank_lines", True)),
-        "send_speed": str(raw.get("send_speed", "natural") or "natural"),
+        "interval_method": pick("interval_method", cast=str, default="linear"),
+        "interval": pick("interval", cast=str, default="1.5,3.5"),
+        "log_base": pick("log_base", cast=float, default=2.6),
+        "linear_base": pick("linear_base", cast=float, default=0.5),
+        "linear_factor": pick("linear_factor", cast=float, default=0.08),
+        "fixed_delay": pick("fixed_delay", cast=float, default=1.5),
+        "words_count_threshold": pick("words_count_threshold", cast=int, default=0),
+        "max_length_to_disable": pick("max_length_to_disable", cast=int, default=0),
+        "min_length_to_split": pick("min_length_to_split", cast=int, default=0),
+        "split_mode": pick("split_mode", cast=str, default="chars"),
+        "regex": pick("regex", cast=str, default=r"[。？！?!…\n]+"),
+        "split_words": pick("split_words", cast=list, default=default_chars)
+        or list(default_chars),
+        "content_cleanup_rule": pick("content_cleanup_rule", cast=str, default=""),
+        "clean_before_items": pick("clean_before_items", cast=list, default=[]),
+        "clean_after_items": pick("clean_after_items", cast=list, default=[]),
+        "enable_smart_split": pick("enable_smart_split", cast=bool, default=True),
+        "balanced_split": pick("balanced_split", cast=bool, default=True),
+        "max_segments": pick(
+            "max_segments",
+            cast=int,
+            default=int(template.get("max_segments", 5) or 5),
+        ),
+        "min_segment_length": pick("min_segment_length", cast=int, default=10),
+        "balanced_ratio_min": pick("balanced_ratio_min", cast=float, default=0.4),
+        "balanced_ratio_max": pick("balanced_ratio_max", cast=float, default=0.9),
+        "no_split_around": pick("no_split_around", cast=list, default=[]),
+        "trim_edge_blank_lines": pick("trim_edge_blank_lines", cast=bool, default=True),
+        "send_speed": pick("send_speed", cast=str, default="natural"),
+        "enable_smart_reply": pick("enable_smart_reply", cast=bool, default=True),
+        "enable_keep_reply": pick("enable_keep_reply", cast=bool, default=True),
     }
 
     if mode == "simple":
+        # Hidden in simple: force template-level smart defaults (already via pick),
+        # plus product rules that are stronger than raw template pollution.
         out["only_llm_result"] = True
         out["split_mode"] = "chars"
         out["split_words"] = list(default_chars)
         out["enable_smart_split"] = True
         out["balanced_split"] = True
-        out["min_segment_length"] = 10
-        out["balanced_ratio_min"] = 0.4
-        out["balanced_ratio_max"] = 0.9
+        out["min_segment_length"] = int(template.get("min_segment_length", 10) or 10)
+        out["balanced_ratio_min"] = float(template.get("balanced_ratio_min", 0.4) or 0.4)
+        out["balanced_ratio_max"] = float(template.get("balanced_ratio_max", 0.9) or 0.9)
         out["no_split_around"] = []
         out["clean_after_items"] = []
         out["content_cleanup_rule"] = ""
         out["trim_edge_blank_lines"] = True
-        out["max_segments"] = int(raw.get("max_segments", 5) or 5)
-        out["clean_before_items"] = list(raw.get("clean_before_items") or [])
-        apply_send_speed(out, out["send_speed"])
+        # simple: both Reply behaviors always on (UI does not expose toggles)
+        out["enable_smart_reply"] = True
+        out["enable_keep_reply"] = True
+        # reset interval leftovers then apply send_speed from template bases
+        out["interval"] = str(template.get("interval", "1.5,3.5") or "1.5,3.5")
+        out["log_base"] = float(template.get("log_base", 2.6) or 2.6)
+        out["linear_base"] = float(template.get("linear_base", 0.5) or 0.5)
+        out["linear_factor"] = float(template.get("linear_factor", 0.08) or 0.08)
+        out["fixed_delay"] = float(template.get("fixed_delay", 1.5) or 1.5)
+        apply_send_speed(out, out["send_speed"], template=template)
+        # max_length_to_disable is not shown; only words_count_threshold is.
+        # Do not keep pro leftover max_length_to_disable.
+        out["max_length_to_disable"] = 0
+        out["min_length_to_split"] = int(template.get("min_length_to_split", 0) or 0)
+        out["regex"] = str(template.get("regex") or r"[。？！?!…\n]+")
     elif mode == "advanced":
+        # Pro-only fields forced to template
         out["split_mode"] = "chars"
         if not out["split_words"]:
             out["split_words"] = list(default_chars)
-        out["enable_smart_split"] = True
-        out["min_segment_length"] = max(out["min_segment_length"], 10)
-        out["content_cleanup_rule"] = ""  # advanced uses list cleanup only
-        out["trim_edge_blank_lines"] = True
-        # send_speed preferred when set; otherwise keep interval_method
-        if raw.get("send_speed"):
-            apply_send_speed(out, out["send_speed"])
-        else:
-            # still allow natural default if interval_method missing-ish
-            if out["interval_method"] not in ("linear", "log", "random", "fixed"):
-                apply_send_speed(out, "natural")
+        out["enable_smart_split"] = bool(template.get("enable_smart_split", True))
+        out["min_segment_length"] = int(template.get("min_segment_length", 10) or 10)
+        out["balanced_ratio_min"] = float(template.get("balanced_ratio_min", 0.4) or 0.4)
+        out["balanced_ratio_max"] = float(template.get("balanced_ratio_max", 0.9) or 0.9)
+        out["content_cleanup_rule"] = ""
+        out["trim_edge_blank_lines"] = bool(template.get("trim_edge_blank_lines", True))
+        out["interval"] = str(template.get("interval", "1.5,3.5") or "1.5,3.5")
+        out["log_base"] = float(template.get("log_base", 2.6) or 2.6)
+        out["linear_base"] = float(template.get("linear_base", 0.5) or 0.5)
+        out["linear_factor"] = float(template.get("linear_factor", 0.08) or 0.08)
+        out["fixed_delay"] = float(template.get("fixed_delay", 1.5) or 1.5)
+        out["regex"] = str(template.get("regex") or r"[。？！?!…\n]+")
+        out["max_length_to_disable"] = 0
+        out["min_length_to_split"] = int(template.get("min_length_to_split", 0) or 0)
+        # send_speed drives delay (pro interval_method must not leak)
+        apply_send_speed(out, out["send_speed"] or "natural", template=template)
     else:
-        # pro: keep as-is; normalize words mode alias
+        # pro: keep user values; normalize words mode alias
         if out["split_mode"] == "words":
             out["split_mode"] = "chars"
         if not out["split_words"]:
             out["split_words"] = list(default_chars)
 
-    # legacy threshold merge
+    # legacy threshold merge: words_count_threshold is the visible key
     if out["words_count_threshold"] > 0 and out["max_length_to_disable"] <= 0:
         out["max_length_to_disable"] = out["words_count_threshold"]
     return out

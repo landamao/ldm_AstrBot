@@ -63,7 +63,7 @@ DEFAULT_CONFIG = {
             "strategy": "stall",  # stall, discard
         },
         "reply_prefix": "",
-        "forward_threshold": 1500,
+        "forward_threshold": 400,
         "enable_id_white_list": True,
         "id_whitelist": [],
         "id_whitelist_log": True,
@@ -116,6 +116,9 @@ DEFAULT_CONFIG = {
             "balanced_ratio_max": 0.9,
             "no_split_around": [],
             "trim_edge_blank_lines": True,
+            # Reply 行为（吸收自分段插件：智能回复 / 保留回复）
+            "enable_smart_reply": True,
+            "enable_keep_reply": True,
         },
         "no_permission_reply": True,
         "empty_mention_waiting": True,
@@ -140,7 +143,7 @@ DEFAULT_CONFIG = {
         "enable": True,
         "default_provider_id": "",
         "fallback_chat_models": [],
-        "request_max_retries": 5,
+        "request_max_retries": 2,
         "default_image_caption_provider_id": "",
         "image_caption_prompt": "Please describe the image using Chinese.",
         "provider_pool": ["*"],  # "*" 表示使用所有可用的提供者
@@ -1142,6 +1145,8 @@ CONFIG_METADATA_2 = {
                                 "items": {"type": "string"},
                             },
                             "trim_edge_blank_lines": {"type": "bool"},
+                            "enable_smart_reply": {"type": "bool"},
+                            "enable_keep_reply": {"type": "bool"},
                         },
                     },
                     "reply_prefix": {
@@ -4220,6 +4225,33 @@ CONFIG_METADATA_3 = {
                             "platform_settings.segmented_reply.config_mode": ["simple", "advanced", "pro"],
                         },
                     },
+                    "platform_settings.segmented_reply.words_count_threshold": {
+                        "description": "超长不分段阈值",
+                        "hint": "文本字数超过该值时整段发送（不分段）。0 表示不限制。",
+                        "type": "int",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": ["simple", "advanced", "pro"],
+                        },
+                    },
+                    "platform_settings.segmented_reply.enable_smart_reply": {
+                        "description": "智能回复",
+                        "type": "bool",
+                        "hint": "发送前检测当前消息后是否已有新消息，有则给第一段加 Reply。简易模式默认开启。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": ["advanced", "pro"],
+                        },
+                    },
+                    "platform_settings.segmented_reply.enable_keep_reply": {
+                        "description": "保留回复",
+                        "type": "bool",
+                        "hint": "保留原有 Reply，并决定最后一段是否继续携带 Reply。简易模式默认开启。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": ["advanced", "pro"],
+                        },
+                    },
                     # ---- 进阶额外 ----
                     "platform_settings.segmented_reply.only_llm_result": {
                         "description": "仅对 LLM 结果分段",
@@ -4325,15 +4357,6 @@ CONFIG_METADATA_3 = {
                             "platform_settings.segmented_reply.enable": True,
                             "platform_settings.segmented_reply.config_mode": "pro",
                             "platform_settings.segmented_reply.interval_method": "fixed",
-                        },
-                    },
-                    "platform_settings.segmented_reply.words_count_threshold": {
-                        "description": "超长不分段阈值",
-                        "hint": "文本字数超过该值时整段发送（不分段）。0 表示不限制。",
-                        "type": "int",
-                        "condition": {
-                            "platform_settings.segmented_reply.enable": True,
-                            "platform_settings.segmented_reply.config_mode": "pro",
                         },
                     },
                     "platform_settings.segmented_reply.enable_smart_split": {

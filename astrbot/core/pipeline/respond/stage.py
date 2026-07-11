@@ -12,6 +12,7 @@ from astrbot.core.star.star_handler import EventType
 from astrbot.core.utils.path_util import path_Mapping
 from astrbot.core.utils.segmented_reply import (
     calculate_segment_delay,
+    get_segmented_reply_session_tracker,
     resolve_segmented_reply_config,
 )
 
@@ -65,17 +66,21 @@ class RespondStage(Stage):
             "reply_with_quote"
         ]
 
-        # 分段回复发送节奏（按配置模式解析）
+        # 分段回复发送节奏（按配置模式解析；不可见项已在 resolve 中回落模板）
         seg_cfg = resolve_segmented_reply_config(
             ctx.astrbot_config["platform_settings"].get("segmented_reply", {}),
         )
         self.enable_seg: bool = bool(seg_cfg.get("enable", False))
+        self.seg_config_mode = str(seg_cfg.get("config_mode", "simple") or "simple")
+        self.seg_send_speed = str(seg_cfg.get("send_speed", "natural") or "natural")
         self.only_llm_result = bool(seg_cfg.get("only_llm_result", True))
         self.interval_method = str(seg_cfg.get("interval_method", "linear") or "linear")
         self.log_base = float(seg_cfg.get("log_base", 2.6) or 2.6)
         self.linear_base = float(seg_cfg.get("linear_base", 0.5) or 0.5)
         self.linear_factor = float(seg_cfg.get("linear_factor", 0.08) or 0.08)
         self.fixed_delay = float(seg_cfg.get("fixed_delay", 1.5) or 1.5)
+        self.enable_smart_reply = bool(seg_cfg.get("enable_smart_reply", True))
+        self.enable_keep_reply = bool(seg_cfg.get("enable_keep_reply", True))
         self.interval = [1.5, 3.5]
         if self.enable_seg:
             interval_str = str(seg_cfg.get("interval", "1.5,3.5") or "1.5,3.5")
@@ -84,15 +89,77 @@ class RespondStage(Stage):
                 self.interval = [float(t) for t in interval_str_ls]
             except BaseException as e:
                 logger.error(f"解析分段回复的间隔时间失败。{e}")
-            logger.info(
-                "分段回复节奏: mode=%s method=%s interval=%s linear=%s+%s*len fixed=%s",
-                seg_cfg.get("config_mode"),
-                self.interval_method,
-                self.interval,
-                self.linear_base,
-                self.linear_factor,
-                self.fixed_delay,
-            )
+            logger.info(self._format_segmented_reply_rhythm_log())
+
+
+    def _format_segmented_reply_rhythm_log(self) -> str:
+        """按当前配置模式只打印实际生效的节奏字段（避免简易/进阶混入专业残留项）。"""
+        mode = str(getattr(self, "seg_config_mode", "simple") or "simple").lower()
+        mode_label = {
+            "simple": "简易",
+            "advanced": "进阶",
+            "pro": "专业",
+        }.get(mode, mode)
+        speed = str(getattr(self, "seg_send_speed", "natural") or "natural").lower()
+        speed_label = {
+            "natural": "自然",
+            "fast": "快速",
+            "slow": "慢速",
+            "自然": "自然",
+            "快速": "快速",
+            "慢速": "慢速",
+        }.get(speed, speed)
+        method = str(self.interval_method or "linear").lower()
+        method_label = {
+            "linear": "线性",
+            "log": "对数",
+            "random": "随机",
+            "fixed": "固定",
+        }.get(method, method)
+        on_off = lambda v: "开" if v else "关"
+
+        # 简易/进阶：用户侧只有「发送节奏」；内部映射后的实际延迟只打印生效那一项
+        if mode in ("simple", "advanced"):
+            if method == "fixed":
+                delay_desc = f"固定延迟: {self.fixed_delay}s"
+            elif method == "linear":
+                delay_desc = f"线性: {self.linear_base}+{self.linear_factor}*字数"
+            elif method == "log":
+                delay_desc = f"对数底: {self.log_base}"
+            elif method == "random":
+                delay_desc = f"随机间隔: {self.interval}"
+            else:
+                delay_desc = f"间隔策略: {method_label}"
+            parts = [
+                f"模式: {mode_label}",
+                f"发送节奏: {speed_label}",
+                delay_desc,
+                f"智能回复: {on_off(self.enable_smart_reply)}",
+                f"保留回复: {on_off(self.enable_keep_reply)}",
+            ]
+            if mode == "advanced":
+                parts.insert(3, f"仅LLM分段: {on_off(self.only_llm_result)}")
+            return "分段回复节奏: " + " ".join(parts)
+
+        # 专业：打印专业模式实际使用的间隔字段
+        if method == "linear":
+            delay_desc = f"线性: {self.linear_base}+{self.linear_factor}*字数"
+        elif method == "log":
+            delay_desc = f"对数底: {self.log_base}"
+        elif method == "random":
+            delay_desc = f"随机间隔: {self.interval}"
+        elif method == "fixed":
+            delay_desc = f"固定延迟: {self.fixed_delay}s"
+        else:
+            delay_desc = f"间隔: {method_label}"
+        return (
+            "分段回复节奏: "
+            f"模式: {mode_label} "
+            f"间隔策略: {method_label} "
+            f"{delay_desc} "
+            f"智能回复: {on_off(self.enable_smart_reply)} "
+            f"保留回复: {on_off(self.enable_keep_reply)}"
+        )
 
     async def _word_cnt(self, text: str) -> int:
         """分段回复 统计字数"""
@@ -305,17 +372,47 @@ class RespondStage(Stage):
             # Record 需要强制单独发送
             need_separately = {ComponentType.Record}
             if self.is_seg_reply_required(event):
+                # Preserve At; Reply handling follows enable_keep_reply / enable_smart_reply.
                 header_comps = self._extract_comp(
                     result.chain,
                     {ComponentType.Reply, ComponentType.At},
                     modify_raw_chain=True,
                 )
+                at_headers = [c for c in header_comps if c.type == ComponentType.At]
+                reply_headers = [c for c in header_comps if c.type == ComponentType.Reply]
+                if not self.enable_keep_reply:
+                    reply_headers = []
                 if not result.chain or len(result.chain) == 0:
                     # may fix #2670
                     logger.warning(
                         f"实际消息链为空, 跳过发送阶段。header_chain: {header_comps}, actual_chain: {result.chain}",
                     )
                     return
+
+                source_id = str(
+                    getattr(getattr(event, "message_obj", None), "message_id", "") or ""
+                )
+                tracker = get_segmented_reply_session_tracker()
+                first_reply_chain: list[BaseMessageComponent] = list(reply_headers)
+                if self.enable_smart_reply and source_id:
+                    if tracker.should_add_smart_reply(
+                        str(getattr(event, "unified_msg_origin", "") or ""),
+                        source_id,
+                        platform_name=str(event.get_platform_name() or ""),
+                    ):
+                        if not any(isinstance(c, Comp.Reply) for c in first_reply_chain):
+                            first_reply_chain.insert(0, Comp.Reply(id=source_id))
+                            logger.info("智能回复：检测到插话，第一段附加 Reply")
+                if self.enable_keep_reply and source_id and not first_reply_chain:
+                    # keep-reply: ensure there is a Reply even if platform quote is off
+                    first_reply_chain = [Comp.Reply(id=source_id)]
+                # last segment Reply set (keep-reply only)
+                last_reply_chain: list[BaseMessageComponent] = (
+                    list(reply_headers)
+                    if reply_headers
+                    else (list(first_reply_chain) if self.enable_keep_reply else [])
+                )
+
                 comps = list(result.chain)
                 for idx, comp in enumerate(comps):
                     if self._should_stop_sending(event):
@@ -340,8 +437,17 @@ class RespondStage(Stage):
                         if comp.type in need_separately:
                             await event.send(result.derive([comp]))
                         else:
-                            await event.send(result.derive([*header_comps, comp]))
-                            header_comps.clear()
+                            # Reply 策略（对齐分段插件）：
+                            # - 第一段：智能回复命中 / 保留回复时带 Reply + At
+                            # - 中间段：不带 Reply
+                            # - 最后一段：仅「保留回复」开启时继续带原 Reply
+                            if idx == 0:
+                                prefix = [*first_reply_chain, *at_headers]
+                            elif self.enable_keep_reply and idx == len(comps) - 1:
+                                prefix = list(last_reply_chain)
+                            else:
+                                prefix = []
+                            await event.send(result.derive([*prefix, comp]))
                         if result.is_model_result():
                             self._record_delivered_llm_plain(event, comp)
                         logger.info(
@@ -355,6 +461,11 @@ class RespondStage(Stage):
                             f"发送消息链失败: chain = {MessageChain([comp])}, error = {e}",
                             exc_info=True,
                         )
+                if self.enable_smart_reply and source_id:
+                    tracker.mark_bot_reply(
+                        str(getattr(event, "unified_msg_origin", "") or ""),
+                        source_id,
+                    )
             else:
                 if all(
                     comp.type in {ComponentType.Reply, ComponentType.At}

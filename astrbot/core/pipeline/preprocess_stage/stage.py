@@ -15,6 +15,7 @@ from astrbot.core.utils.media_utils import (
     file_uri_to_path,
     is_file_uri,
 )
+from astrbot.core.utils.segmented_reply import get_segmented_reply_session_tracker
 
 from ..context import PipelineContext
 from ..stage import Stage, register_stage
@@ -52,6 +53,24 @@ class PreProcessStage(Stage):
         event: AstrMessageEvent,
     ) -> None | AsyncGenerator[None, None]:
         """在处理事件之前的预处理"""
+        # Track inbound message IDs for segmented smart-reply.
+        try:
+            self_id = None
+            sender_id = None
+            try:
+                self_id = event.get_self_id()
+                sender_id = event.get_sender_id()
+            except Exception:
+                pass
+            if not (self_id is not None and sender_id is not None and str(sender_id) == str(self_id)):
+                msg_id = getattr(getattr(event, "message_obj", None), "message_id", None)
+                get_segmented_reply_session_tracker().remember_incoming(
+                    str(getattr(event, "unified_msg_origin", "") or ""),
+                    str(msg_id) if msg_id else None,
+                )
+        except Exception:
+            logger.debug("分段智能回复：记录入站消息失败", exc_info=True)
+
         # 平台特异配置：platform_specific.<platform>.pre_ack_emoji
         supported = {"telegram", "lark", "discord"}
         platform = event.get_platform_name()
