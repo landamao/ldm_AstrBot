@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "display_name": "AstrBot",
-    "desc": "AstrBot's internal plugin, providing some basic capabilities."
+    "display_name": "ldm",
+    "desc": "ldm's internal plugin, providing some basic capabilities."
   }
 }

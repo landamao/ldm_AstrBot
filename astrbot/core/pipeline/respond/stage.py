@@ -10,6 +10,10 @@ from astrbot.core.message.message_event_result import MessageChain, ResultConten
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.star.star_handler import EventType
 from astrbot.core.utils.path_util import path_Mapping
+from astrbot.core.utils.segmented_reply import (
+    calculate_segment_delay,
+    resolve_segmented_reply_config,
+)
 
 from ..context import PipelineContext, call_event_hook
 from ..stage import Stage, register_stage
@@ -61,31 +65,34 @@ class RespondStage(Stage):
             "reply_with_quote"
         ]
 
-        # 分段回复
-        self.enable_seg: bool = ctx.astrbot_config["platform_settings"][
-            "segmented_reply"
-        ]["enable"]
-        self.only_llm_result = ctx.astrbot_config["platform_settings"][
-            "segmented_reply"
-        ]["only_llm_result"]
-
-        self.interval_method = ctx.astrbot_config["platform_settings"][
-            "segmented_reply"
-        ]["interval_method"]
-        self.log_base = float(
-            ctx.astrbot_config["platform_settings"]["segmented_reply"]["log_base"],
+        # 分段回复发送节奏（按配置模式解析）
+        seg_cfg = resolve_segmented_reply_config(
+            ctx.astrbot_config["platform_settings"].get("segmented_reply", {}),
         )
+        self.enable_seg: bool = bool(seg_cfg.get("enable", False))
+        self.only_llm_result = bool(seg_cfg.get("only_llm_result", True))
+        self.interval_method = str(seg_cfg.get("interval_method", "linear") or "linear")
+        self.log_base = float(seg_cfg.get("log_base", 2.6) or 2.6)
+        self.linear_base = float(seg_cfg.get("linear_base", 0.5) or 0.5)
+        self.linear_factor = float(seg_cfg.get("linear_factor", 0.08) or 0.08)
+        self.fixed_delay = float(seg_cfg.get("fixed_delay", 1.5) or 1.5)
         self.interval = [1.5, 3.5]
         if self.enable_seg:
-            interval_str: str = ctx.astrbot_config["platform_settings"][
-                "segmented_reply"
-            ]["interval"]
+            interval_str = str(seg_cfg.get("interval", "1.5,3.5") or "1.5,3.5")
             interval_str_ls = interval_str.replace(" ", "").split(",")
             try:
                 self.interval = [float(t) for t in interval_str_ls]
             except BaseException as e:
                 logger.error(f"解析分段回复的间隔时间失败。{e}")
-            logger.info(f"分段回复间隔时间：{self.interval}")
+            logger.info(
+                "分段回复节奏: mode=%s method=%s interval=%s linear=%s+%s*len fixed=%s",
+                seg_cfg.get("config_mode"),
+                self.interval_method,
+                self.interval,
+                self.linear_base,
+                self.linear_factor,
+                self.fixed_delay,
+            )
 
     async def _word_cnt(self, text: str) -> int:
         """分段回复 统计字数"""
@@ -96,15 +103,19 @@ class RespondStage(Stage):
         return word_count
 
     async def _calc_comp_interval(self, comp: BaseMessageComponent) -> float:
-        """分段回复 计算间隔时间"""
-        if self.interval_method == "log":
-            if isinstance(comp, Comp.Plain):
-                wc = await self._word_cnt(comp.text)
-                i = math.log(wc + 1, self.log_base)
-                return random.uniform(i, i + 0.5)
-            return random.uniform(1, 1.75)
-        # random
-        return random.uniform(self.interval[0], self.interval[1])
+        """分段回复：基于「即将发送」内容计算等待时间。"""
+        text = ""
+        if isinstance(comp, Comp.Plain):
+            text = comp.text or ""
+        return calculate_segment_delay(
+            text,
+            method=self.interval_method,
+            interval=(self.interval[0], self.interval[-1]),
+            log_base=self.log_base,
+            linear_base=self.linear_base,
+            linear_factor=self.linear_factor,
+            fixed_delay=self.fixed_delay,
+        )
 
     async def _is_empty_message_chain(self, chain: list[BaseMessageComponent]) -> bool:
         """检查消息链是否为空
@@ -166,12 +177,49 @@ class RespondStage(Stage):
 
         return extracted
 
+
+    def _record_delivered_llm_plain(self, event: AstrMessageEvent, chain_or_comp) -> None:
+        """累计 LLM 回复实际已发送的纯文本，供打断后裁剪历史。"""
+        try:
+            plain = ""
+            if hasattr(chain_or_comp, "get_plain_text"):
+                plain = (chain_or_comp.get_plain_text() or "").strip()
+            elif isinstance(chain_or_comp, Comp.Plain):
+                plain = (chain_or_comp.text or "").strip()
+            elif isinstance(chain_or_comp, list):
+                plain = "".join(
+                    (c.text or "") for c in chain_or_comp if isinstance(c, Comp.Plain)
+                ).strip()
+            if not plain:
+                return
+            prev = event.get_extra("_delivered_llm_plain_text", "") or ""
+            event.set_extra(
+                "_delivered_llm_plain_text",
+                f"{prev}\n{plain}" if prev else plain,
+            )
+        except Exception:
+            logger.debug("记录已发送 LLM 文本失败", exc_info=True)
+
+    def _should_stop_sending(self, event: AstrMessageEvent) -> bool:
+        """打断回复：发送阶段应立即停止后续分段/流式输出。"""
+        if event.is_stopped():
+            return True
+        if event.get_extra("agent_stop_requested"):
+            return True
+        if event.get_extra("agent_user_aborted"):
+            return True
+        return False
+
     async def process(
         self,
         event: AstrMessageEvent,
     ) -> None | AsyncGenerator[None, None]:
         result = event.get_result()
         if result is None:
+            return
+        if self._should_stop_sending(event):
+            logger.info("检测到打断信号，跳过发送阶段。")
+            event.clear_result()
             return
         if event.get_extra("_streaming_finished", False):
             # prevent some plugin make result content type to LLM_RESULT after streaming finished, lead to send again
@@ -220,6 +268,10 @@ class RespondStage(Stage):
                 == "realtime_segmenting"
             )
             logger.info(f"应用流式输出({event.get_platform_id()})")
+            if self._should_stop_sending(event):
+                logger.info("检测到打断信号，跳过流式发送。")
+                event.clear_result()
+                return
             await event.send_streaming(result.async_stream, realtime_segmenting)
             return
         if len(result.chain) > 0:
@@ -264,15 +316,40 @@ class RespondStage(Stage):
                         f"实际消息链为空, 跳过发送阶段。header_chain: {header_comps}, actual_chain: {result.chain}",
                     )
                     return
-                for comp in result.chain:
-                    i = await self._calc_comp_interval(comp)
-                    await asyncio.sleep(i)
+                comps = list(result.chain)
+                for idx, comp in enumerate(comps):
+                    if self._should_stop_sending(event):
+                        logger.info("分段发送过程中检测到打断信号，停止后续分段。")
+                        break
+                    # 第一段立即发；后续段按「本段」字数延迟，模拟打字
+                    if idx > 0:
+                        delay = await self._calc_comp_interval(comp)
+                        slept = 0.0
+                        while slept < delay:
+                            if self._should_stop_sending(event):
+                                logger.info("分段等待期间检测到打断信号，停止后续分段。")
+                                break
+                            step = min(0.1, delay - slept)
+                            await asyncio.sleep(step)
+                            slept += step
+                        else:
+                            pass
+                        if self._should_stop_sending(event):
+                            break
                     try:
                         if comp.type in need_separately:
                             await event.send(result.derive([comp]))
                         else:
                             await event.send(result.derive([*header_comps, comp]))
                             header_comps.clear()
+                        if result.is_model_result():
+                            self._record_delivered_llm_plain(event, comp)
+                        logger.info(
+                            "分段发送 %s/%s: %s",
+                            idx + 1,
+                            len(comps),
+                            event._outline_chain([comp]),
+                        )
                     except Exception as e:
                         logger.error(
                             f"发送消息链失败: chain = {MessageChain([comp])}, error = {e}",
@@ -306,6 +383,8 @@ class RespondStage(Stage):
                 if result.chain and len(result.chain) > 0:
                     try:
                         await event.send(chain)
+                        if result.is_model_result():
+                            self._record_delivered_llm_plain(event, chain)
                     except Exception as e:
                         logger.error(
                             f"发送消息链失败: chain = {chain}, error = {e}",

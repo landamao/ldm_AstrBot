@@ -278,6 +278,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self.run_context = run_context
         self._aborted = False
         self._abort_signal = asyncio.Event()
+        self._streamed_assistant_text = ""
         self._pending_follow_ups: list[FollowUpTicket] = []
         self._follow_up_seq = 0
         self._last_tool_name: str | None = None
@@ -748,11 +749,18 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                         ),
                     )
                 if llm_response.result_chain:
+                    try:
+                        plain = llm_response.result_chain.get_plain_text() or ""
+                    except Exception:
+                        plain = ""
+                    if plain:
+                        self._streamed_assistant_text += plain
                     yield AgentResponse(
                         type="streaming_delta",
                         data=AgentResponseData(chain=llm_response.result_chain),
                     )
                 elif llm_response.completion_text:
+                    self._streamed_assistant_text += llm_response.completion_text
                     yield AgentResponse(
                         type="streaming_delta",
                         data=AgentResponseData(
@@ -760,9 +768,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                         ),
                     )
                 if self._is_stop_requested():
+                    # 仅保留已向下游产出的文本，不写入“未发出”的完整回复或系统打断占位
                     llm_resp_result = LLMResponse(
                         role="assistant",
-                        completion_text=self.USER_INTERRUPTION_MESSAGE,
+                        completion_text=self._streamed_assistant_text,
                         reasoning_content=llm_response.reasoning_content,
                         reasoning_signature=llm_response.reasoning_signature,
                     )
@@ -1382,29 +1391,54 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self,
         llm_resp: LLMResponse | None = None,
     ) -> AgentResponse:
+        """结束被打断的一步。
+
+        历史只保留已向用户/下游产出的内容：
+        - 流式：已 yield 的 streaming_delta 文本
+        - 非流式：若完整回复尚未交付给下游，则不写入 assistant 正文
+        - 不把系统打断占位语写入对话历史
+        """
         logger.info("Agent execution was requested to stop by user.")
+        delivered = (getattr(self, "_streamed_assistant_text", "") or "").strip()
         if llm_resp is None:
-            llm_resp = LLMResponse(role="assistant", completion_text="")
-        if llm_resp.role != "assistant":
-            llm_resp = LLMResponse(
-                role="assistant",
-                completion_text=self.USER_INTERRUPTION_MESSAGE,
-            )
+            llm_resp = LLMResponse(role="assistant", completion_text=delivered)
+        elif llm_resp.role != "assistant":
+            llm_resp = LLMResponse(role="assistant", completion_text=delivered)
+        else:
+            # 避免把未发出的完整生成写入历史；流式以已产出文本为准
+            if self.streaming:
+                llm_resp = LLMResponse(
+                    role="assistant",
+                    completion_text=delivered,
+                    reasoning_content=llm_resp.reasoning_content,
+                    reasoning_signature=llm_resp.reasoning_signature,
+                    tools_call_args=llm_resp.tools_call_args,
+                    tools_call_name=llm_resp.tools_call_name,
+                    tools_call_ids=llm_resp.tools_call_ids,
+                    tools_call_extra_content=llm_resp.tools_call_extra_content,
+                )
+            else:
+                # 非流式：中断时通常尚未 set_result/发送，不保留正文
+                llm_resp = LLMResponse(
+                    role="assistant",
+                    completion_text="",
+                    reasoning_content=None,
+                    reasoning_signature=llm_resp.reasoning_signature,
+                    tools_call_args=llm_resp.tools_call_args,
+                    tools_call_name=llm_resp.tools_call_name,
+                    tools_call_ids=llm_resp.tools_call_ids,
+                    tools_call_extra_content=llm_resp.tools_call_extra_content,
+                )
+
         self.final_llm_resp = llm_resp
         self._aborted = True
         self._transition_state(AgentState.DONE)
         self.stats.end_time = time.time()
 
+        # 仅当确有已交付正文时才追加 assistant；工具调用中断场景若已有 tool 相关上下文由既有消息承担
         parts = []
-        if llm_resp.reasoning_content is not None or llm_resp.reasoning_signature:
-            parts.append(
-                ThinkPart(
-                    think=llm_resp.reasoning_content or "",
-                    encrypted=llm_resp.reasoning_signature,
-                )
-            )
-        if llm_resp.completion_text:
-            parts.append(TextPart(text=llm_resp.completion_text))
+        if delivered:
+            parts.append(TextPart(text=delivered))
         if parts:
             self.run_context.messages.append(Message(role="assistant", content=parts))
 

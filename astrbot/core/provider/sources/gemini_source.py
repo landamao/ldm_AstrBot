@@ -17,7 +17,7 @@ from astrbot.api.provider import Provider
 from astrbot.core.agent.message import AudioURLPart, ContentPart, ImageURLPart, TextPart
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.provider.entities import LLMResponse, TokenUsage
+from astrbot.core.provider.entities import LLMResponse, TokenUsage, log_llm_response
 from astrbot.core.provider.func_tool_manager import ToolSet
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
@@ -586,6 +586,7 @@ class ProviderGoogleGenAI(Provider):
         request_max_retries: int | None = None,
     ) -> LLMResponse:
         """非流式请求 Gemini API"""
+        t0 = time.perf_counter()
         system_instruction = next(
             (msg["content"] for msg in payloads["messages"] if msg["role"] == "system"),
             None,
@@ -677,6 +678,7 @@ class ProviderGoogleGenAI(Provider):
         llm_response.id = result.response_id
         if result.usage_metadata:
             llm_response.usage = self._extract_usage(result.usage_metadata)
+        log_llm_response(llm_response, elapsed_s=time.perf_counter() - t0)
         return llm_response
 
     async def _query_stream(
@@ -687,6 +689,7 @@ class ProviderGoogleGenAI(Provider):
         request_max_retries: int | None = None,
     ) -> AsyncGenerator[LLMResponse, None]:
         """流式请求 Gemini API"""
+        t0 = time.perf_counter()
         system_instruction = next(
             (msg["content"] for msg in payloads["messages"] if msg["role"] == "system"),
             None,
@@ -758,6 +761,7 @@ class ProviderGoogleGenAI(Provider):
                 llm_response.id = chunk.response_id
                 if chunk.usage_metadata:
                     llm_response.usage = self._extract_usage(chunk.usage_metadata)
+                log_llm_response(llm_response, elapsed_s=time.perf_counter() - t0)
                 yield llm_response
                 return
 
@@ -811,6 +815,7 @@ class ProviderGoogleGenAI(Provider):
             finish_reason=None,
         )
 
+        log_llm_response(final_response, elapsed_s=time.perf_counter() - t0)
         yield final_response
 
     async def text_chat(

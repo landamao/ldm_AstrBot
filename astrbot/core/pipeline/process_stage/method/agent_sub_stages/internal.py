@@ -10,6 +10,7 @@ from astrbot.core.agent.message import (
     CheckpointData,
     CheckpointMessageSegment,
     Message,
+    TextPart,
     dump_messages_with_checkpoints,
 )
 from astrbot.core.agent.response import AgentStats
@@ -35,6 +36,7 @@ from astrbot.core.provider.entities import (
     ProviderRequest,
 )
 from astrbot.core.star.star_handler import EventType
+from astrbot.core.utils.active_event_registry import active_event_registry
 from astrbot.core.utils.metrics import Metric
 from astrbot.core.utils.session_lock import session_lock_manager
 
@@ -43,6 +45,7 @@ from ....context import PipelineContext, call_event_hook
 from ...follow_up import (
     FollowUpCapture,
     finalize_follow_up_capture,
+    get_active_runner,
     prepare_follow_up_capture,
     register_active_runner,
     try_capture_follow_up,
@@ -159,6 +162,109 @@ class InternalAgentSubStage(Stage):
     ) -> None:
         await event.send(MessageChain().message(str(message)))
 
+    def _get_interrupt_reply_config(self, event: AstrMessageEvent) -> dict:
+        conf = self.ctx.plugin_manager.context.get_config(umo=event.unified_msg_origin)
+        platform_settings = conf.get("platform_settings", {}) if conf else {}
+        interrupt_cfg = platform_settings.get("interrupt_reply", {}) or {}
+        return interrupt_cfg if isinstance(interrupt_cfg, dict) else {}
+
+    def _should_interrupt_reply(
+        self, event: AstrMessageEvent, interrupt_cfg: dict
+    ) -> bool:
+        if not interrupt_cfg.get("enable", False):
+            return False
+        if event.is_private_chat():
+            return bool(interrupt_cfg.get("enable_private", True))
+        return bool(interrupt_cfg.get("enable_group", True))
+
+    async def _maybe_interrupt_active_reply(
+        self,
+        event: AstrMessageEvent,
+        interrupt_cfg: dict,
+    ) -> bool:
+        """若同会话已有活跃 LLM 回复，则按配置打断并等待其收尾。
+
+        Returns:
+            True 表示发生了打断；False 表示无需打断。
+        """
+        umo = event.unified_msg_origin
+        active_runner = get_active_runner(umo)
+        has_other_events = active_event_registry.has_active(umo, exclude=event)
+        if active_runner is None and not has_other_events:
+            return False
+
+        context_text = ""
+        if interrupt_cfg.get("add_to_context", True):
+            context_text = str(
+                interrupt_cfg.get(
+                    "context_text",
+                    "用户发送了新消息并打断了当前回复。"
+                    "请仅基于已实际发送给用户的内容与新消息继续对话。",
+                )
+                or "用户发送了新消息并打断了当前回复。"
+                "请仅基于已实际发送给用户的内容与新消息继续对话。"
+            ).strip()
+
+        # 不向旧任务写 history_note，避免与新请求重复注入
+        stopped_count = active_event_registry.request_agent_stop_all(
+            umo,
+            exclude=event,
+            extra_updates={"agent_user_aborted": True},
+        )
+        logger.info(
+            "打断当前回复: umo=%s, 停止请求数=%s, 有活跃runner=%s",
+            umo,
+            stopped_count,
+            active_runner is not None,
+        )
+
+        if interrupt_cfg.get("notify_user", True):
+            notify_text = str(
+                interrupt_cfg.get(
+                    "notify_text",
+                    "已打断当前回复，开始处理新消息。",
+                )
+                or "已打断当前回复，开始处理新消息。"
+            ).strip()
+            if notify_text:
+                try:
+                    await event.send(MessageChain().message(notify_text))
+                except Exception:
+                    logger.warning("发送打断提示失败", exc_info=True)
+
+        try:
+            wait_timeout = float(interrupt_cfg.get("wait_timeout", 8.0) or 8.0)
+        except (TypeError, ValueError):
+            wait_timeout = 8.0
+        wait_timeout = max(0.0, min(wait_timeout, 60.0))
+
+        idle = await active_event_registry.wait_until_idle(
+            umo,
+            exclude=event,
+            timeout=wait_timeout,
+        )
+        # 再等一小会儿，尽量让旧任务释放 session lock / 写完历史
+        remaining = wait_timeout if not idle else min(1.0, wait_timeout)
+        if remaining > 0:
+            deadline = asyncio.get_running_loop().time() + remaining
+            while get_active_runner(umo) is not None:
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(0.1)
+
+        timed_out = (not idle) or (get_active_runner(umo) is not None)
+        if timed_out:
+            logger.warning(
+                "打断后等待旧任务结束超时: umo=%s, timeout=%s",
+                umo,
+                wait_timeout,
+            )
+            # 旧历史可能尚未写入打断提示，临时 system_reminder 兜底
+            if context_text:
+                event.set_extra("interrupt_reply_context_hint", context_text)
+        # 正常收尾时：打断提示已写入旧 assistant 消息历史，不再临时注入以免重复
+        return True
+
     async def process(
         self, event: AstrMessageEvent, provider_wake_prefix: str
     ) -> AsyncGenerator[None, None]:
@@ -191,7 +297,17 @@ class InternalAgentSubStage(Stage):
                 return
 
             logger.debug("ready to request llm provider")
-            follow_up_capture = try_capture_follow_up(event)
+            interrupt_cfg = self._get_interrupt_reply_config(event)
+            interrupted = False
+            if self._should_interrupt_reply(event, interrupt_cfg):
+                interrupted = await self._maybe_interrupt_active_reply(
+                    event,
+                    interrupt_cfg,
+                )
+
+            follow_up_capture = None
+            if not interrupted:
+                follow_up_capture = try_capture_follow_up(event)
             if follow_up_capture:
                 (
                     follow_up_consumed_marked,
@@ -262,6 +378,20 @@ class InternalAgentSubStage(Stage):
                         and not event.platform_meta.support_streaming_message
                     )
 
+                    # 仿 system_reminder：作为 extra_user_content_parts 注入，不污染 prompt，且 _no_save 不落库重复
+                    context_hint = event.get_extra("interrupt_reply_context_hint")
+                    if isinstance(context_hint, str) and context_hint.strip():
+                        hint = context_hint.strip()
+                        # 若配置已含标签则不再包一层
+                        if "<system_reminder>" in hint:
+                            reminder = hint
+                        else:
+                            reminder = f"<system_reminder>{hint}</system_reminder>"
+                        req.extra_user_content_parts.append(
+                            TextPart(text=reminder).mark_as_temp()
+                        )
+                        event.set_extra("interrupt_reply_context_hint", None)
+
                     if await call_event_hook(event, EventType.OnLLMRequestEvent, req):
                         if reset_coro:
                             reset_coro.close()
@@ -331,7 +461,12 @@ class InternalAgentSubStage(Stage):
                                 agent_runner.get_final_llm_resp(),
                                 agent_runner.run_context.messages,
                                 agent_runner.stats,
-                                user_aborted=agent_runner.was_aborted(),
+                                user_aborted=(
+                                    agent_runner.was_aborted()
+                                    or bool(event.get_extra("agent_stop_requested"))
+                                    or bool(event.get_extra("agent_user_aborted"))
+                                ),
+                                runner_aborted=agent_runner.was_aborted(),
                             )
 
                     elif streaming_response and not stream_to_general:
@@ -406,7 +541,12 @@ class InternalAgentSubStage(Stage):
                             final_resp,
                             agent_runner.run_context.messages,
                             agent_runner.stats,
-                            user_aborted=agent_runner.was_aborted(),
+                            user_aborted=(
+                                agent_runner.was_aborted()
+                                or bool(event.get_extra("agent_stop_requested"))
+                                or bool(event.get_extra("agent_user_aborted"))
+                            ),
+                            runner_aborted=agent_runner.was_aborted(),
                         )
 
                     asyncio.create_task(
@@ -442,6 +582,108 @@ class InternalAgentSubStage(Stage):
                     consumed_marked=follow_up_consumed_marked,
                 )
 
+    def _extract_message_plain(self, content) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, TextPart):
+                    parts.append(part.text or "")
+                elif isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(str(part.get("text") or ""))
+                elif hasattr(part, "text"):
+                    parts.append(getattr(part, "text", "") or "")
+            return "".join(parts)
+        return str(content)
+
+    def _apply_interrupt_to_messages(
+        self,
+        event: AstrMessageEvent,
+        messages: list[Message],
+        *,
+        runner_aborted: bool = False,
+    ) -> list[Message]:
+        """打断后：历史仅保留已实际发送内容，并在该条 assistant 消息末尾追加打断提示。
+
+        Args:
+            event: 被打断的旧事件。
+            messages: 待落库的消息列表（会原地修改）。
+            runner_aborted: Agent 是否在生成阶段被 abort（流式中断等）。
+                True 时若无发送追踪，则信任 runner 已写入的正文；
+                False 表示生成已完成、发送阶段被打断，未发出内容不得入历史。
+        """
+        delivered = event.get_extra("_delivered_llm_plain_text") or ""
+        if not isinstance(delivered, str):
+            delivered = ""
+        delivered = delivered.strip()
+        if not delivered:
+            # 流式/平台 send 路径可能只累计了通用已发送文本
+            plain = event.get_extra("_delivered_plain_text") or ""
+            if isinstance(plain, str) and plain.strip():
+                delivered = plain.strip()
+
+        interrupt_cfg = self._get_interrupt_reply_config(event)
+        note = ""
+        if interrupt_cfg.get("add_to_context", True):
+            note = str(
+                interrupt_cfg.get(
+                    "context_text",
+                    "用户发送了新消息并打断了当前回复。"
+                    "请仅基于已实际发送给用户的内容与新消息继续对话。",
+                )
+                or ""
+            ).strip()
+
+        # 优先最后一条无 tool_calls 的 assistant（最终回复）
+        target_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if msg.role == "assistant" and not msg.tool_calls:
+                target_idx = i
+                break
+        if target_idx is None:
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].role == "assistant":
+                    target_idx = i
+                    break
+
+        if delivered:
+            final_body = delivered
+        elif runner_aborted:
+            # runner 已按已产出文本裁剪，保留其内容
+            final_body = None  # 表示保留原文
+        else:
+            # 生成完成但发送阶段打断且无任何已发送段：不写未发出正文
+            final_body = ""
+
+        if target_idx is None:
+            content = "" if final_body is None else final_body
+            if note:
+                content = f"{content}\n{note}" if content else note
+            if content:
+                messages.append(Message(role="assistant", content=content))
+            return messages
+
+        msg = messages[target_idx]
+        original = self._extract_message_plain(msg.content).strip()
+        if final_body is None:
+            final_body = original
+
+        if note and note not in (final_body or ""):
+            final_body = f"{final_body}\n{note}" if final_body else note
+
+        if msg.tool_calls:
+            msg.content = final_body if final_body else None
+        else:
+            if not final_body:
+                messages.pop(target_idx)
+            else:
+                msg.content = final_body
+        return messages
+
     async def _save_to_history(
         self,
         event: AstrMessageEvent,
@@ -450,15 +692,22 @@ class InternalAgentSubStage(Stage):
         all_messages: list[Message],
         runner_stats: AgentStats | None,
         user_aborted: bool = False,
+        runner_aborted: bool = False,
     ) -> None:
         if not req or not req.conversation:
             return
 
-        if not llm_response and not user_aborted:
+        interrupted = bool(
+            user_aborted
+            or event.get_extra("agent_stop_requested")
+            or event.get_extra("agent_user_aborted")
+        )
+
+        if not llm_response and not interrupted:
             return
 
         if llm_response and llm_response.role != "assistant":
-            if not user_aborted:
+            if not interrupted:
                 return
             llm_response = LLMResponse(
                 role="assistant",
@@ -470,7 +719,7 @@ class InternalAgentSubStage(Stage):
         if (
             not llm_response.completion_text
             and not req.tool_calls_result
-            and not user_aborted
+            and not interrupted
         ):
             logger.debug("LLM 响应为空，不保存记录。")
             return
@@ -485,6 +734,24 @@ class InternalAgentSubStage(Stage):
                 continue
             messages_to_save.append(message)
 
+        if interrupted:
+            messages_to_save = self._apply_interrupt_to_messages(
+                event,
+                messages_to_save,
+                runner_aborted=runner_aborted,
+            )
+            logger.info(
+                "打断后按已发送内容裁剪历史: delivered_len=%s, runner_aborted=%s",
+                len(
+                    str(
+                        event.get_extra("_delivered_llm_plain_text")
+                        or event.get_extra("_delivered_plain_text")
+                        or ""
+                    )
+                ),
+                runner_aborted,
+            )
+
         checkpoint_id = event.get_extra("llm_checkpoint_id")
         message_to_save = dump_messages_with_checkpoints(messages_to_save)
         if isinstance(checkpoint_id, str) and checkpoint_id:
@@ -494,17 +761,8 @@ class InternalAgentSubStage(Stage):
                 ).model_dump()
             )
 
-        # if user_aborted:
-        #     message_to_save.append(
-        #         Message(
-        #             role="assistant",
-        #             content="[User aborted this request. Partial output before abort was preserved.]",
-        #         ).model_dump()
-        #     )
-
         token_usage = None
         if runner_stats:
-            # token_usage = runner_stats.token_usage.total
             token_usage = llm_response.usage.total if llm_response.usage else None
 
         await self.conv_manager.update_conversation(

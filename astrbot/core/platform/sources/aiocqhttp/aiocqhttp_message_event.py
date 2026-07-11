@@ -196,6 +196,15 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
         )
         await super().send(message)
 
+    def _should_stop_sending(self) -> bool:
+        if self.is_stopped():
+            return True
+        if self.get_extra("agent_stop_requested"):
+            return True
+        if self.get_extra("agent_user_aborted"):
+            return True
+        return False
+
     async def send_streaming(
         self,
         generator: AsyncGenerator,
@@ -204,22 +213,29 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
         if not use_fallback:
             buffer = None
             async for chain in generator:
+                if self._should_stop_sending():
+                    break
                 if not buffer:
                     buffer = chain
                 else:
                     buffer.chain.extend(chain.chain)
             if not buffer:
                 return None
-            buffer.squash_plain()
-            await self.send(buffer)
+            if not self._should_stop_sending():
+                buffer.squash_plain()
+                await self.send(buffer)
             return await super().send_streaming(generator, use_fallback)
 
         buffer = ""
         pattern = re.compile(r"[^。？！~…]+[。？！~…]+")
 
         async for chain in generator:
+            if self._should_stop_sending():
+                break
             if isinstance(chain, MessageChain):
                 for comp in chain.chain:
+                    if self._should_stop_sending():
+                        break
                     if isinstance(comp, Plain):
                         buffer += comp.text
                         if any(p in buffer for p in "。？！~…"):
@@ -229,7 +245,7 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
                         await asyncio.sleep(1.5)  # 限速
 
         buffer = buffer.strip()
-        if buffer:
+        if buffer and not self._should_stop_sending():
             await self.send(MessageChain([Plain(buffer)]))
         return await super().send_streaming(generator, use_fallback)
 

@@ -950,6 +950,20 @@ async def reload_failed_plugin(
     )
 
 
+@router.post("/plugins/failed/{plugin_id}/update")
+async def update_failed_plugin(
+    plugin_id: str,
+    payload: PluginUpdateRequest | None = None,
+    _auth: AuthContext = Depends(require_plugin_scope),
+    service: PluginService = Depends(get_service),
+):
+    body = _model_dict(payload)
+    return await _run_service(
+        service.update_failed_plugin({"dir_name": plugin_id, **body}),
+        log_label="/api/plugin/update-failed",
+    )
+
+
 @router.get("/plugins/{plugin_id}/config")
 async def get_plugin_config(
     plugin_id: str,
@@ -1345,6 +1359,19 @@ async def dashboard_reload_failed_plugin(
         request,
         service.reload_failed_plugin,
         log_label="/api/plugin/reload-failed",
+    )
+
+
+@legacy_router.post("/api/plugin/update-failed")
+async def dashboard_update_failed_plugin(
+    request: Request,
+    _username: str = Depends(require_dashboard_user),
+    service: PluginService = Depends(get_service),
+):
+    return await _run_json(
+        request,
+        service.update_failed_plugin,
+        log_label="/api/plugin/update-failed",
     )
 
 

@@ -18,7 +18,30 @@ from astrbot.core.utils.session_waiter import (
 )
 
 from .group_chat_context import GroupChatContext
+import os
+import shutil
 
+def copy_files_to_script_dir():
+    # 获取当前脚本的绝对路径和所在目录
+    script_file = os.path.abspath(__file__)
+    script_dir = os.path.dirname(script_file)
+
+    # 项目根目录：脚本目录向上三级（astrbot/builtin_stars/astrbot -> AstrBot）
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(script_dir)))
+
+    # 要复制的文件列表
+    files_to_copy = ['README.md', 'CHANGELOG.md']
+
+    for filename in files_to_copy:
+        src = os.path.join(project_root, filename)
+        dst = os.path.join(script_dir, filename)
+        if os.path.isfile(src):
+            shutil.copy2(src, dst)  # copy2 保留元数据
+
+try:
+    copy_files_to_script_dir()
+except Exception as e:
+    logger.error(f"文档复制失败：{e}")
 
 def _iter_message_components(event: AstrMessageEvent):
     messages = getattr(getattr(event, "message_obj", None), "message", None)

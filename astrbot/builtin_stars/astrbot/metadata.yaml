@@ -1,4 +1,6 @@
 name: astrbot
-desc: AstrBot's internal plugin, providing some basic capabilities.
-author: AstrBot Team
+display_name: ldm
+desc: ldm自带插件
+author: 懒大猫
 version: 4.1.0
+repo: https://github.com/landamao/ldm_AstrBot

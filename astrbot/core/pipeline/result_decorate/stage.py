@@ -14,6 +14,11 @@ from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 
+from astrbot.core.utils.segmented_reply import (
+    SegmentedReplySplitter,
+    resolve_segmented_reply_config,
+)
+
 from ..context import PipelineContext
 from ..stage import Stage, register_stage, registered_stages
 
@@ -55,37 +60,30 @@ class ResultDecorateStage(Stage):
         except (TypeError, ValueError):
             self.tts_trigger_probability = 1.0
 
-        # 分段回复
-        self.words_count_threshold = int(
-            ctx.astrbot_config["platform_settings"]["segmented_reply"][
-                "words_count_threshold"
-            ],
+        # 分段回复（按简易/进阶/专业模式解析）
+        seg_cfg = resolve_segmented_reply_config(
+            ctx.astrbot_config["platform_settings"].get("segmented_reply", {}),
         )
-        self.enable_segmented_reply = ctx.astrbot_config["platform_settings"][
-            "segmented_reply"
-        ]["enable"]
-        self.only_llm_result = ctx.astrbot_config["platform_settings"][
-            "segmented_reply"
-        ]["only_llm_result"]
-        self.split_mode = ctx.astrbot_config["platform_settings"][
-            "segmented_reply"
-        ].get("split_mode", "regex")
-        self.regex = ctx.astrbot_config["platform_settings"]["segmented_reply"]["regex"]
-        self.split_words = ctx.astrbot_config["platform_settings"][
-            "segmented_reply"
-        ].get("split_words", ["。", "？", "！", "~", "…"])
-        if self.split_words:
-            escaped_words = sorted(
-                [re.escape(word) for word in self.split_words], key=len, reverse=True
-            )
-            self.split_words_pattern = re.compile(
-                f"(.*?({'|'.join(escaped_words)})|.+$)", re.DOTALL
-            )
-        else:
-            self.split_words_pattern = None
-        self.content_cleanup_rule = ctx.astrbot_config["platform_settings"][
-            "segmented_reply"
-        ]["content_cleanup_rule"]
+        self.enable_segmented_reply = bool(seg_cfg.get("enable", False))
+        self.only_llm_result = bool(seg_cfg.get("only_llm_result", True))
+        self.segment_splitter = SegmentedReplySplitter(
+            split_mode=str(seg_cfg.get("split_mode", "chars") or "chars"),
+            split_chars=list(seg_cfg.get("split_words") or []),
+            regex=str(seg_cfg.get("regex") or r"[。？！?!…\n]+"),
+            enable_smart_split=bool(seg_cfg.get("enable_smart_split", True)),
+            balanced_split=bool(seg_cfg.get("balanced_split", True)),
+            max_segments=int(seg_cfg.get("max_segments", 7) or 0),
+            min_segment_length=int(seg_cfg.get("min_segment_length", 10) or 0),
+            balanced_ratio_min=float(seg_cfg.get("balanced_ratio_min", 0.4) or 0.4),
+            balanced_ratio_max=float(seg_cfg.get("balanced_ratio_max", 0.9) or 0.9),
+            no_split_around=list(seg_cfg.get("no_split_around") or []),
+            content_cleanup_rule=str(seg_cfg.get("content_cleanup_rule") or ""),
+            clean_before_items=list(seg_cfg.get("clean_before_items") or []),
+            clean_after_items=list(seg_cfg.get("clean_after_items") or []),
+            trim_edge_blank_lines=bool(seg_cfg.get("trim_edge_blank_lines", True)),
+            max_length_to_disable=int(seg_cfg.get("max_length_to_disable", 0) or 0),
+            min_length_to_split=int(seg_cfg.get("min_length_to_split", 0) or 0),
+        )
 
         # exception
         self.content_safe_check_reply = ctx.astrbot_config["content_safety"][
@@ -100,28 +98,6 @@ class ResultDecorateStage(Stage):
 
         provider_cfg = ctx.astrbot_config.get("provider_settings", {})
         self.show_reasoning = provider_cfg.get("display_reasoning_text", False)
-
-    def _split_text_by_words(self, text: str) -> list[str]:
-        """使用分段词列表分段文本"""
-        if not self.split_words_pattern:
-            return [text]
-
-        segments = self.split_words_pattern.findall(text)
-        result = []
-        for seg in segments:
-            if isinstance(seg, tuple):
-                content = seg[0]
-                if not isinstance(content, str):
-                    continue
-                for word in self.split_words:
-                    if content.endswith(word):
-                        content = content[: -len(word)]
-                        break
-                if content.strip():
-                    result.append(content)
-            elif seg and seg.strip():
-                result.append(seg)
-        return result if result else [text]
 
     async def process(
         self,
@@ -201,7 +177,7 @@ class ResultDecorateStage(Stage):
                         comp.text = self.reply_prefix + comp.text
                         break
 
-            # 分段回复
+            # 分段回复（智能断句 / 均分 / 最大段数）
             if self.enable_segmented_reply and event.get_platform_name() not in [
                 "qq_official_webhook",
                 "weixin_official_account",
@@ -210,53 +186,12 @@ class ResultDecorateStage(Stage):
                 if (
                     self.only_llm_result and result.is_model_result()
                 ) or not self.only_llm_result:
-                    new_chain = []
-                    for comp in result.chain:
-                        if isinstance(comp, Plain):
-                            if len(comp.text) > self.words_count_threshold:
-                                # 不分段回复
-                                new_chain.append(comp)
-                                continue
-
-                            # 根据 split_mode 选择分段方式
-                            if self.split_mode == "words":
-                                split_response = self._split_text_by_words(comp.text)
-                            else:  # regex 模式
-                                try:
-                                    split_response = re.findall(
-                                        self.regex,
-                                        comp.text,
-                                        re.DOTALL | re.MULTILINE,
-                                    )
-                                except re.error:
-                                    logger.error(
-                                        f"分段回复正则表达式错误，使用默认分段方式: {traceback.format_exc()}",
-                                    )
-                                    split_response = re.findall(
-                                        r".*?[。？！~…]+|.+$",
-                                        comp.text,
-                                        re.DOTALL | re.MULTILINE,
-                                    )
-
-                            if not split_response:
-                                new_chain.append(comp)
-                                continue
-                            for seg in split_response:
-                                if self.content_cleanup_rule:
-                                    try:
-                                        seg = re.sub(self.content_cleanup_rule, "", seg)
-                                    except re.error:
-                                        logger.error(
-                                            f"分段回复过滤表达式失败，无法成功过滤：{traceback.format_exc()}"
-                                        )
-                                        self.content_cleanup_rule = None
-                                seg = seg.strip()
-                                if seg:
-                                    new_chain.append(Plain(seg))
-                        else:
-                            # 非 Plain 类型的消息段不分段
-                            new_chain.append(comp)
-                    result.chain = new_chain
+                    try:
+                        result.chain = self.segment_splitter.split_chain(result.chain)
+                    except Exception:
+                        logger.error(
+                            f"智能分段失败，保留原文: {traceback.format_exc()}",
+                        )
 
             # TTS
             tts_provider = self.ctx.plugin_manager.context.get_using_tts_provider(

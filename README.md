@@ -14,7 +14,29 @@
 curl -fsSL -o ldm_AstrBot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh && chmod +x ldm_AstrBot_install.sh && ./ldm_AstrBot_install.sh
 ```
 
-脚本会自动解压项目、配置依赖并启动。首次运行后再次执行可**直接启动**或**重建**。
+脚本会自动解压项目、配置依赖并启动。首次运行后再次执行可**直接启动**、**重建**或**更新**。
+
+### 常用参数
+
+| 参数 | 说明 |
+|------|------|
+| `-y` / `--yes` | 非交互，自动确认 |
+| `-up` / `--update` | 更新模式：保留用户数据，只更新程序文件（并自动 `-y`） |
+| `-ns` / `--no-sync` | 不同步依赖（跳过 `uv sync` / pip 安装） |
+
+**推荐更新命令**（避免插件依赖被清理）：
+
+```bash
+./ldm_AstrBot_install.sh -up -ns
+```
+
+也可单独使用：
+
+```bash
+./ldm_AstrBot_install.sh -ns        # 安装/启动但不同步依赖
+./ldm_AstrBot_install.sh -up        # 更新并同步依赖
+./ldm_AstrBot_install.sh -y         # 非交互安装
+```
 
 > 如需**手动安装**（分步控制），请跳转到文档末尾的 [📄 手动安装教程](#-手动安装教程)。
 
@@ -277,12 +299,21 @@ chmod +x ldm_AstrBot_install.sh
 ./ldm_AstrBot_install.sh
 ```
 
+常用参数：
+
+```bash
+./ldm_AstrBot_install.sh -up -ns   # 推荐：更新程序，不同步依赖
+./ldm_AstrBot_install.sh -up       # 更新程序，并同步依赖
+./ldm_AstrBot_install.sh -ns       # 安装/启动，不同步依赖
+./ldm_AstrBot_install.sh -y        # 非交互安装
+```
+
 脚本会自动执行以下操作：
 - 解压内嵌的 `ldmbot.zip` 到当前目录
 - 检测本地代理（端口 `7890` 或 `7897`），询问是否启用
 - 检查 `uv` 包管理器，若缺失则自动安装
-- 优先使用 `uv sync` 安装依赖并启动
-- 若 `uv` 失败，回退到 `pip`：自动创建 Python 3.12 虚拟环境，安装 `requirements.txt` 并启动
+- 默认优先使用 `uv sync` 安装依赖并启动；加 `-ns` 则跳过依赖同步，直接 `uv run main.py`
+- 若 `uv` 失败，回退到 `pip`：自动创建 Python 3.12 虚拟环境，安装 `requirements.txt` 并启动（`-ns` 同样跳过 pip 安装）
 
 ### 4. （可选）手动解压部署与启动
 若只想解压不自动启动，可将脚本后缀改为 `.zip` 后解压：
@@ -308,8 +339,10 @@ cd ldmbot
   ```
 
 ### 5. 后续维护
-- 再次执行同一安装脚本，会检测到已存在 `ldmbot` 目录，提供 **直接启动** / **删除重建** / **重命名重建** 选项。
-- 如需更新，建议备份数据后删除旧目录再运行脚本（或重命名旧目录）。
+- 再次执行同一安装脚本，会检测到已存在 `ldmbot` 目录，提供 **直接启动** / **删除重建** / **重命名重建** / **更新** / **覆盖解压** 选项。
+- **推荐更新方式**：`./ldm_AstrBot_install.sh -up -ns`  
+  会清理旧程序文件（`ldmbot/astrbot`、`ldmbot/data/dist`）后覆盖解压新版本，并**跳过依赖同步**，避免插件额外安装的包被 `uv sync` 清掉。
+- 若确认需要重装依赖，再用 `./ldm_AstrBot_install.sh -up`。
 
 ---
 

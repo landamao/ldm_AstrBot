@@ -43,6 +43,16 @@ def unregister_active_runner(umo: str, runner: AgentRunner) -> None:
         _ACTIVE_AGENT_RUNNERS.pop(umo, None)
 
 
+def get_active_runner(umo: str) -> AgentRunner | None:
+    """获取指定 UMO 当前活跃的 Agent Runner。"""
+    return _ACTIVE_AGENT_RUNNERS.get(umo)
+
+
+def has_active_runner(umo: str) -> bool:
+    """当前 UMO 是否有活跃的 Agent Runner。"""
+    return umo in _ACTIVE_AGENT_RUNNERS
+
+
 def _get_follow_up_order_state(umo: str) -> dict[str, object]:
     state = _FOLLOW_UP_ORDER_STATE.get(umo)
     if state is None:

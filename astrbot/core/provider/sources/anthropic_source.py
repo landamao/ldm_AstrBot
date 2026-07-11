@@ -1,5 +1,6 @@
 import base64
 import json
+import time
 from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
@@ -14,7 +15,7 @@ from astrbot import logger
 from astrbot.api.provider import Provider
 from astrbot.core.agent.message import AudioURLPart, ContentPart, ImageURLPart, TextPart
 from astrbot.core.exceptions import EmptyModelOutputError
-from astrbot.core.provider.entities import LLMResponse, TokenUsage
+from astrbot.core.provider.entities import LLMResponse, TokenUsage, log_llm_response
 from astrbot.core.provider.func_tool_manager import ToolSet
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
@@ -486,6 +487,7 @@ class ProviderAnthropic(Provider):
         *,
         request_max_retries: int | None = None,
     ) -> LLMResponse:
+        t0 = time.perf_counter()
         if tools:
             if tool_list := tools.get_func_desc_anthropic_style():
                 payloads["tools"] = tool_list
@@ -569,6 +571,7 @@ class ProviderAnthropic(Provider):
             completion_id=completion.id,
             stop_reason=completion.stop_reason,
         )
+        log_llm_response(llm_response, elapsed_s=time.perf_counter() - t0)
         return llm_response
 
     async def _query_stream(
@@ -578,6 +581,7 @@ class ProviderAnthropic(Provider):
         *,
         request_max_retries: int | None = None,
     ) -> AsyncGenerator[LLMResponse, None]:
+        t0 = time.perf_counter()
         if tools:
             if tool_list := tools.get_func_desc_anthropic_style():
                 payloads["tools"] = tool_list
@@ -728,6 +732,7 @@ class ProviderAnthropic(Provider):
             completion_id=id,
             stop_reason=None,
         )
+        log_llm_response(final_response, elapsed_s=time.perf_counter() - t0)
         yield final_response
 
     async def text_chat(

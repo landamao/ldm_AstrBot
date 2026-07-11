@@ -4,6 +4,7 @@ import inspect
 import json
 import random
 import re
+import time
 from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
@@ -28,7 +29,7 @@ from astrbot.core.agent.message import (
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.provider.entities import LLMResponse, TokenUsage, ToolCallsResult
+from astrbot.core.provider.entities import LLMResponse, TokenUsage, ToolCallsResult, log_llm_response
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
     resolve_media_ref_to_base64_data,
@@ -531,6 +532,7 @@ class ProviderOpenAIOfficial(Provider):
         *,
         request_max_retries: int | None = None,
     ) -> LLMResponse:
+        t0 = time.perf_counter()
         if tools:
             model = payloads.get("model", "").lower()
             omit_empty_param_field = "gemini" in model
@@ -614,7 +616,7 @@ class ProviderOpenAIOfficial(Provider):
         logger.debug(f"completion: {completion}")
 
         llm_response = await self._parse_openai_completion(completion, tools)
-
+        log_llm_response(llm_response, elapsed_s=time.perf_counter() - t0)
         return llm_response
 
     async def _collect_forced_stream(
@@ -657,6 +659,7 @@ class ProviderOpenAIOfficial(Provider):
         request_max_retries: int | None = None,
     ) -> AsyncGenerator[LLMResponse, None]:
         """流式查询API，逐步返回结果"""
+        t0 = time.perf_counter()
         if tools:
             model = payloads.get("model", "").lower()
             omit_empty_param_field = "gemini" in model
@@ -754,6 +757,7 @@ class ProviderOpenAIOfficial(Provider):
         try:
             final_completion = state.get_final_completion()
             llm_response = await self._parse_openai_completion(final_completion, tools)
+            log_llm_response(llm_response, elapsed_s=time.perf_counter() - t0)
             yield llm_response
         except Exception as e:
             logger.error("get_final_completion error: " + str(e))

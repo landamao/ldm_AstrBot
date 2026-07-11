@@ -74,21 +74,48 @@ DEFAULT_CONFIG = {
         "path_mapping": [],
         "segmented_reply": {
             "enable": False,
+            # simple | advanced | pro
+            "config_mode": "simple",
             "only_llm_result": True,
-            "interval_method": "random",
+            # 简易/进阶发送节奏：natural | fast | slow
+            "send_speed": "natural",
+            # random | log | linear | fixed  （专业模式）
+            "interval_method": "linear",
             "interval": "1.5,3.5",
             "log_base": 2.6,
-            "words_count_threshold": 150,
-            "split_mode": "regex",  # regex 或 words
-            "regex": ".*?[。？！~…]+|.+$",
+            "linear_base": 0.5,
+            "linear_factor": 0.08,
+            "fixed_delay": 1.5,
+            # 超过该字数则不分段（0 表示不限制；兼容旧 words_count_threshold 语义）
+            "words_count_threshold": 0,
+            "max_length_to_disable": 0,
+            "min_length_to_split": 0,
+            # chars=符号列表（推荐）| regex | words(兼容旧配置，等同 chars)
+            "split_mode": "chars",
+            "regex": r"[。？！?!…\n]+",
             "split_words": [
                 "。",
                 "？",
                 "！",
-                "~",
+                "?",
+                "!",
+                "；",
+                ";",
+                "\n",
                 "…",
-            ],  # 当 split_mode 为 words 时使用
+            ],
             "content_cleanup_rule": "",
+            "clean_before_items": [],
+            "clean_after_items": [],
+            # 智能分段（成对符号/代码块/表格/中英混排保护）
+            "enable_smart_split": True,
+            "balanced_split": True,
+            "max_segments": 5,
+            "min_segment_length": 10,
+            "balanced_ratio_min": 0.4,
+            "balanced_ratio_max": 0.9,
+            "no_split_around": [],
+            "trim_edge_blank_lines": True,
         },
         "no_permission_reply": True,
         "empty_mention_waiting": True,
@@ -96,6 +123,16 @@ DEFAULT_CONFIG = {
         "friend_message_needs_wake_prefix": False,
         "ignore_bot_self_message": False,
         "ignore_at_all": False,
+        "interrupt_reply": {
+            "enable": False,
+            "enable_private": True,
+            "enable_group": True,
+            "notify_user": True,
+            "notify_text": "已打断当前回复，开始处理新消息。",
+            "add_to_context": True,
+            "context_text": "用户发送了新消息并打断了当前回复。请仅基于已实际发送给用户的内容与新消息继续对话。",
+            "wait_timeout": 8.0,
+        },
     },
     "provider_sources": [],  # provider sources
     "provider": [],  # models from provider_sources
@@ -1041,34 +1078,70 @@ CONFIG_METADATA_2 = {
                         "type": "bool",
                         "hint": "启用后，机器人会忽略 @ 全体成员 的消息事件。",
                     },
+                    "interrupt_reply": {
+                        "type": "object",
+                        "items": {
+                            "enable": {"type": "bool"},
+                            "enable_private": {"type": "bool"},
+                            "enable_group": {"type": "bool"},
+                            "notify_user": {"type": "bool"},
+                            "notify_text": {"type": "string"},
+                            "add_to_context": {"type": "bool"},
+                            "context_text": {"type": "string"},
+                            "wait_timeout": {"type": "float"},
+                        },
+                    },
                     "segmented_reply": {
                         "type": "object",
                         "items": {
-                            "enable": {
-                                "type": "bool",
+                            "enable": {"type": "bool"},
+                            "config_mode": {
+                                "type": "string",
+                                "options": ["simple", "advanced", "pro"],
                             },
-                            "only_llm_result": {
-                                "type": "bool",
+                            "only_llm_result": {"type": "bool"},
+                            "send_speed": {
+                                "type": "string",
+                                "options": ["natural", "fast", "slow"],
                             },
                             "interval_method": {
                                 "type": "string",
-                                "options": ["random", "log"],
+                                "options": ["linear", "log", "random", "fixed"],
                             },
-                            "interval": {
+                            "interval": {"type": "string"},
+                            "log_base": {"type": "float"},
+                            "linear_base": {"type": "float"},
+                            "linear_factor": {"type": "float"},
+                            "fixed_delay": {"type": "float"},
+                            "words_count_threshold": {"type": "int"},
+                            "max_length_to_disable": {"type": "int"},
+                            "min_length_to_split": {"type": "int"},
+                            "split_mode": {
                                 "type": "string",
+                                "options": ["chars", "regex", "words"],
                             },
-                            "log_base": {
-                                "type": "float",
+                            "regex": {"type": "string"},
+                            "split_words": {"type": "list", "items": {"type": "string"}},
+                            "content_cleanup_rule": {"type": "string"},
+                            "clean_before_items": {
+                                "type": "list",
+                                "items": {"type": "string"},
                             },
-                            "words_count_threshold": {
-                                "type": "int",
+                            "clean_after_items": {
+                                "type": "list",
+                                "items": {"type": "string"},
                             },
-                            "regex": {
-                                "type": "string",
+                            "enable_smart_split": {"type": "bool"},
+                            "balanced_split": {"type": "bool"},
+                            "max_segments": {"type": "int"},
+                            "min_segment_length": {"type": "int"},
+                            "balanced_ratio_min": {"type": "float"},
+                            "balanced_ratio_max": {"type": "float"},
+                            "no_split_around": {
+                                "type": "list",
+                                "items": {"type": "string"},
                             },
-                            "content_cleanup_rule": {
-                                "type": "string",
-                            },
+                            "trim_edge_blank_lines": {"type": "bool"},
                         },
                     },
                     "reply_prefix": {
@@ -4105,83 +4178,314 @@ CONFIG_METADATA_3 = {
                     "platform_settings.segmented_reply.enable": {
                         "description": "启用分段回复",
                         "type": "bool",
+                        "hint": "关闭时不显示下方配置。开启后可将长回复拆成多条短消息依次发送。",
                     },
+                    "platform_settings.segmented_reply.config_mode": {
+                        "description": "配置模式",
+                        "type": "string",
+                        "options": ["simple", "advanced", "pro"],
+                        "labels": ["简易模式", "进阶模式", "专业模式"],
+                        "hint": "简易：几个核心开关；进阶：列表自定义符号/清理；专业：正则与全部参数。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                        },
+                    },
+                    # ---- 简易 ----
+                    "platform_settings.segmented_reply.max_segments": {
+                        "description": "最多拆成几段",
+                        "type": "int",
+                        "hint": "一条回复最多拆成几段。建议 3~10。0 表示不限制。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": ["simple", "advanced", "pro"],
+                        },
+                    },
+                    "platform_settings.segmented_reply.send_speed": {
+                        "description": "发送节奏",
+                        "type": "string",
+                        "options": ["natural", "fast", "slow"],
+                        "labels": ["自然", "快速", "慢速"],
+                        "hint": "自然：按字数线性延迟；快速：几乎不停顿；慢速：每段停更久。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": ["simple", "advanced"],
+                        },
+                    },
+                    "platform_settings.segmented_reply.clean_before_items": {
+                        "description": "删除特定文本",
+                        "type": "list",
+                        "hint": "分段前从全文删除这些固定文本。每项一行。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": ["simple", "advanced", "pro"],
+                        },
+                    },
+                    # ---- 进阶额外 ----
                     "platform_settings.segmented_reply.only_llm_result": {
                         "description": "仅对 LLM 结果分段",
                         "type": "bool",
+                        "hint": "开启后只拆分 AI 回复；关闭则插件等其它输出也会分段。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": ["advanced", "pro"],
+                        },
                     },
+                    "platform_settings.segmented_reply.split_words": {
+                        "description": "从哪些符号后断开",
+                        "type": "list",
+                        "hint": "遇到这些符号后断开。换行可填 \\n。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": ["advanced", "pro"],
+                        },
+                    },
+                    "platform_settings.segmented_reply.no_split_around": {
+                        "description": "这些文本前后不分段",
+                        "type": "list",
+                        "hint": "分段点后紧邻这些词时不切断。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": ["advanced", "pro"],
+                        },
+                    },
+                    "platform_settings.segmented_reply.balanced_split": {
+                        "description": "智能均分",
+                        "type": "bool",
+                        "hint": "按总字数与最大段数尽量均匀分段，合并过短尾段。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": ["advanced", "pro"],
+                        },
+                    },
+                    "platform_settings.segmented_reply.clean_after_items": {
+                        "description": "分段后删除文本",
+                        "type": "list",
+                        "hint": "拆分后从每段删除这些固定文本。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": ["advanced", "pro"],
+                        },
+                    },
+                    # ---- 专业 ----
                     "platform_settings.segmented_reply.interval_method": {
-                        "description": "间隔方法。",
-                        "hint": "random 为随机时间，log 为根据消息长度计算，$y=log_<log_base>(x)$，x为字数，y的单位为秒。",
+                        "description": "发送间隔策略",
+                        "hint": "linear：按即将发送的下一段字数线性延迟；log：对数；random：随机；fixed：固定秒数。",
                         "type": "string",
-                        "options": ["random", "log"],
+                        "options": ["linear", "log", "random", "fixed"],
+                        "labels": ["线性（自然）", "对数", "随机", "固定"],
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                        },
                     },
                     "platform_settings.segmented_reply.interval": {
                         "description": "随机间隔时间",
                         "type": "string",
                         "hint": "格式：最小值,最大值（如：1.5,3.5）",
                         "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
                             "platform_settings.segmented_reply.interval_method": "random",
                         },
                     },
                     "platform_settings.segmented_reply.log_base": {
-                        "description": "对数底数",
+                        "description": "对数底数（兼容旧配置）",
                         "type": "float",
-                        "hint": "对数间隔的底数，默认为 2.6。取值范围为 1.0-10.0。",
+                        "hint": "旧版 log 算法底数。",
                         "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
                             "platform_settings.segmented_reply.interval_method": "log",
                         },
                     },
+                    "platform_settings.segmented_reply.linear_base": {
+                        "description": "线性基础延迟（秒）",
+                        "type": "float",
+                        "hint": "delay = linear_base + 下一段字数 * linear_factor",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                            "platform_settings.segmented_reply.interval_method": "linear",
+                        },
+                    },
+                    "platform_settings.segmented_reply.linear_factor": {
+                        "description": "线性字数系数",
+                        "type": "float",
+                        "hint": "每字增加的延迟秒数，建议 0.05~0.15。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                            "platform_settings.segmented_reply.interval_method": "linear",
+                        },
+                    },
+                    "platform_settings.segmented_reply.fixed_delay": {
+                        "description": "固定延迟（秒）",
+                        "type": "float",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                            "platform_settings.segmented_reply.interval_method": "fixed",
+                        },
+                    },
                     "platform_settings.segmented_reply.words_count_threshold": {
-                        "description": "分段回复字数阈值",
-                        "hint": "分段回复的字数上限。只有字数小于此值的消息才会被分段，超过此值的长消息将直接发送（不分段）。默认为 150",
+                        "description": "超长不分段阈值",
+                        "hint": "文本字数超过该值时整段发送（不分段）。0 表示不限制。",
                         "type": "int",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                        },
+                    },
+                    "platform_settings.segmented_reply.enable_smart_split": {
+                        "description": "智能断句保护",
+                        "type": "bool",
+                        "hint": "避免在引号/括号内部、代码块、Markdown 表格、纯英文句中错误切断。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                        },
+                    },
+                    "platform_settings.segmented_reply.min_segment_length": {
+                        "description": "最小段长",
+                        "type": "int",
+                        "hint": "均分模式下避免切出过短碎片。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                            "platform_settings.segmented_reply.balanced_split": True,
+                        },
                     },
                     "platform_settings.segmented_reply.split_mode": {
                         "description": "分段模式",
                         "type": "string",
-                        "options": ["regex", "words"],
-                        "labels": ["正则表达式", "分段词列表"],
+                        "options": ["chars", "regex", "words"],
+                        "labels": ["符号列表", "正则表达式", "分段词列表(兼容)"],
+                        "hint": "推荐「符号列表」。words 为旧配置兼容项。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                        },
                     },
                     "platform_settings.segmented_reply.regex": {
                         "description": "分段正则表达式",
-                        "hint": "用于分隔一段消息。默认情况下会根据句号、问号等标点符号分隔。如填写 `[。？！]` 将移除所有的句号、问号、感叹号。re.findall(r'<regex>', text)",
+                        "hint": "匹配分隔符本身的正则，例如 [。？！?!…\\n]+",
                         "type": "string",
                         "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
                             "platform_settings.segmented_reply.split_mode": "regex",
                         },
                     },
-                    "platform_settings.segmented_reply.split_words": {
-                        "description": "分段词列表",
-                        "type": "list",
-                        "hint": "检测到列表中的任意词时进行分段，如：。、？、！等",
+                    "platform_settings.segmented_reply.content_cleanup_rule": {
+                        "description": "分段后清理正则",
+                        "type": "string",
+                        "hint": "对每一段执行 re.sub 清理。",
                         "condition": {
-                            "platform_settings.segmented_reply.split_mode": "words",
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
                         },
                     },
-                    "platform_settings.segmented_reply.content_cleanup_rule": {
-                        "description": "内容过滤正则表达式",
+                    "platform_settings.segmented_reply.trim_edge_blank_lines": {
+                        "description": "清理段首尾空行",
+                        "type": "bool",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                        },
+                    },
+                },
+            },
+            "interrupt_reply": {
+                "description": "打断回复",
+                "type": "object",
+                "items": {
+                    "platform_settings.interrupt_reply.enable": {
+                        "description": "启用打断回复",
+                        "type": "bool",
+                        "hint": "当用户发送新消息并唤醒 LLM，但上一轮 LLM 仍在回复时，打断当前任务并开始新一轮请求。已发送给用户的消息（含插件发送）会保留，历史会正常保存。",
+                    },
+                    "platform_settings.interrupt_reply.enable_private": {
+                        "description": "私聊中启用",
+                        "type": "bool",
+                        "condition": {
+                            "platform_settings.interrupt_reply.enable": True,
+                        },
+                    },
+                    "platform_settings.interrupt_reply.enable_group": {
+                        "description": "群聊中启用",
+                        "type": "bool",
+                        "condition": {
+                            "platform_settings.interrupt_reply.enable": True,
+                        },
+                    },
+                    "platform_settings.interrupt_reply.notify_user": {
+                        "description": "向用户发送打断提示",
+                        "type": "bool",
+                        "hint": "打断时是否向用户发送一条提示消息。",
+                        "condition": {
+                            "platform_settings.interrupt_reply.enable": True,
+                        },
+                    },
+                    "platform_settings.interrupt_reply.notify_text": {
+                        "description": "打断提示文案",
                         "type": "string",
-                        "hint": "移除分段后内容中的指定内容。如填写 `[。？！]` 将移除所有的句号、问号、感叹号。",
+                        "hint": "发送给用户的打断提示内容。",
+                        "condition": {
+                            "platform_settings.interrupt_reply.enable": True,
+                            "platform_settings.interrupt_reply.notify_user": True,
+                        },
+                    },
+                    "platform_settings.interrupt_reply.add_to_context": {
+                        "description": "将打断提示写入对话上下文",
+                        "type": "bool",
+                        "hint": "启用后，会在新一轮用户消息中以 <system_reminder> 临时注入打断提示（不重复写入持久历史），供 LLM 知晓上一轮被打断。",
+                        "condition": {
+                            "platform_settings.interrupt_reply.enable": True,
+                        },
+                    },
+                    "platform_settings.interrupt_reply.context_text": {
+                        "description": "写入上下文的打断提示文案",
+                        "type": "string",
+                        "hint": "写入 <system_reminder> 的提示正文（无需手写标签；保存时不污染用户原文，且不落库重复）。",
+                        "condition": {
+                            "platform_settings.interrupt_reply.enable": True,
+                            "platform_settings.interrupt_reply.add_to_context": True,
+                        },
+                    },
+                    "platform_settings.interrupt_reply.wait_timeout": {
+                        "description": "等待旧任务结束超时（秒）",
+                        "type": "float",
+                        "hint": "打断后等待旧任务保存历史并释放会话锁的最长时间，超时后仍会继续新请求。建议 3-15 秒。",
+                        "condition": {
+                            "platform_settings.interrupt_reply.enable": True,
+                        },
                     },
                 },
             },
             "ltm": {
-                "description": "群聊上下文感知（原聊天记忆增强）",
+                "description": "群聊上下文感知",
                 "type": "object",
                 "items": {
                     "provider_ltm_settings.group_icl_enable": {
                         "description": "启用群聊上下文感知",
                         "type": "bool",
+                        "hint": "关闭时不显示下方配置。开启后会把群内近期消息纳入上下文。",
                     },
                     "provider_ltm_settings.group_message_max_cnt": {
                         "description": "最大消息数量",
                         "type": "int",
+                        "hint": "群聊上下文中最多保留的消息条数。",
+                        "condition": {
+                            "provider_ltm_settings.group_icl_enable": True,
+                        },
                     },
                     "provider_ltm_settings.image_caption": {
                         "description": "自动理解图片",
                         "type": "bool",
                         "hint": "需要设置群聊图片转述模型。",
+                        "condition": {
+                            "provider_ltm_settings.group_icl_enable": True,
+                        },
                     },
                     "provider_ltm_settings.image_caption_provider_id": {
                         "description": "群聊图片转述模型",
@@ -4189,12 +4493,20 @@ CONFIG_METADATA_3 = {
                         "_special": "select_provider",
                         "hint": "用于群聊上下文感知的图片理解，与默认图片转述模型分开配置。",
                         "condition": {
+                            "provider_ltm_settings.group_icl_enable": True,
                             "provider_ltm_settings.image_caption": True,
                         },
                     },
+                },
+            },
+            "active_reply": {
+                "description": "主动回复",
+                "type": "object",
+                "items": {
                     "provider_ltm_settings.active_reply.enable": {
-                        "description": "主动回复",
+                        "description": "启用主动回复",
                         "type": "bool",
+                        "hint": "关闭时不显示下方配置。开启后，未唤醒时也可能按概率主动回复群消息。",
                     },
                     "provider_ltm_settings.active_reply.method": {
                         "description": "主动回复方法",

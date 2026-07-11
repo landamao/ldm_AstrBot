@@ -1813,6 +1813,110 @@ class PluginService:
         logger.info(f"卸载失败插件 {dir_name} 成功")
         return None, "卸载成功"
 
+    async def update_failed_plugin(self, data: object) -> tuple[None, str]:
+        """更新加载失败的插件。
+
+        Args:
+            data: 请求体，需包含 dir_name，可选 proxy。
+
+        Returns:
+            空数据和成功消息。
+        """
+        self._ensure_not_demo()
+        payload = data if isinstance(data, dict) else {}
+        dir_name = str(payload.get("dir_name") or "").strip()
+        proxy = str(payload.get("proxy") or "").strip()
+        if not dir_name:
+            raise PluginServiceError("缺少失败插件目录名")
+
+        failed_info = self.plugin_manager.failed_plugin_dict.get(dir_name)
+        if not failed_info:
+            raise PluginServiceError("插件不存在于失败列表中")
+        if isinstance(failed_info, dict) and failed_info.get("reserved"):
+            raise PluginServiceError("保留插件无法更新")
+
+        records = await self.get_plugin_install_sources()
+        record = (
+            records.get(dir_name)
+            if isinstance(records.get(dir_name), dict)
+            else None
+        )
+        repo_url = ""
+        download_url = ""
+
+        if isinstance(record, dict):
+            install_method = str(record.get("install_method") or "").strip().lower()
+            if install_method == "market":
+                try:
+                    registry_url = self.normalize_registry_url(record.get("registry_url"))
+                    market_data, _ = await self.get_online_plugins(
+                        custom_registry=registry_url,
+                        force_refresh=False,
+                    )
+                    market_plugin = self.resolve_market_plugin_entry(market_data, record)
+                    if market_plugin:
+                        download_url = str(
+                            market_plugin.get("download_url")
+                            or record.get("download_url")
+                            or ""
+                        ).strip()
+                        repo_url = str(
+                            market_plugin.get("repo") or record.get("repo") or ""
+                        ).strip()
+                except Exception as exc:
+                    logger.warning(
+                        "解析失败插件市场更新源失败 %s: %s",
+                        dir_name,
+                        exc,
+                    )
+            if not repo_url:
+                repo_url = str(record.get("repo") or "").strip()
+            if not download_url:
+                download_url = str(record.get("download_url") or "").strip()
+
+        if isinstance(failed_info, dict) and not repo_url:
+            repo_url = str(failed_info.get("repo") or "").strip()
+
+        if not repo_url and not download_url:
+            raise PluginServiceError(
+                "该失败插件缺少可用的仓库地址或下载地址，无法更新。",
+                public_message="该失败插件缺少可用的仓库地址或下载地址，无法更新。",
+            )
+
+        logger.info(f"正在更新失败插件 {dir_name}")
+        try:
+            await self.plugin_manager.update_failed_plugin(
+                dir_name,
+                proxy=proxy,
+                download_url=download_url,
+                repo_url=repo_url,
+            )
+        except Exception as exc:
+            logger.error(f"更新失败插件 {dir_name} 失败: {exc}", exc_info=True)
+            raise PluginServiceError(
+                str(exc),
+                public_message=str(exc) or "更新失败",
+            ) from exc
+
+        if isinstance(record, dict):
+            try:
+                records = await self.get_plugin_install_sources()
+                existing = records.get(dir_name)
+                if isinstance(existing, dict):
+                    if repo_url:
+                        existing["repo"] = repo_url
+                    if download_url:
+                        existing["download_url"] = download_url
+                    existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    records[dir_name] = existing
+                    await self.save_plugin_install_sources(records)
+            except Exception as exc:
+                logger.warning("刷新失败插件安装源记录失败 %s: %s", dir_name, exc)
+
+        await self.sync_skills_after_plugin_change()
+        logger.info(f"更新失败插件 {dir_name} 成功")
+        return None, "更新成功。"
+
     async def update_plugin(self, data: object) -> tuple[None, str]:
         self._ensure_not_demo()
         payload = data if isinstance(data, dict) else {}

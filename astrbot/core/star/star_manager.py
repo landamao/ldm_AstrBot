@@ -1765,6 +1765,70 @@ class PluginManager:
             self.failed_plugin_dict.pop(dir_name, None)
             self._rebuild_failed_plugin_info()
 
+    async def update_failed_plugin(
+        self,
+        dir_name: str,
+        proxy: str = "",
+        download_url: str = "",
+        repo_url: str = "",
+    ) -> None:
+        """更新加载失败的插件，并从失败列表重新加载。
+
+        Args:
+            dir_name: 失败插件目录名。
+            proxy: GitHub 代理地址。
+            download_url: 可选的直链下载地址。
+            repo_url: 可选仓库地址；为空时使用失败记录中的 repo。
+        """
+        failed_info = self.failed_plugin_dict.get(dir_name)
+        if not failed_info:
+            raise Exception(
+                format_plugin_error("not_found_in_failed_list"),
+            )
+        if isinstance(failed_info, dict) and failed_info.get("reserved"):
+            raise Exception(
+                format_plugin_error("reserved_plugin_cannot_uninstall"),
+            )
+
+        failed_repo = ""
+        plugin_name = dir_name
+        if isinstance(failed_info, dict):
+            failed_repo = str(failed_info.get("repo") or "").strip()
+            plugin_name = (
+                str(failed_info.get("name") or "").strip()
+                or str(failed_info.get("display_name") or "").strip()
+                or dir_name
+            )
+
+        resolved_repo = str(repo_url or failed_repo or "").strip()
+        resolved_download = str(download_url or "").strip()
+        if not resolved_repo and not resolved_download:
+            raise Exception("该失败插件缺少仓库地址或下载地址，无法更新。")
+
+        plugin = StarMetadata(
+            name=plugin_name,
+            repo=resolved_repo or None,
+            root_dir_name=dir_name,
+            reserved=False,
+        )
+        logger.info(
+            "正在更新失败插件 %s（repo=%s, download_url=%s）",
+            dir_name,
+            resolved_repo or "-",
+            "yes" if resolved_download else "no",
+        )
+        await self.updator.update(
+            plugin,
+            proxy=proxy,
+            download_url=resolved_download,
+        )
+        plugin_dir_path = os.path.join(self.plugin_store_path, dir_name)
+        await self._ensure_plugin_requirements(plugin_dir_path, dir_name)
+
+        success, error = await self.reload_failed_plugin(dir_name)
+        if not success:
+            raise Exception(error or f"插件 {dir_name} 更新后重载失败。")
+
     async def _unbind_plugin(self, plugin_name: str, plugin_module_path: str) -> None:
         """解绑并移除一个插件。
 

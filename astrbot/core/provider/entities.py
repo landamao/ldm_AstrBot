@@ -439,6 +439,32 @@ class LLMResponse:
         return ret
 
 
+def log_llm_response(
+    llm_response: "LLMResponse",
+    *,
+    elapsed_s: float | None = None,
+) -> None:
+    """打印完整（非流式 chunk）LLM 响应的 INFO 日志，与「正在请求 LLM」成对。"""
+    if getattr(llm_response, "is_chunk", False):
+        return
+    text = (llm_response.completion_text or "").strip()
+    tools = list(llm_response.tools_call_name or [])
+    if tools and text:
+        body = f"工具: {tools}；文本: {text}"
+    elif tools:
+        body = f"工具: {tools}"
+    elif text:
+        body = text
+    elif (llm_response.reasoning_content or "").strip():
+        body = "（仅有 reasoning，无正文）"
+    else:
+        body = "（空）"
+    if elapsed_s is not None:
+        logger.info("LLM 响应（耗时 %.2fs）：%s", elapsed_s, body)
+    else:
+        logger.info("LLM 响应：%s", body)
+
+
 @dataclass
 class RerankResult:
     index: int

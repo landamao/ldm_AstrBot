@@ -266,6 +266,8 @@ class AstrMessageEvent(abc.ABC):
     async def process_buffer(self, buffer: str, pattern: re.Pattern) -> str:
         """将消息缓冲区中的文本按指定正则表达式分割后发送至消息平台，作为不支持流式输出平台的Fallback。"""
         while True:
+            if self.is_stopped() or self.get_extra("agent_stop_requested") or self.get_extra("agent_user_aborted"):
+                return buffer
             match = re.search(pattern, buffer)
             if not match:
                 break
@@ -490,6 +492,26 @@ class AstrMessageEvent(abc.ABC):
             ),
         )
         self._has_send_oper = True
+
+        # 实时 INFO 日志 + 累计本事件实际发出的纯文本（供打断后历史对齐）
+        try:
+            chain = getattr(message, "chain", None) if message is not None else None
+            outline = self._outline_chain(chain) if chain else ""
+            plain = ""
+            if message is not None and hasattr(message, "get_plain_text"):
+                plain = (message.get_plain_text() or "").strip()
+            logger.info(
+                "发送消息 - %s/%s: %s",
+                self.get_sender_name() or "-",
+                self.get_sender_id() or "-",
+                outline or "(空)",
+            )
+            if plain:
+                prev = self.get_extra("_delivered_plain_text", "") or ""
+                joined = f"{prev}\n{plain}" if prev else plain
+                self.set_extra("_delivered_plain_text", joined)
+        except Exception:
+            logger.debug("记录发送日志/已发送文本失败", exc_info=True)
 
     async def react(self, emoji: str) -> None:
         """对消息添加表情回应。
