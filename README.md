@@ -1,8 +1,7 @@
 # 🚀 **ldm** · 个人魔改版 AstrBot
 
-> **长期自用 · 高度定制 · 拒绝官方覆盖**  
-> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5 二次修改  
-> **对照基线**：本地 `/home/ldm/AstrBot` ↔ 官方 `/home/ldm/__tmp/AstrBot`
+> **高度定制 · 拒绝官方覆盖**  
+> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5 二次修改
 
 ---
 
@@ -33,29 +32,30 @@ curl -fsSL -o ldm_AstrBot_install.sh https://github.com/landamao/ldm_AstrBot/rel
    ![img_4.jpg](./readme_image/img_4.jpg)
 ## 5. 初次使用用户名密码均为ldm，且登录后无强制修改，去除用户名和密码的任何限制，仅非空限制
 
-# WebUI特性：
+# 🎨 WebUI特性：
 ## 1. 补全插件查看更新文档，作者信息
    ![img_5.jpg](./readme_image/img_5.jpg)
-## 2. 侧边默认栏顺序调整，更符合使用习惯，点击频率
+## 2. 侧边栏默认顺序调整，更符合使用习惯，点击频率
    ![img_6.jpg](./readme_image/img_6.jpg)
-## 3. 插件加载失败新增更新插件按钮，有些插件新版本可能已经修复了问题
+## 3. 插件加载失败新增`更新`按钮，有些插件新版本可能已经修复了问题
    ![img_7.jpg](./readme_image/img_7.jpg)
-## 4. 配置文件→模型配置，将主次模型改成对话模型链，可拖拽调整顺序，无需修改两个地方
+## 4. 配置文件→模型配置，将主次模型改成`对话模型链`，可拖拽调整顺序，无需修改两个地方
    ![img_8.jpg](./readme_image/img_8.jpg)
-## 5. 添加模型新增搜索模型，无需翻找大量模型列表
+## 5. `添加对话模型`新增搜索模型，无需翻找大量模型列表
    ![img_9.jpg](./readme_image/img_9.jpg)
 ## 6. 备份恢复可任意版本，4.xx.xx版本恢复数据无需担心数据版本问题
    ![img_10.jpg](./readme_image/img_10.jpg)
-## 7. 配置文件→扩展功能大升级，升级分段回复，参考插件**对话分段Pro**(https://github.com/nuomicici/astrbot_plugin_splitter) 融合
+## 7. 配置文件→扩展功能大升级，升级分段回复，参考插件`对话分段Pro`(https://github.com/nuomicici/astrbot_plugin_splitter) 融合
    ![img_11.jpg](./readme_image/img_11.jpg)
-## 8. 配置文件→扩展功能，新增打断回复功能，与框架自带分段配合，用户体验拉满
+## 8. 配置文件→扩展功能，新增`打断回复`功能，与框架自带分段配合，用户体验拉满
    ![img_12.jpg](./readme_image/img_12.jpg)
+
    **灵感来源**：![img.jpg](./readme_image/img.jpg)
    - 详解：原来会暂停用户窗口，等待上一个回复完成，再把新消息请求llm，现在用户发新消息，立即打断，重新请求llm，
      新旧消息不会消失，分段已回复内容记入对话历史，与实际聊天记录基本保持一致
 ### 9. 定制版WebUI界面，LOGO改为松坂砂糖头像，名字改为ldm
 ### 10. 去除了astrbot、webui更新
-
+### 11. 日志颜色改为亮色，info日志改为绿色，黑色背景下观感更好，原来黑色背景加暗色字体，看日志极费眼力
 
 ## 📄 手动安装教程
 
@@ -121,6 +121,9 @@ cd ldmbot
 - 再次执行同一安装脚本，会检测到已存在 `ldmbot` 目录，提供 **直接启动** / **删除重建** / **重命名重建** / **更新** / **覆盖解压** 选项。
 - **推荐更新方式**：`./ldm_AstrBot_install.sh -up -ns`  
 
+### 6. 反馈交流
+- qq群 1103659691 [点击跳转](https://qm.qq.com/q/c7Nc3Tl1Je) (https://qm.qq.com/q/c7Nc3Tl1Je)
+- telegram [@landamaogroup](https://t.me/landamaogroup) (https://t.me/landamaogroup)
 ---
 
 ## 📜 许可 & 文档维护
@@ -128,4 +131,6 @@ cd ldmbot
 - 上游遵循 **AGPL v3**（见 `LICENSE` / `EULA.md`）  
 - 本说明仅描述**个人魔改行为**，非官方分支
 
----
+
+- [AstrBot](https://github.com/AstrBotDevs/AstrBot) (https://github.com/AstrBotDevs/AstrBot)
+- [ldm_AstrBot](https://github.com/landamao/ldm_AstrBot) (https://github.com/landamao/ldm_AstrBot)
