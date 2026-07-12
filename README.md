@@ -23,38 +23,38 @@ curl -fsSL -o ldm_AstrBot_install.sh https://github.com/landamao/ldm_AstrBot/rel
 
 
 # ✨ 功能特性
-1. /help指令回归旧版，再也不是新版本后的英文版，仅几个指令
+## 1. /help指令回归旧版，再也不是新版本后的英文版，仅几个指令
    ![img_1.jpg](./readme_image/img_1.jpg)
-2. /plugin指令新增restart和update，可快速重启和更新插件
+## 2. /plugin指令新增restart和update，可快速重启和更新插件
    ![img_2.jpg](./readme_image/img_2.jpg)
-3. /llm指令会话级开关，可以单独开关某个会话的llm功能啦
+## 3. /llm指令会话级开关，可以单独开关某个会话的llm功能啦
    ![img_3.jpg](./readme_image/img_3.jpg)
-4. 启动时端口被占用可以交互式修改端口号，再也不用去手动编辑复杂的配置文件
+## 4. 启动时端口被占用可以交互式修改端口号，再也不用去手动编辑复杂的配置文件
    ![img_4.jpg](./readme_image/img_4.jpg)
-5. 初次使用用户名密码均为ldm，且登录后无强制修改，去除用户名和密码的任何限制，仅非空限制
+## 5. 初次使用用户名密码均为ldm，且登录后无强制修改，去除用户名和密码的任何限制，仅非空限制
 
 # WebUI特性：
-1. 补全插件查看更新文档，作者信息
+## 1. 补全插件查看更新文档，作者信息
    ![img_5.jpg](./readme_image/img_5.jpg)
-2. 侧边默认栏顺序调整，更符合使用习惯，点击频率
+## 2. 侧边默认栏顺序调整，更符合使用习惯，点击频率
    ![img_6.jpg](./readme_image/img_6.jpg)
-3. 插件加载失败新增更新插件按钮，有些插件新版本可能已经修复了问题
+## 3. 插件加载失败新增更新插件按钮，有些插件新版本可能已经修复了问题
    ![img_7.jpg](./readme_image/img_7.jpg)
-4. 配置文件→模型配置，将主次模型改成对话模型链，可拖拽调整顺序，无需修改两个地方
+## 4. 配置文件→模型配置，将主次模型改成对话模型链，可拖拽调整顺序，无需修改两个地方
    ![img_8.jpg](./readme_image/img_8.jpg)
-5. 添加模型新增搜索模型，无需翻找大量模型列表
+## 5. 添加模型新增搜索模型，无需翻找大量模型列表
    ![img_9.jpg](./readme_image/img_9.jpg)
-6. 备份恢复可任意版本，4.xx.xx版本恢复数据无需担心数据版本问题
+## 6. 备份恢复可任意版本，4.xx.xx版本恢复数据无需担心数据版本问题
    ![img_10.jpg](./readme_image/img_10.jpg)
-7. 配置文件→扩展功能大升级，升级分段回复，参考插件**对话分段Pro**(https://github.com/nuomicici/astrbot_plugin_splitter)融合
+## 7. 配置文件→扩展功能大升级，升级分段回复，参考插件**对话分段Pro**(https://github.com/nuomicici/astrbot_plugin_splitter) 融合
    ![img_11.jpg](./readme_image/img_11.jpg)
-8. 配置文件→扩展功能，新增打断回复功能，与框架自带分段配合，用户体验拉满
+## 8. 配置文件→扩展功能，新增打断回复功能，与框架自带分段配合，用户体验拉满
    ![img_12.jpg](./readme_image/img_12.jpg)
    **灵感来源**：![img.jpg](./readme_image/img.jpg)
    - 详解：原来会暂停用户窗口，等待上一个回复完成，再把新消息请求llm，现在用户发新消息，立即打断，重新请求llm，
      新旧消息不会消失，分段已回复内容记入对话历史，与实际聊天记录基本保持一致
-9. 定制版WebUI界面，LOGO改为松坂砂糖头像，名字改为ldm
-10. 去除了astrbot、webui更新
+### 9. 定制版WebUI界面，LOGO改为松坂砂糖头像，名字改为ldm
+### 10. 去除了astrbot、webui更新
 
 
 ## 📄 手动安装教程
