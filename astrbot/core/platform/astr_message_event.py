@@ -266,7 +266,8 @@ class AstrMessageEvent(abc.ABC):
     async def process_buffer(self, buffer: str, pattern: re.Pattern) -> str:
         """将消息缓冲区中的文本按指定正则表达式分割后发送至消息平台，作为不支持流式输出平台的Fallback。"""
         while True:
-            if self.is_stopped() or self.get_extra("agent_stop_requested") or self.get_extra("agent_user_aborted"):
+            # 仅响应打断/用户中止；stop_event() 只停传播，不拦截已在发送链路中的内容
+            if self.get_extra("agent_stop_requested") or self.get_extra("agent_user_aborted"):
                 return buffer
             match = re.search(pattern, buffer)
             if not match:

@@ -515,35 +515,70 @@ async def download_dashboard(
     extract: bool = True,
     allow_insecure_ssl_fallback: bool = True,
 ) -> None:
-    """WebUI 自动下载已禁用。
+    """从 landamao/ldm_AstrBot 同步 WebUI（不再走官方 soulter 源）。
 
-    保留此函数只是为了兼容旧调用点和测试替身。任何调用都只记录警告，
-    不访问网络、不写 dashboard.zip、不解压、不覆盖 data/dist。
+    注意：完整项目更新请走 UpdateService / AstrBotUpdator。
+    本函数主要用于兼容旧调用点（CLI、指令等）。
     """
-    logger.warning(
-        "已禁用 WebUI 自动下载/覆盖，跳过 download_dashboard 调用。"
+    from astrbot.core.updator import AstrBotUpdator
+
+    logger.info("通过 ldm_AstrBot 更新器同步 WebUI（download_dashboard 兼容入口）。")
+    updator = AstrBotUpdator()
+    applied = await updator.apply_webui_only_from_package(
+        latest=latest,
+        version=version,
+        proxy=proxy or "",
+        progress_callback=progress_callback,
     )
-    if progress_callback:
-        result = progress_callback(
-            {
-                "progress": 100,
-                "current": 0,
-                "total": 0,
-                "message": "已禁用 WebUI 自动下载/覆盖。",
-            }
+    if not applied:
+        raise RuntimeError(
+            "ldm_AstrBot 更新包中未找到可用的 dashboard/dist 或 data/dist。"
         )
-        if inspect.isawaitable(result):
-            await result
+    # extract 参数保留兼容：apply_webui_only_from_package 已直接写入 data/dist
+    _ = (path, extract_path, extract, allow_insecure_ssl_fallback)
     return None
 
 
 def extract_dashboard(zip_path: str | Path, extract_path: str | Path = "data") -> None:
-    """WebUI 自动解压已禁用。
+    """兼容入口：把包含 dist 的 zip 解压到 data 目录。
 
-    保留此函数只是为了兼容旧调用点。任何调用都只记录警告，
-    不解压、不覆盖 data/dist。
+    若 zip 是完整源码包，会优先抽取其中的 dashboard/dist 或 data/dist。
     """
-    logger.warning(
-        "已禁用 WebUI 自动解压/覆盖，跳过 extract_dashboard 调用。"
-    )
-    return None
+    import tempfile
+
+    zip_path = Path(zip_path)
+    extract_root = Path(extract_path).resolve()
+    ensure_dir(extract_root)
+
+    if not zipfile.is_zipfile(zip_path):
+        raise RuntimeError(f"无效 WebUI 包: {zip_path}")
+
+    with tempfile.TemporaryDirectory(prefix="ldm-extract-dashboard-") as tmp:
+        tmp_root = Path(tmp)
+        with zipfile.ZipFile(zip_path, "r") as z:
+            z.extractall(tmp_root)
+
+        children = [p for p in tmp_root.iterdir() if p.is_dir()]
+        包根 = children[0] if children else tmp_root
+        候选 = [
+            包根 / "dashboard" / "dist",
+            包根 / "data" / "dist",
+            包根 / "dist",
+            tmp_root / "dist",
+        ]
+        dist_src = next((p for p in 候选 if (p / "index.html").is_file()), None)
+        if dist_src is None:
+            # 可能 zip 本身就是 dist 内容
+            if (tmp_root / "index.html").is_file():
+                dist_src = tmp_root
+            elif children and (children[0] / "index.html").is_file():
+                dist_src = children[0]
+
+        if dist_src is None:
+            raise RuntimeError("更新包中未找到可用的 WebUI dist（缺 index.html）。")
+
+        目标 = extract_root / "dist"
+        if 目标.exists():
+            shutil.rmtree(目标, onerror=on_error)
+        shutil.copytree(dist_src, 目标)
+        logger.info(f"WebUI 已解压到: {目标}")

@@ -1,6 +1,10 @@
+import asyncio
+import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -13,51 +17,533 @@ from astrbot.core.desktop_runtime import (
     DESKTOP_MANAGED_RESTART_MESSAGE,
     is_desktop_managed_backend,
 )
-from astrbot.core.utils.astrbot_path import get_astrbot_path
-from astrbot.core.utils.io import ensure_dir
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_path
+from astrbot.core.utils.io import ensure_dir, on_error
 
 from .zip_updator import ReleaseInfo, RepoZipUpdator
 
 
 class AstrBotUpdator(RepoZipUpdator):
-    """AstrBot 更新器，继承自 RepoZipUpdator 类
-    该类用于处理 AstrBot 的更新操作
-    功能包括检查更新、下载更新文件、解压缩更新文件等
+    """ldm 魔改版更新器：从 landamao/ldm_AstrBot 检查并应用更新。
+
+    支持：
+    1. GitHub Releases（优先，按 tag/semver 比较）
+    2. 无 Release 时回退到默认分支最新 commit
+    3. 从同一源码包同步核心源码与 WebUI（dashboard/dist 或 data/dist）
     """
+
+    # 应用更新时禁止整目录覆盖的顶层项（保护本地运行态）
+    # 注意：data 整目录不覆盖；仅单独同步 data/dist（WebUI）
+    受保护顶层目录 = {
+        "data",
+        ".venv",
+        "venv",
+        "node_modules",
+        ".git",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "__pycache__",
+        ".hermes",
+        ".idea",
+        ".vscode",
+    }
+
+    # 这些根文件/目录会从更新包直接覆盖（若包内存在）
+    # 例如：main.py、README.md、requirements.txt、pyproject.toml、astrbot/、dashboard/ 等
+    # 实际策略：包内除「受保护顶层目录」外全部覆盖，不限于下面示例
+    根目录覆盖示例 = {
+        "main.py",
+        "README.md",
+        "readme.md",
+        "LICENSE",
+        "NOTICE",
+        "requirements.txt",
+        "pyproject.toml",
+        "uv.lock",
+        "astrbot",
+        "dashboard",
+        "scripts",
+        "changelogs",
+        "docs",
+    }
 
     def __init__(self, repo_mirror: str = "", verify: str | bool | None = None) -> None:
         super().__init__(repo_mirror, verify=verify)
         self.MAIN_PATH = get_astrbot_path()
-        self.ASTRBOT_RELEASE_API = "https://api.soulter.top/releases"
-        self.CORE_PACKAGE_BASE_URL = (
-            "https://astrbot-registry.soulter.top/download/astrbot-core"
+        self.仓库所有者 = os.environ.get("LDM_ASTRBOT_REPO_OWNER", "landamao").strip()
+        self.仓库名 = os.environ.get("LDM_ASTRBOT_REPO_NAME", "ldm_AstrBot").strip()
+        self.默认分支 = os.environ.get("LDM_ASTRBOT_BRANCH", "main").strip() or "main"
+        self.ASTRBOT_RELEASE_API = (
+            f"https://api.github.com/repos/{self.仓库所有者}/{self.仓库名}/releases"
+        )
+        # 不再走官方 soulter 托管包
+        self.CORE_PACKAGE_BASE_URL = ""
+        self.仓库网页地址 = f"https://github.com/{self.仓库所有者}/{self.仓库名}"
+        # GitHub API 短缓存，降低限流概率
+        self._releases_cache: list | None = None
+        self._releases_cache_at: float = 0.0
+        self._commit_cache: dict[str, tuple[float, dict]] = {}
+        self._cache_ttl_seconds = int(
+            os.environ.get("LDM_ASTRBOT_UPDATE_CACHE_TTL", "300")
         )
 
-    def _build_core_package_url(self, version: str | None) -> str | None:
-        """Build the hosted core package URL for a release tag.
+    def _更新元数据路径(self) -> Path:
+        return Path(get_astrbot_data_path()) / "ldm_update_meta.json"
 
-        Args:
-            version: Release tag, such as ``v4.26.0``.
+    def _读取更新元数据(self) -> dict:
+        path = self._更新元数据路径()
+        if not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            logger.warning(f"读取 ldm 更新元数据失败: {exc}")
+            return {}
 
-        Returns:
-            Public package URL, or None when hosted package download is disabled.
+    def _写入更新元数据(self, **kwargs) -> None:
+        path = self._更新元数据路径()
+        ensure_dir(path.parent)
+        meta = self._读取更新元数据()
+        meta.update({k: v for k, v in kwargs.items() if v is not None})
+        meta["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _拼接代理(self, url: str, proxy: str = "") -> str:
+        if not proxy:
+            return url
+        return f"{proxy.removesuffix('/')}/{url}"
+
+    def _构建源码包地址(
+        self,
+        *,
+        tag: str | None = None,
+        sha: str | None = None,
+        branch: str | None = None,
+    ) -> str:
+        if sha:
+            return f"{self.仓库网页地址}/archive/{sha}.zip"
+        if tag:
+            return f"{self.仓库网页地址}/archive/refs/tags/{tag}.zip"
+        目标分支 = branch or self.默认分支
+        return f"{self.仓库网页地址}/archive/refs/heads/{目标分支}.zip"
+
+    def _github_token(self) -> str:
+        for key in (
+            "LDM_GITHUB_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "ASTRBOT_GITHUB_TOKEN",
+        ):
+            value = (os.environ.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _github_headers(self) -> dict[str, str]:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "ldm-AstrBot-updator",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        token = self._github_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    def _atom_headers(self) -> dict[str, str]:
+        return {
+            "Accept": "application/atom+xml, application/xml, text/xml, */*",
+            "User-Agent": "ldm-AstrBot-updator",
+        }
+
+    @staticmethod
+    def _html_to_text(html: str) -> str:
+        import re
+        from html import unescape
+
+        text = unescape(html or "")
+        text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", text)
+        text = re.sub(r"(?is)<br\s*/?>", "\n", text)
+        text = re.sub(r"(?is)</p\s*>", "\n", text)
+        text = re.sub(r"(?is)<li\s*>", "- ", text)
+        text = re.sub(r"(?is)<[^>]+>", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def _extract_atom_tag(entry_xml: str, tag: str) -> str:
+        import re
+
+        match = re.search(
+            rf"<(?:[\w.-]+:)?{tag}(?:\s[^>]*)?>(.*?)</(?:[\w.-]+:)?{tag}>",
+            entry_xml,
+            re.IGNORECASE | re.DOTALL,
+        )
+        return (match.group(1).strip() if match else "")
+
+    def _parse_releases_atom(self, xml_text: str) -> list[dict]:
+        import re
+        from html import unescape
+
+        entries = re.findall(
+            r"<(?:[\w.-]+:)?entry(?:\s[^>]*)?>(.*?)</(?:[\w.-]+:)?entry>",
+            xml_text or "",
+            re.IGNORECASE | re.DOTALL,
+        )
+        releases: list[dict] = []
+        for entry in entries:
+            link = ""
+            link_match = re.search(
+                r'<(?:[\w.-]+:)?link[^>]*rel="alternate"[^>]*href="([^"]+)"',
+                entry,
+                re.IGNORECASE,
+            )
+            if not link_match:
+                link_match = re.search(
+                    r'<(?:[\w.-]+:)?link[^>]*href="([^"]+)"',
+                    entry,
+                    re.IGNORECASE,
+                )
+            if link_match:
+                link = link_match.group(1).strip()
+
+            tag_name = ""
+            if "/releases/tag/" in link:
+                tag_name = link.rsplit("/releases/tag/", 1)[-1].strip()
+            if not tag_name:
+                entry_id = unescape(self._extract_atom_tag(entry, "id"))
+                if "/" in entry_id:
+                    tag_name = entry_id.rsplit("/", 1)[-1].strip()
+            if not tag_name:
+                continue
+
+            title = unescape(self._extract_atom_tag(entry, "title"))
+            updated = self._extract_atom_tag(entry, "updated")
+            content = self._extract_atom_tag(entry, "content")
+            body = self._html_to_text(content) if content else title
+            releases.append(
+                {
+                    "version": title or tag_name,
+                    "published_at": updated,
+                    "body": body or f"Release {tag_name}",
+                    "tag_name": tag_name,
+                    "zipball_url": self._构建源码包地址(tag=tag_name),
+                }
+            )
+
+        releases.sort(
+            key=lambda item: self._tag_sort_key(str(item.get("tag_name") or "")),
+            reverse=True,
+        )
+        return releases
+
+    def _parse_commits_atom(self, xml_text: str) -> dict | None:
+        import re
+        from html import unescape
+
+        entry_match = re.search(
+            r"<(?:[\w.-]+:)?entry(?:\s[^>]*)?>(.*?)</(?:[\w.-]+:)?entry>",
+            xml_text or "",
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not entry_match:
+            return None
+        entry = entry_match.group(1)
+        entry_id = unescape(self._extract_atom_tag(entry, "id"))
+        sha = ""
+        if "/" in entry_id:
+            maybe = entry_id.rsplit("/", 1)[-1].strip()
+            if len(maybe) >= 7:
+                sha = maybe
+        if not sha:
+            link_match = re.search(
+                r'href="https://github\.com/[^"]+/commit/([0-9a-fA-F]{7,40})"',
+                entry,
+            )
+            if link_match:
+                sha = link_match.group(1)
+        if not sha:
+            return None
+        title = unescape(self._extract_atom_tag(entry, "title"))
+        updated = self._extract_atom_tag(entry, "updated")
+        return {
+            "sha": sha,
+            "message": " ".join(title.split()) if title else f"commit {sha[:8]}",
+            "published_at": updated,
+            "html_url": f"{self.仓库网页地址}/commit/{sha}",
+        }
+
+    async def _fetch_releases_via_atom(self) -> list:
+        url = f"{self.仓库网页地址}/releases.atom"
+        try:
+            async with self._create_httpx_client(timeout=20.0) as client:
+                response = await client.get(url, headers=self._atom_headers())
+                response.raise_for_status()
+                return self._parse_releases_atom(response.text)
+        except Exception as exc:
+            logger.warning(f"读取 releases.atom 失败: {exc}")
+            return []
+
+    async def _fetch_latest_commit_via_atom(self, branch: str | None = None) -> dict | None:
+        目标分支 = branch or self.默认分支
+        url = f"{self.仓库网页地址}/commits/{目标分支}.atom"
+        try:
+            async with self._create_httpx_client(timeout=20.0) as client:
+                response = await client.get(url, headers=self._atom_headers())
+                response.raise_for_status()
+                return self._parse_commits_atom(response.text)
+        except Exception as exc:
+            logger.warning(f"读取 commits.atom 失败: {exc}")
+            return None
+
+    def _git_remote_url(self) -> str:
+        token = self._github_token()
+        if token:
+            return (
+                f"https://x-access-token:{token}@github.com/"
+                f"{self.仓库所有者}/{self.仓库名}.git"
+            )
+        return f"{self.仓库网页地址}.git"
+
+    async def _git_ls_remote(self, *args: str, ref: str | None = None) -> str:
+        """用 git ls-remote 获取 refs，不走 GitHub REST API，可规避 API 限流。
+
+        正确参数顺序：git ls-remote [options] <repository> [<refs>...]
         """
+        cmd = ["git", "ls-remote", *args, self._git_remote_url()]
+        if ref:
+            cmd.append(ref)
+        return await asyncio.to_thread(
+            lambda: subprocess.check_output(
+                cmd,
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=30,
+            )
+        )
 
-        if not version or not str(version).startswith("v"):
-            return None
+    def _parse_ls_remote_tags(self, output: str) -> list[dict]:
+        tags: list[dict] = []
+        seen: set[str] = set()
+        for line in output.splitlines():
+            line = line.strip()
+            if not line or "\t" not in line:
+                continue
+            sha, ref = line.split("\t", 1)
+            if not ref.startswith("refs/tags/"):
+                continue
+            # annotated tag 的剥皮引用：用^{} 对应 commit sha 覆盖同名 tag
+            if ref.endswith("^{}"):
+                tag = ref[len("refs/tags/") : -3]
+                for item in tags:
+                    if item["tag_name"] == tag:
+                        item["commit_sha"] = sha
+                        break
+                else:
+                    if tag not in seen:
+                        seen.add(tag)
+                        tags.append(self._build_tag_release_item(tag, sha))
+                continue
+            tag = ref[len("refs/tags/") :]
+            if tag in seen:
+                continue
+            seen.add(tag)
+            tags.append(self._build_tag_release_item(tag, sha))
 
-        base_url = os.environ.get(
-            "ASTRBOT_CORE_PACKAGE_BASE_URL",
-            self.CORE_PACKAGE_BASE_URL,
-        ).strip()
-        if not base_url:
-            return None
-        return f"{base_url.rstrip('/')}/{version}/source.zip"
+        # 新版本在前：支持 v4.26.5 / v4.26.5-v2 / v4.26.5-v3
+        tags.sort(key=lambda item: self._tag_sort_key(str(item.get("tag_name") or "")), reverse=True)
+        return tags
+
+    def _build_tag_release_item(self, tag: str, sha: str) -> dict:
+        return {
+            "version": tag,
+            "published_at": "",
+            "body": f"来自 git ls-remote 的标签 {tag}",
+            "tag_name": tag,
+            "zipball_url": self._构建源码包地址(tag=tag),
+            "commit_sha": sha,
+        }
+
+    @staticmethod
+    def _tag_sort_key(tag_name: str) -> tuple:
+        """为 ldm 标签生成排序键，越大越新。
+
+        规则：
+        - v4.26.5      -> (4, 26, 5, 0, ...)
+        - v4.26.5-v2   -> (4, 26, 5, 2, ...)
+        - v4.26.5-v3   -> (4, 26, 5, 3, ...)
+        因此 reverse 后顺序为 v3 > v2 > 正式版。
+        """
+        import re
+
+        name = (tag_name or "").strip()
+        match = re.match(
+            r"^v?(?P<base>\d+(?:\.\d+)*)(?:-v?(?P<rev>\d+))?(?P<rest>.*)$",
+            name,
+            re.IGNORECASE,
+        )
+        if not match:
+            return (0, 0, 0, 0, name)
+
+        base_parts = [int(x) for x in match.group("base").split(".")]
+        while len(base_parts) < 3:
+            base_parts.append(0)
+        base_parts = base_parts[:3]
+        rev = int(match.group("rev") or 0)
+        rest = match.group("rest") or ""
+        return (base_parts[0], base_parts[1], base_parts[2], rev, rest)
+
+    async def _fetch_releases_via_git(self) -> list:
+        try:
+            output = await self._git_ls_remote("--tags")
+        except Exception as exc:
+            logger.warning(f"git ls-remote 获取 tags 失败: {exc}")
+            return []
+        return self._parse_ls_remote_tags(output)
+
+    async def _请求github_json(self, url: str):
+        async with self._create_httpx_client(timeout=30.0) as client:
+            response = await client.get(url, headers=self._github_headers())
+            response.raise_for_status()
+            return response.json()
+
+    async def fetch_release_info(self, url: str, latest: bool = True) -> list:
+        """优先 GitHub API；失败则 releases.atom；再失败则 git ls-remote。"""
+        now = time.time()
+        if (
+            self._releases_cache is not None
+            and now - self._releases_cache_at < self._cache_ttl_seconds
+        ):
+            return list(self._releases_cache)
+
+        # 1) REST API
+        try:
+            async with self._create_httpx_client() as client:
+                response = await client.get(url, headers=self._github_headers())
+                response.raise_for_status()
+                result = response.json()
+            if not result:
+                ret: list = []
+            else:
+                ret = []
+                for release in result:
+                    ret.append(
+                        {
+                            "version": release.get("name") or release.get("tag_name"),
+                            "published_at": release.get("published_at") or "",
+                            "body": release.get("body") or "",
+                            "tag_name": release.get("tag_name") or "",
+                            "zipball_url": release.get("zipball_url")
+                            or self._构建源码包地址(tag=release.get("tag_name")),
+                        }
+                    )
+            ret.sort(
+                key=lambda item: self._tag_sort_key(str(item.get("tag_name") or "")),
+                reverse=True,
+            )
+            self._releases_cache = ret
+            self._releases_cache_at = now
+            return list(ret)
+        except Exception as api_exc:
+            logger.warning(f"GitHub Releases API 失败，尝试 Atom/git 回退: {api_exc}")
+
+        # 2) Atom feed（不占 REST 限额，且带发布时间）
+        ret = await self._fetch_releases_via_atom()
+        if ret:
+            self._releases_cache = ret
+            self._releases_cache_at = now
+            return list(ret)
+
+        # 3) git ls-remote（只有 tag，没有时间）
+        ret = await self._fetch_releases_via_git()
+        self._releases_cache = ret
+        self._releases_cache_at = now
+        return list(ret)
+
+    async def _获取最新提交(self, branch: str | None = None) -> dict:
+        目标分支 = branch or self.默认分支
+        now = time.time()
+        cached = self._commit_cache.get(目标分支)
+        if cached and now - cached[0] < self._cache_ttl_seconds:
+            return dict(cached[1])
+
+        # 1) REST API
+        try:
+            url = (
+                f"https://api.github.com/repos/{self.仓库所有者}/{self.仓库名}"
+                f"/commits?sha={目标分支}&per_page=1"
+            )
+            data = await self._请求github_json(url)
+            if not data:
+                raise Exception(f"未获取到分支 {目标分支} 的提交记录。")
+            item = data[0]
+            message = (item.get("commit") or {}).get("message") or ""
+            result = {
+                "sha": item.get("sha") or "",
+                "message": message,
+                "published_at": (
+                    (item.get("commit") or {}).get("committer") or {}
+                ).get("date", ""),
+                "html_url": item.get("html_url") or "",
+            }
+            self._commit_cache[目标分支] = (now, result)
+            return dict(result)
+        except Exception as api_exc:
+            logger.warning(
+                f"GitHub commits API 失败，尝试 Atom/git 回退: {api_exc}"
+            )
+
+        # 2) commits.atom（带发布时间）
+        atom_result = await self._fetch_latest_commit_via_atom(目标分支)
+        if atom_result and atom_result.get("sha"):
+            self._commit_cache[目标分支] = (now, atom_result)
+            return dict(atom_result)
+
+        # 3) git ls-remote（无时间）
+        try:
+            output = await self._git_ls_remote(
+                "--heads",
+                ref=f"refs/heads/{目标分支}",
+            )
+            sha = ""
+            for line in output.splitlines():
+                line = line.strip()
+                if not line or "\t" not in line:
+                    continue
+                maybe_sha, ref = line.split("\t", 1)
+                if ref.endswith(f"refs/heads/{目标分支}") or ref == 目标分支:
+                    sha = maybe_sha
+                    break
+            if not sha:
+                first = output.strip().splitlines()[0] if output.strip() else ""
+                if first and "\t" in first:
+                    sha = first.split("\t", 1)[0]
+            if not sha:
+                raise Exception(f"git ls-remote 未找到分支 {目标分支}")
+            result = {
+                "sha": sha,
+                "message": f"分支 {目标分支} 最新提交（git ls-remote）",
+                "published_at": "",
+                "html_url": f"{self.仓库网页地址}/commit/{sha}",
+            }
+            self._commit_cache[目标分支] = (now, result)
+            return dict(result)
+        except Exception as git_exc:
+            raise Exception(
+                f"无法获取分支 {目标分支} 最新提交：API / Atom / git 均失败"
+            ) from git_exc
+
+    def _build_core_package_url(self, version: str | None) -> str | None:
+        """魔改版不使用官方托管包。"""
+        return None
 
     def terminate_child_processes(self) -> None:
-        """终止当前进程的所有子进程
-        使用 psutil 库获取当前进程的所有子进程，并尝试终止它们
-        """
+        """终止当前进程的所有子进程。"""
         try:
             parent = psutil.Process(os.getpid())
             children = parent.children(recursive=True)
@@ -148,10 +634,7 @@ class AstrBotUpdator(RepoZipUpdator):
         os.execv(executable, argv)
 
     def _reboot(self, delay: int = 3) -> None:
-        """重启当前程序
-        在指定的延迟后，终止所有子进程并重新启动程序
-        这里只能使用 os.exec* 来重启程序
-        """
+        """重启当前程序。"""
         if is_desktop_managed_backend():
             logger.error(DESKTOP_MANAGED_RESTART_MESSAGE)
             raise RuntimeError(DESKTOP_MANAGED_RESTART_MESSAGE)
@@ -174,13 +657,104 @@ class AstrBotUpdator(RepoZipUpdator):
         current_version: str | None,
         consider_prerelease: bool = True,
     ) -> ReleaseInfo | None:
-        """检查更新已禁用，避免触发 AstrBot 自动更新流程。"""
-        logger.warning("已禁用 ldm 更新检查。")
-        return None
+        """检查 landamao/ldm_AstrBot 是否有新版本。"""
+        import re
+
+        current = VERSION if current_version is None else current_version
+        try:
+            releases = await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
+        except Exception as exc:
+            logger.warning(f"获取版本列表失败，将回退到分支提交检查: {exc}")
+            releases = []
+
+        if releases:
+            sel = None
+            if consider_prerelease:
+                sel = releases[0]
+            else:
+                for data in releases:
+                    tag_name = str(data.get("tag_name") or "")
+                    if re.search(
+                        r"[\-_.]?(alpha|beta|rc|dev)[\-_.]?\d*$",
+                        tag_name,
+                        re.IGNORECASE,
+                    ):
+                        continue
+                    sel = data
+                    break
+            if sel and sel.get("tag_name"):
+                tag_name = str(sel["tag_name"])
+                # 仅对 vX.Y.Z 风格做 semver 比较；其它 tag 交给 commit 回退
+                if tag_name.startswith("v") or tag_name[:1].isdigit():
+                    if self.compare_version(current, tag_name) < 0:
+                        return ReleaseInfo(
+                            version=tag_name,
+                            published_at=sel.get("published_at") or "",
+                            body=f"{tag_name}\n\n{sel.get('body') or ''}",
+                        )
+
+        # 无可用 Release 或已是最新 tag：回退 commit 检查
+        try:
+            latest = await self._获取最新提交()
+        except Exception as exc:
+            logger.warning(f"获取默认分支最新提交失败: {exc}")
+            return None
+
+        latest_sha = (latest.get("sha") or "").strip()
+        if not latest_sha:
+            return None
+
+        meta = self._读取更新元数据()
+        local_sha = str(meta.get("sha") or "").strip()
+        if local_sha and local_sha == latest_sha:
+            return None
+
+        short = latest_sha[:8]
+        body = latest.get("message") or ""
+        return ReleaseInfo(
+            version=f"commit-{short}",
+            published_at=latest.get("published_at") or "",
+            body=(
+                f"检测到默认分支 {self.默认分支} 有新提交\n"
+                f"SHA: {latest_sha}\n\n"
+                f"{body}"
+            ),
+        )
 
     async def get_releases(self) -> list:
-        logger.warning("已禁用 ldm 版本发布列表获取。")
-        return []
+        """返回可安装版本列表（默认分支最新提交 + 标签，新版本在前）。"""
+        releases: list = []
+        try:
+            releases = await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
+        except Exception as exc:
+            logger.warning(f"获取 GitHub Releases 列表失败: {exc}")
+
+        # 再保险排一次：API 返回顺序不一定是新→旧，且要处理 -v2/-v3
+        releases = sorted(
+            releases,
+            key=lambda item: self._tag_sort_key(str(item.get("tag_name") or "")),
+            reverse=True,
+        )
+
+        try:
+            latest = await self._获取最新提交()
+            sha = latest.get("sha") or ""
+            if sha:
+                short = sha[:8]
+                releases = [
+                    {
+                        "version": f"分支 {self.默认分支} @ {short}",
+                        "published_at": latest.get("published_at") or "",
+                        "body": latest.get("message") or "",
+                        "tag_name": sha,
+                        "zipball_url": self._构建源码包地址(sha=sha),
+                    },
+                    *releases,
+                ]
+        except Exception as exc:
+            logger.warning(f"附加默认分支提交到版本列表失败: {exc}")
+
+        return releases
 
     async def update(
         self,
@@ -190,21 +764,16 @@ class AstrBotUpdator(RepoZipUpdator):
         proxy="",
         progress_callback=None,
     ) -> None:
-        logger.warning(
-            "已禁用 ldm 核心源码自动更新，跳过 update 调用。"
+        zip_path = await self.download_update_package(
+            latest=latest,
+            version=version,
+            proxy=proxy,
+            progress_callback=progress_callback,
         )
-        if progress_callback:
-            result = progress_callback(
-                {
-                    "progress": 100,
-                    "current": 0,
-                    "total": 0,
-                    "message": "已禁用 ldm 核心源码自动更新。",
-                }
-            )
-            if hasattr(result, "__await__"):
-                await result
-        return None
+        self.apply_update_package(zip_path)
+
+        if reboot:
+            self._reboot()
 
     async def download_update_package(
         self,
@@ -214,42 +783,332 @@ class AstrBotUpdator(RepoZipUpdator):
         path: str | Path = "temp.zip",
         progress_callback=None,
     ) -> Path:
-        """核心更新包下载已禁用；不访问网络、不写 zip。"""
-        logger.warning(
-            "已禁用 ldm 核心源码自动更新，跳过 download_update_package 调用。"
-        )
-        if progress_callback:
-            result = progress_callback(
-                {
-                    "progress": 100,
-                    "current": 0,
-                    "total": 0,
-                    "message": "已禁用 ldm 核心源码自动更新。",
-                }
+        """下载 ldm_AstrBot 源码更新包（不解压）。"""
+        if os.environ.get("ASTRBOT_CLI") or os.environ.get("ASTRBOT_LAUNCHER"):
+            raise Exception(
+                "当前以 CLI/Launcher 方式运行，请改用源码目录方式更新 ldm_AstrBot。"
             )
-            if hasattr(result, "__await__"):
-                await result
-        return Path(path)
+
+        file_url = None
+        target_version = None
+        target_sha = None
+        version_text = "" if version is None else str(version).strip()
+
+        if latest or version_text in {"", "latest"}:
+            try:
+                update_data = await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
+            except Exception:
+                update_data = []
+
+            if update_data:
+                latest_version = update_data[0]["tag_name"]
+                if self.compare_version(VERSION, latest_version) >= 0:
+                    # tag 不比当前新时，仍允许用户强制拉最新分支
+                    logger.info(
+                        f"当前版本 {VERSION} 不小于最新 Release {latest_version}，"
+                        f"改为下载默认分支 {self.默认分支}。"
+                    )
+                    latest_commit = await self._获取最新提交()
+                    target_sha = latest_commit["sha"]
+                    target_version = f"commit-{target_sha[:8]}"
+                    file_url = self._构建源码包地址(sha=target_sha)
+                else:
+                    target_version = latest_version
+                    file_url = update_data[0].get("zipball_url") or self._构建源码包地址(
+                        tag=latest_version
+                    )
+            else:
+                latest_commit = await self._获取最新提交()
+                target_sha = latest_commit["sha"]
+                target_version = f"commit-{target_sha[:8]}"
+                file_url = self._构建源码包地址(sha=target_sha)
+        elif version_text.startswith("v") or version_text.startswith("V"):
+            update_data = await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
+            for data in update_data:
+                if data["tag_name"] == version_text:
+                    target_version = data["tag_name"]
+                    file_url = data.get("zipball_url") or self._构建源码包地址(
+                        tag=version_text
+                    )
+                    break
+            if not file_url:
+                # 没有对应 release 时，直接按 tag 归档下载
+                target_version = version_text
+                file_url = self._构建源码包地址(tag=version_text)
+        elif len(version_text) == 40 and all(
+            ch in "0123456789abcdefABCDEF" for ch in version_text
+        ):
+            target_sha = version_text
+            target_version = f"commit-{target_sha[:8]}"
+            file_url = self._构建源码包地址(sha=target_sha)
+        elif version_text in {self.默认分支, "main", "master"}:
+            latest_commit = await self._获取最新提交(version_text)
+            target_sha = latest_commit["sha"]
+            target_version = f"commit-{target_sha[:8]}"
+            file_url = self._构建源码包地址(sha=target_sha)
+        else:
+            # 当作分支名
+            latest_commit = await self._获取最新提交(version_text)
+            target_sha = latest_commit["sha"]
+            target_version = f"commit-{target_sha[:8]}"
+            file_url = self._构建源码包地址(sha=target_sha)
+
+        if not file_url:
+            raise Exception(f"无法解析更新地址: version={version_text!r}")
+
+        logger.info(
+            f"准备从 {self.仓库所有者}/{self.仓库名} 下载更新包: {target_version}"
+        )
+        file_url = self._拼接代理(file_url, proxy or "")
+
+        zip_path = Path(path)
+        ensure_dir(zip_path.parent)
+        await self._download_file(
+            file_url,
+            str(zip_path),
+            progress_callback=progress_callback,
+        )
+        if not zipfile.is_zipfile(zip_path):
+            raise RuntimeError("下载的更新包不是有效 ZIP 文件")
+
+        # 把目标版本信息暂存在旁路 meta，apply 时写入正式元数据
+        side_meta = zip_path.with_suffix(zip_path.suffix + ".meta.json")
+        side_meta.write_text(
+            json.dumps(
+                {
+                    "version": target_version,
+                    "sha": target_sha,
+                    "source": f"{self.仓库所有者}/{self.仓库名}",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return zip_path
+
+    def _定位包内webui_dist(self, 包根目录: Path) -> Path | None:
+        """在源码包中寻找可部署的 WebUI dist。"""
+        候选 = [
+            包根目录 / "dashboard" / "dist",
+            包根目录 / "data" / "dist",
+            包根目录 / "dist",
+        ]
+        for path in 候选:
+            if (path / "index.html").is_file():
+                return path
+        return None
+
+    def _安全覆盖目录(self, 源目录: Path, 目标目录: Path) -> None:
+        ensure_dir(目标目录.parent)
+        if 目标目录.exists():
+            shutil.rmtree(目标目录, onerror=on_error)
+        shutil.copytree(源目录, 目标目录)
+
+    def _应用源码包内容(self, 包根目录: Path) -> Path | None:
+        """把更新包内容同步到本地。
+
+        规则：
+        1. 覆盖项目根下所有文件与目录（含 main.py、README.md、requirements.txt 等）
+        2. 跳过受保护顶层目录（data/.venv/node_modules/.git 等）
+        3. data 不整目录覆盖；WebUI 由后续 _应用webui 单独覆盖 data/dist
+        """
+        目标根 = Path(self.MAIN_PATH)
+        ensure_dir(目标根)
+
+        已覆盖: list[str] = []
+        已跳过: list[str] = []
+
+        for 名称 in sorted(os.listdir(包根目录)):
+            if 名称 in self.受保护顶层目录:
+                已跳过.append(名称)
+                continue
+            if 名称.endswith(".meta.json"):
+                continue
+            if 名称 in {".", ".."}:
+                continue
+
+            源路径 = 包根目录 / 名称
+            目标路径 = 目标根 / 名称
+
+            if 源路径.is_dir():
+                # 目录：先删后整棵拷贝，确保与更新包一致
+                if 目标路径.exists():
+                    if 目标路径.is_dir():
+                        shutil.rmtree(目标路径, onerror=on_error)
+                    else:
+                        目标路径.unlink()
+                shutil.copytree(源路径, 目标路径)
+            else:
+                # 根文件：直接覆盖 main.py / README / pyproject.toml 等
+                ensure_dir(目标路径.parent)
+                if 目标路径.exists():
+                    if 目标路径.is_dir():
+                        shutil.rmtree(目标路径, onerror=on_error)
+                    else:
+                        目标路径.unlink()
+                shutil.copy2(源路径, 目标路径)
+
+            已覆盖.append(名称)
+
+        logger.info(
+            "源码包覆盖完成: "
+            f"已覆盖 {len(已覆盖)} 项（含根文件/目录）; "
+            f"已跳过保护项={已跳过 or ['无']}"
+        )
+        if 已覆盖:
+            预览 = ", ".join(已覆盖[:20])
+            if len(已覆盖) > 20:
+                预览 += f" ...(+{len(已覆盖) - 20})"
+            logger.info(f"本次覆盖项: {预览}")
+
+        # 返回包内 WebUI dist，供后续只覆盖 data/dist
+        return self._定位包内webui_dist(包根目录)
+
+    def _应用webui(self, webui_dist: Path | None) -> bool:
+        """只覆盖 data/dist，不动 data 下其它内容（配置/数据库/插件数据等）。"""
+        if webui_dist is None:
+            logger.warning(
+                "更新包中未找到 dashboard/dist 或 data/dist（缺 index.html），"
+                "跳过 WebUI 覆盖。"
+            )
+            return False
+
+        目标 = Path(get_astrbot_data_path()) / "dist"
+        logger.info(f"正在覆盖 WebUI（仅 data/dist）: {webui_dist} -> {目标}")
+        # 尽量保留 assets/version：若新包没有 version 而旧包有，写回旧 version 仅作兜底
+        旧version文件 = 目标 / "assets" / "version"
+        旧version内容 = None
+        if 旧version文件.is_file():
+            try:
+                旧version内容 = 旧version文件.read_text(encoding="utf-8")
+            except Exception:
+                旧version内容 = None
+
+        self._安全覆盖目录(webui_dist, 目标)
+
+        新version文件 = 目标 / "assets" / "version"
+        if not 新version文件.is_file() and 旧version内容 is not None:
+            ensure_dir(新version文件.parent)
+            新version文件.write_text(旧version内容, encoding="utf-8")
+            logger.info("新 WebUI 缺少 assets/version，已回写旧 version 文件。")
+        return True
 
     def apply_update_package(self, zip_path: str | Path) -> None:
-        """核心更新包应用已禁用；不解压、不覆盖源码。"""
-        logger.warning(
-            "已禁用 ldm 核心源码自动更新，跳过 apply_update_package 调用。"
+        """应用已下载的 ldm_AstrBot 更新包（核心 + 可选 WebUI）。"""
+        zip_path = Path(zip_path)
+        if not zipfile.is_zipfile(zip_path):
+            raise RuntimeError(f"无效更新包: {zip_path}")
+
+        logger.info("开始应用 ldm_AstrBot 更新包...")
+        side_meta_path = zip_path.with_suffix(zip_path.suffix + ".meta.json")
+        side_meta = {}
+        if side_meta_path.is_file():
+            try:
+                side_meta = json.loads(side_meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                side_meta = {}
+
+        with tempfile.TemporaryDirectory(prefix="ldm-astrbot-update-") as tmp:
+            tmp_root = Path(tmp)
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                corrupt = archive.testzip()
+                if corrupt:
+                    raise RuntimeError(f"更新包校验失败: {corrupt}")
+                archive_root_name = self._resolve_archive_root_dir(archive.namelist())
+                archive.extractall(tmp_root)
+
+            if archive_root_name:
+                包根目录 = tmp_root / archive_root_name
+            else:
+                包根目录 = tmp_root
+
+            if not 包根目录.is_dir():
+                # 兜底：GitHub 归档通常只有一个顶层目录
+                children = [p for p in tmp_root.iterdir() if p.is_dir()]
+                if not children:
+                    raise RuntimeError("更新包内容为空，无法应用。")
+                包根目录 = children[0]
+
+            webui_dist = self._应用源码包内容(包根目录)
+            webui_applied = self._应用webui(webui_dist)
+
+        try:
+            zip_path.unlink(missing_ok=True)
+        except Exception:
+            logger.warning(f"删除临时更新包失败，可手动删除: {zip_path}")
+        try:
+            side_meta_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        self._写入更新元数据(
+            version=side_meta.get("version"),
+            sha=side_meta.get("sha"),
+            source=side_meta.get("source")
+            or f"{self.仓库所有者}/{self.仓库名}",
+            webui_applied=webui_applied,
+            local_version=VERSION,
         )
-        return None
+        logger.info("ldm_AstrBot 更新包应用完成。")
+
+    async def apply_webui_only_from_package(
+        self,
+        latest=True,
+        version=None,
+        proxy="",
+        progress_callback=None,
+    ) -> bool:
+        """仅从 ldm_AstrBot 更新包同步 WebUI 到 data/dist。"""
+        update_temp_parent = Path(get_astrbot_data_path()) / "temp" / "updates"
+        ensure_dir(update_temp_parent)
+        zip_path = update_temp_parent / f"webui-only-{int(time.time())}.zip"
+        try:
+            zip_path = await self.download_update_package(
+                latest=latest,
+                version=version,
+                proxy=proxy or "",
+                path=zip_path,
+                progress_callback=progress_callback,
+            )
+            with tempfile.TemporaryDirectory(prefix="ldm-webui-only-") as tmp:
+                tmp_root = Path(tmp)
+                with zipfile.ZipFile(zip_path, "r") as archive:
+                    archive.extractall(tmp_root)
+                children = [p for p in tmp_root.iterdir() if p.is_dir()]
+                包根目录 = children[0] if children else tmp_root
+                webui_dist = self._定位包内webui_dist(包根目录)
+                return self._应用webui(webui_dist)
+        finally:
+            try:
+                Path(zip_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            side = Path(str(zip_path) + ".meta.json")
+            try:
+                side.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     async def download_from_repo_url(
         self, target_path: str, repo_url: str, proxy=""
     ) -> None:
-        """仓库源码下载已禁用；不访问网络、不写 zip。"""
-        logger.warning(
-            "已禁用 ldm 仓库源码下载，跳过 download_from_repo_url 调用。"
+        """按仓库 URL 下载源码 zip（用于通用仓库安装场景）。"""
+        author, repo, branch = await self.resolve_github_source_branch(repo_url)
+        logger.info(f"正在下载更新 {repo} ...")
+        logger.info(f"正在从分支 {branch} 下载 {author}/{repo}")
+        release_url = (
+            f"https://github.com/{author}/{repo}/archive/refs/heads/{branch}.zip"
         )
-        return None
+        release_url = self._拼接代理(release_url, proxy or "")
+        await self._download_file(release_url, target_path + ".zip")
 
     def unzip_file(self, zip_path: str, target_dir: str) -> None:
-        """源码包解压应用已禁用；不解压、不覆盖目标目录。"""
-        logger.warning(
-            "已禁用 ldm 源码包解压/覆盖，跳过 unzip_file 调用。"
-        )
-        return None
+        """解压 zip，并把压缩包内第一个根目录内容移动到 target_dir。"""
+        ensure_dir(target_dir)
+        with zipfile.ZipFile(zip_path, "r") as z:
+            update_dir = self._resolve_archive_root_dir(z.namelist())
+            z.extractall(target_dir)
+        logger.debug(f"解压文件完成: {zip_path}")
+        self._finalize_extracted_archive(zip_path, target_dir, update_dir)

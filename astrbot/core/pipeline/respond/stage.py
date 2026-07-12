@@ -268,9 +268,13 @@ class RespondStage(Stage):
             logger.debug("记录已发送 LLM 文本失败", exc_info=True)
 
     def _should_stop_sending(self, event: AstrMessageEvent) -> bool:
-        """打断回复：发送阶段应立即停止后续分段/流式输出。"""
-        if event.is_stopped():
-            return True
+        """打断回复：发送阶段应立即停止后续分段/流式输出。
+
+        注意：不要用 event.is_stopped()。
+        插件里常见写法是先 stop_event() 再 yield result——stop 只表示终止事件传播
+        （后续插件/默认 LLM 不再跑），当前这次 yield 仍应由 RespondStage 正常发出。
+        真正的打断信号是 agent_stop_requested / agent_user_aborted。
+        """
         if event.get_extra("agent_stop_requested"):
             return True
         if event.get_extra("agent_user_aborted"):

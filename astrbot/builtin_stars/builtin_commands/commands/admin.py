@@ -69,9 +69,33 @@ class AdminCommands:
             event.set_result(MessageEventResult().message("此 SID 不在白名单内。"))
 
     async def update_dashboard(self, event: AstrMessageEvent) -> None:
-        """更新管理面板"""
+        """从 landamao/ldm_AstrBot 同步管理面板到 data/dist。"""
+        from astrbot.core.updator import AstrBotUpdator
+
         await event.send(
             MessageChain().message(
-                "已禁用 WebUI 自动下载/覆盖。请手动构建 dashboard 并复制到 data/dist。"
+                "正在从 landamao/ldm_AstrBot 同步 WebUI，请稍候..."
             )
         )
+        try:
+            applied = await AstrBotUpdator().apply_webui_only_from_package(
+                latest=True,
+                version=None,
+                proxy="",
+            )
+            if applied:
+                await event.send(
+                    MessageChain().message(
+                        "WebUI 已从 landamao/ldm_AstrBot 同步完成。刷新面板即可。"
+                    )
+                )
+            else:
+                await event.send(
+                    MessageChain().message(
+                        "同步失败：更新包中未找到 dashboard/dist 或 data/dist。"
+                    )
+                )
+        except Exception as exc:
+            await event.send(
+                MessageChain().message(f"同步 WebUI 失败: {exc}")
+            )
