@@ -1,3 +1,4 @@
+print("\n\n正在初始化启动…\n")
 import argparse
 import asyncio
 import mimetypes

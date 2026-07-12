@@ -21,6 +21,9 @@ from .group_chat_context import GroupChatContext
 import os
 import shutil
 
+import os
+import shutil
+
 def copy_files_to_script_dir():
     # 获取当前脚本的绝对路径和所在目录
     script_file = os.path.abspath(__file__)
@@ -29,14 +32,21 @@ def copy_files_to_script_dir():
     # 项目根目录：脚本目录向上三级（astrbot/builtin_stars/astrbot -> AstrBot）
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(script_dir)))
 
-    # 要复制的文件列表
+    # 复制文件（覆盖同名文件，但不处理多余旧文件）
     files_to_copy = ['README.md', 'CHANGELOG.md']
-
     for filename in files_to_copy:
         src = os.path.join(project_root, filename)
         dst = os.path.join(script_dir, filename)
         if os.path.isfile(src):
-            shutil.copy2(src, dst)  # copy2 保留元数据
+            shutil.copy2(src, dst)
+
+    # 复制文件夹 readme_image（完全替换：先删除旧目录，再复制新目录）
+    src_dir = os.path.join(project_root, 'readme_image')
+    dst_dir = os.path.join(script_dir, 'readme_image')
+    if os.path.isdir(src_dir):
+        if os.path.exists(dst_dir):
+            shutil.rmtree(dst_dir)          # 删除整个旧目录
+        shutil.copytree(src_dir, dst_dir)   # 全新复制
 
 try:
     copy_files_to_script_dir()
