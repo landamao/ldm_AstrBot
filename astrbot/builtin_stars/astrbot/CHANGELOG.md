@@ -5,6 +5,134 @@
 
 ---
 
+## [4.26.7] — 2026-07-13
+
+基于 ldm v4.26.6 的增量更新。
+
+### 更新检查
+
+- **只检查正式发版（Release）**：有新 tag/Release 才会提示可更新
+- 不再把默认分支的日常提交当成“有新版本”
+- 版本列表只显示已发布的版本号，更清晰、更稳
+
+### 平台日志
+
+- **自动滚动更像终端**：滑到最底部会自动跟随新日志；往上翻会暂停；再滑回底部会恢复
+- 去掉了手动“自动滚动”开关，用滚动位置自动控制
+- **字体亮度可选「亮色 / 柔和」**：
+  - 亮色：更鲜艳，对比更强，黑色背景下观感更好
+  - 柔和：亮度官方风格一致，除了日志级别颜色，适合习惯官方风格的
+- 亮度选择会记住，刷新后仍保留
+- 页面说明合并成一行，日志区域更省空间
+
+### 其他
+
+- 版本号更新为 **4.26.7**
+
+### 反馈交流：
+   - QQ 群：`1103659691`
+   - Telegram：`@landamaogroup`
+
+---
+
+## [4.26.6] — 2026-07-12
+
+基于官方 AstrBot v4.26.5 的 ldm 魔改发版。  
+更新源：`landamao/ldm_AstrBot`（可用环境变量覆盖）。
+
+### 修复
+
+- **插件 `stop_event()` 后再 `yield` 消息发不出去**：魔改打断回复时，发送阶段误把 `event.is_stopped()` 当成打断信号，导致插件「先 `stop_event()` 再 `yield plain_result`」无法发出（官方版正常）
+  - 发送阶段 / 流式发送 / `process_buffer` 现只认 `agent_stop_requested` / `agent_user_aborted`
+  - `stop_event()` 仍只负责终止事件传播（后续插件 / 默认 LLM 不跑），不拦截当前这次 yield 的发送
+  - 内置打断回复、撤回取消等真正打断路径不受影响，仍可拦截后续分段 / 流式输出
+  - `await event.send(...)` 路径本就可发，行为不变
+
+### 新增
+
+- **自更新（核心 + WebUI）**：恢复 WebUI / 管理端更新能力，统一从 `landamao/ldm_AstrBot` 拉取，不再走官方 `soulter` 托管包
+  - 检查更新：仅比较 GitHub Release tag（semver）；无可用 Release 或已是最新 tag 时视为无更新（**不**再回退 commit）
+  - 版本列表：仅全部 Release/tag，新版本在前
+  - 安装方式：下载源码 zip → 校验 → 解压 → 覆盖安装目录
+  - WebUI：从包内 `dashboard/dist` 或 `data/dist` 同步到本地 `data/dist`
+  - 保护运行态：不整目录覆盖 `data` / `.venv` / `venv` / `node_modules` / `.git` 等；`data` 仅同步 `data/dist`
+- **GitHub 限流兜底**：REST API 失败时依次回退 Atom 源、`git ls-remote`；支持 `LDM_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` / `ASTRBOT_GITHUB_TOKEN` 提高配额；结果缓存（默认 300s，可用 `LDM_ASTRBOT_UPDATE_CACHE_TTL`）
+- **tag 排序**：支持 `v4.26.5-v2` / `v4.26.5-v3` 这类后缀，保证 `-v3 > -v2 > 基线 tag`
+- **欢迎页「反馈交流」**：替换原爱发电入口
+  - QQ 群：`1103659691` → https://qm.qq.com/q/c7Nc3Tl1Je
+  - Telegram：`@landamaogroup` → https://t.me/landamaogroup
+
+### 变更
+
+- 版本号：`__version__` / `pyproject.toml` / `data/dist/assets/version` → **4.26.6** / **v4.26.6**
+- 更新相关前端：发布时间为空时显示 `-`，避免 `Invalid Date`
+- 管理指令 / dashboard 下载链路改为走 ldm 更新源（`updator` / `update_service` / `io` / 管理命令）
+
+### 环境变量
+
+| 变量 | 含义 | 默认 |
+|------|------|------|
+| `LDM_ASTRBOT_REPO_OWNER` | 更新仓库所有者 | `landamao` |
+| `LDM_ASTRBOT_REPO_NAME` | 更新仓库名 | `ldm_AstrBot` |
+| `LDM_ASTRBOT_UPDATE_CACHE_TTL` | 远端信息缓存秒数 | `300` |
+| `LDM_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` / `ASTRBOT_GITHUB_TOKEN` | GitHub API Token（提高限额） | 无 |
+
+### 相关文件
+
+- `astrbot/core/updator.py` — ldm 更新器（检查 / 列表 / 下载 / 应用 / 限流兜底）
+- `astrbot/dashboard/services/update_service.py` — WebUI 更新服务
+- `astrbot/core/utils/io.py` — dashboard 下载与解压
+- `astrbot/builtin_stars/builtin_commands/commands/admin.py` — 管理端更新命令
+- `dashboard/src/views/WelcomePage.vue` + `dashboard/src/i18n/locales/*/features/welcome.json` — 反馈交流
+- `dashboard/src/layouts/full/vertical-header/VerticalHeader.vue` — 发布时间显示兜底
+- `astrbot/__init__.py` / `pyproject.toml` / `data/dist/assets/version` — 版本号
+- `astrbot/core/pipeline/respond/stage.py` — 修复：发送阶段不再用 `is_stopped()` 误拦 yield 发送
+- `astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py` — 修复：流式/fallback 发送同口径
+- `astrbot/core/platform/astr_message_event.py` — 修复：`process_buffer` 同口径
+
+### 使用注意
+
+1. 发版流程：先改源码版本号 → 推送到 `landamao/ldm_AstrBot` → 打 GitHub tag/Release（如 `v4.26.6`）
+2. 本地开发目录与运行目录可能不同（常见：源码 `~/AstrBot`，运行 `~/ldmbot`），需自行同步后再重启
+3. 同步时不要用 `--exclude='dashboard'`（会误伤后端 `astrbot/dashboard`）；应排除根前端：`--exclude='/dashboard/'`
+4. 部署 WebUI 到 `data/dist`：先备份并写回 `assets/version`，清空后再拷贝，避免旧 hash 资源残留
+5. **不要自动重启**服务；更新完成后请手动重启 AstrBot
+
+---
+
+## 2026-07-12 — 分段回复增强（模式隔离 / Reply / 阈值）
+
+### 新增
+
+- 简易 / 进阶 / 专业均可见 **超长不分段阈值**（`words_count_threshold`，`0` = 不限制）
+- **智能回复** / **保留回复**（配置键：`enable_smart_reply` / `enable_keep_reply`）
+  - 简易：强制双开，UI 不展示开关  
+  - 进阶 / 专业：可配置，默认开  
+- 入站消息会话追踪，支持「插话时第一段加 Reply」
+
+### 变更
+
+- `resolve_segmented_reply_config()`：**当前模式未展示的配置项强制用模板默认值**，不再被进阶/专业残留覆盖  
+- 简易 / 进阶发送延迟只由 **发送节奏** 驱动；专业模式才直接使用间隔策略参数  
+- 分段节奏日志改为中文，并按模式只打印生效字段  
+- WebUI i18n 补齐智能回复 / 保留回复 / 超长阈值文案；`data/dist` 需部署且保留 `assets/version`
+
+### 日志示例
+
+```text
+分段回复节奏: 模式: 简易 发送节奏: 慢速 固定延迟: 2.5s 智能回复: 开 保留回复: 开
+```
+
+### 相关文件
+
+- `astrbot/core/utils/segmented_reply.py` — resolve / 会话追踪 / Reply 辅助  
+- `astrbot/core/pipeline/respond/stage.py` — 分段发送与节奏日志  
+- `astrbot/core/pipeline/preprocess_stage/stage.py` — 入站消息 ID  
+- `astrbot/core/config/default.py` — 默认值、schema、WebUI metadata  
+- `扩展功能更新说明.md` — 使用说明同步更新  
+
+---
+
 ## 扩展功能增强
 
 > 本版本说明完整收录自 `扩展功能更新说明.md`。  
@@ -127,6 +255,8 @@
 - 🛡️ **智能保护**：代码块、表格、引号括号内尽量不乱切  
 - 🛑 **原生支持打断**：发送链路会检查打断信号，和「打断回复」是一套的  
 - 🧰 **简易 / 进阶 / 专业三档**：新手只调几个开关，进阶再抠细节  
+- 🔗 **智能回复 / 保留回复**：插话时第一段可引用；保留原 Reply 语义  
+- 🧱 **模式隔离**：低档模式看不到的项回落模板，不被高档残留污染  
 - 🏗️ **框架自己拆段自己发**：不走「插件抢发消息」那套，副作用更少  
 
 ##### ⚠️ 注意事项（强烈建议）
@@ -146,39 +276,34 @@
 
 | 模式 | 图标 | 适合谁 | 你会看到什么 |
 |------|------|--------|----------------|
-| **简易模式** | 🌱 | 开箱即用 | 最多几段、发送节奏、删除特定文本 |
-| **进阶模式** | 🔧 | 想微调列表 | 符号列表、保护词、均分、分段后清理等 |
-| **专业模式** | 🧪 | 完全掌控 | 正则、间隔策略、智能保护、清理正则等 |
+| **简易模式** | 🌱 | 开箱即用 | 最多几段、发送节奏、删除特定文本、超长不分段阈值 |
+| **进阶模式** | 🔧 | 想微调列表 | 简易项 + 智能/保留回复、符号列表、保护词、均分、分段后清理等 |
+| **专业模式** | 🧪 | 完全掌控 | 正则、间隔策略、智能保护、清理正则等全部参数 |
 
 ##### 🌱 简易模式
 
-- 最多拆成几段  
-- 发送节奏：
-  - 🌊 **自然** — 按字数线性延迟  
-  - ⚡ **快速** — 几乎不停顿  
-  - 🐢 **慢速** — 每段停更久  
-- 删除特定文本（分段前清理）
+可见项：最多几段、发送节奏（自然/快速/慢速）、删除特定文本、超长不分段阈值。  
 
-后台会自动启用智能断句 + 均分等默认策略。
+后台强制：智能断句 + 均分、仅 LLM 分段、**智能/保留回复恒开**；其它未展示项用模板默认值。
 
 ##### 🔧 进阶模式
 
-在简易基础上增加：
-
-- 仅对 LLM 结果分段  
-- 从哪些符号后断开  
-- 这些文本前后不分段  
-- 智能均分  
-- 分段后删除文本  
+在简易基础上增加：智能回复 / 保留回复（可配）、仅 LLM 分段、符号列表、保护词、智能均分、分段后清理。  
+专业专属项回落模板；延迟仍由发送节奏驱动。
 
 ##### 🧪 专业模式
 
-完整参数，例如：
+完整参数：间隔策略、正则、智能断句保护、最小段长、超长阈值、智能/保留回复、清理正则等。
 
-- 发送间隔：线性 / 对数 / 随机 / 固定  
-- 分段模式：符号列表 / 正则 / 兼容词列表  
-- 智能断句保护、最小段长、超长不分段阈值  
-- 分段后清理正则、清理段首尾空行  
+##### 📌 模式隔离
+
+当前模式未展示的字段在 `resolve_segmented_reply_config()` 中强制回落 `DEFAULT_CONFIG` 模板，避免进阶/专业残留污染简易/进阶生效值。
+
+##### 🔗 智能回复 / 保留回复
+
+- 智能回复：源消息后有新消息时，第一段加 Reply（钉钉跳过）  
+- 保留回复：保留原 Reply，最后一段也可带 Reply  
+- 简易强制双开；进阶/专业可配置  
 
 ##### 显示逻辑
 
@@ -193,6 +318,7 @@
 | 📦 代码块 / 表格 | 整块保护 |
 | 📐 智能均分 | 按总字数与最大段数尽量均匀 |
 | 🧹 清理 | 前后删除固定文本、可选正则清理 |
+| 💬 智能 / 保留回复 | 分段发送时的 Reply 策略 |
 
 ---
 
@@ -280,6 +406,8 @@ provider_ltm_settings               # 群聊上下文 + 主动回复
 | 🛑 开打断 + 开分段，回复中途再发一句 | 立刻停后续分段，处理新消息 |
 | 📜 看对话历史 | 只有已发出内容；被打断那条末尾可有提示 |
 | 💬 开简易分段 | 长回复拆成多条，节奏自然 |
+| 🔗 简易下插话 | 第一段可带 Reply（智能回复强制开） |
+| 🧱 先改专业再切简易 | 节奏/Reply 用模板，不被专业残留带跑 |
 | 🧠 关群聊上下文 | 只剩总开关 |
 | 🎯 关主动回复 | 只剩总开关，且不在上下文卡片里 |
 
@@ -310,5 +438,5 @@ provider_ltm_settings               # 群聊上下文 + 主动回复
 ### 相关文档
 
 - 独立说明文档：`扩展功能更新说明.md`  
-- 排查日志关键词：「发送消息」「分段发送」「打断」
+- 排查日志关键词：`分段回复节奏`、`分段发送`、`智能回复`、打断相关 INFO
 

@@ -27,9 +27,8 @@ class AstrBotUpdator(RepoZipUpdator):
     """ldm 魔改版更新器：从 landamao/ldm_AstrBot 检查并应用更新。
 
     支持：
-    1. GitHub Releases（优先，按 tag/semver 比较）
-    2. 无 Release 时回退到默认分支最新 commit
-    3. 从同一源码包同步核心源码与 WebUI（dashboard/dist 或 data/dist）
+    1. 仅检查 / 列表 GitHub Releases（按 tag/semver 比较，不再回退 commit）
+    2. 从同一源码包同步核心源码与 WebUI（dashboard/dist 或 data/dist）
     """
 
     # 应用更新时禁止整目录覆盖的顶层项（保护本地运行态）
@@ -73,7 +72,6 @@ class AstrBotUpdator(RepoZipUpdator):
         self.MAIN_PATH = get_astrbot_path()
         self.仓库所有者 = os.environ.get("LDM_ASTRBOT_REPO_OWNER", "landamao").strip()
         self.仓库名 = os.environ.get("LDM_ASTRBOT_REPO_NAME", "ldm_AstrBot").strip()
-        self.默认分支 = os.environ.get("LDM_ASTRBOT_BRANCH", "main").strip() or "main"
         self.ASTRBOT_RELEASE_API = (
             f"https://api.github.com/repos/{self.仓库所有者}/{self.仓库名}/releases"
         )
@@ -83,7 +81,6 @@ class AstrBotUpdator(RepoZipUpdator):
         # GitHub API 短缓存，降低限流概率
         self._releases_cache: list | None = None
         self._releases_cache_at: float = 0.0
-        self._commit_cache: dict[str, tuple[float, dict]] = {}
         self._cache_ttl_seconds = int(
             os.environ.get("LDM_ASTRBOT_UPDATE_CACHE_TTL", "300")
         )
@@ -118,19 +115,11 @@ class AstrBotUpdator(RepoZipUpdator):
             return url
         return f"{proxy.removesuffix('/')}/{url}"
 
-    def _构建源码包地址(
-        self,
-        *,
-        tag: str | None = None,
-        sha: str | None = None,
-        branch: str | None = None,
-    ) -> str:
-        if sha:
-            return f"{self.仓库网页地址}/archive/{sha}.zip"
-        if tag:
-            return f"{self.仓库网页地址}/archive/refs/tags/{tag}.zip"
-        目标分支 = branch or self.默认分支
-        return f"{self.仓库网页地址}/archive/refs/heads/{目标分支}.zip"
+    def _构建源码包地址(self, *, tag: str) -> str:
+        """仅按 tag 构建 GitHub archive 地址。"""
+        if not tag:
+            raise ValueError("构建源码包地址需要 tag")
+        return f"{self.仓库网页地址}/archive/refs/tags/{tag}.zip"
 
     def _github_token(self) -> str:
         for key in (
@@ -242,42 +231,6 @@ class AstrBotUpdator(RepoZipUpdator):
         )
         return releases
 
-    def _parse_commits_atom(self, xml_text: str) -> dict | None:
-        import re
-        from html import unescape
-
-        entry_match = re.search(
-            r"<(?:[\w.-]+:)?entry(?:\s[^>]*)?>(.*?)</(?:[\w.-]+:)?entry>",
-            xml_text or "",
-            re.IGNORECASE | re.DOTALL,
-        )
-        if not entry_match:
-            return None
-        entry = entry_match.group(1)
-        entry_id = unescape(self._extract_atom_tag(entry, "id"))
-        sha = ""
-        if "/" in entry_id:
-            maybe = entry_id.rsplit("/", 1)[-1].strip()
-            if len(maybe) >= 7:
-                sha = maybe
-        if not sha:
-            link_match = re.search(
-                r'href="https://github\.com/[^"]+/commit/([0-9a-fA-F]{7,40})"',
-                entry,
-            )
-            if link_match:
-                sha = link_match.group(1)
-        if not sha:
-            return None
-        title = unescape(self._extract_atom_tag(entry, "title"))
-        updated = self._extract_atom_tag(entry, "updated")
-        return {
-            "sha": sha,
-            "message": " ".join(title.split()) if title else f"commit {sha[:8]}",
-            "published_at": updated,
-            "html_url": f"{self.仓库网页地址}/commit/{sha}",
-        }
-
     async def _fetch_releases_via_atom(self) -> list:
         url = f"{self.仓库网页地址}/releases.atom"
         try:
@@ -288,18 +241,6 @@ class AstrBotUpdator(RepoZipUpdator):
         except Exception as exc:
             logger.warning(f"读取 releases.atom 失败: {exc}")
             return []
-
-    async def _fetch_latest_commit_via_atom(self, branch: str | None = None) -> dict | None:
-        目标分支 = branch or self.默认分支
-        url = f"{self.仓库网页地址}/commits/{目标分支}.atom"
-        try:
-            async with self._create_httpx_client(timeout=20.0) as client:
-                response = await client.get(url, headers=self._atom_headers())
-                response.raise_for_status()
-                return self._parse_commits_atom(response.text)
-        except Exception as exc:
-            logger.warning(f"读取 commits.atom 失败: {exc}")
-            return None
 
     def _git_remote_url(self) -> str:
         token = self._github_token()
@@ -406,12 +347,6 @@ class AstrBotUpdator(RepoZipUpdator):
             return []
         return self._parse_ls_remote_tags(output)
 
-    async def _请求github_json(self, url: str):
-        async with self._create_httpx_client(timeout=30.0) as client:
-            response = await client.get(url, headers=self._github_headers())
-            response.raise_for_status()
-            return response.json()
-
     async def fetch_release_info(self, url: str, latest: bool = True) -> list:
         """优先 GitHub API；失败则 releases.atom；再失败则 git ls-remote。"""
         now = time.time()
@@ -464,79 +399,6 @@ class AstrBotUpdator(RepoZipUpdator):
         self._releases_cache = ret
         self._releases_cache_at = now
         return list(ret)
-
-    async def _获取最新提交(self, branch: str | None = None) -> dict:
-        目标分支 = branch or self.默认分支
-        now = time.time()
-        cached = self._commit_cache.get(目标分支)
-        if cached and now - cached[0] < self._cache_ttl_seconds:
-            return dict(cached[1])
-
-        # 1) REST API
-        try:
-            url = (
-                f"https://api.github.com/repos/{self.仓库所有者}/{self.仓库名}"
-                f"/commits?sha={目标分支}&per_page=1"
-            )
-            data = await self._请求github_json(url)
-            if not data:
-                raise Exception(f"未获取到分支 {目标分支} 的提交记录。")
-            item = data[0]
-            message = (item.get("commit") or {}).get("message") or ""
-            result = {
-                "sha": item.get("sha") or "",
-                "message": message,
-                "published_at": (
-                    (item.get("commit") or {}).get("committer") or {}
-                ).get("date", ""),
-                "html_url": item.get("html_url") or "",
-            }
-            self._commit_cache[目标分支] = (now, result)
-            return dict(result)
-        except Exception as api_exc:
-            logger.warning(
-                f"GitHub commits API 失败，尝试 Atom/git 回退: {api_exc}"
-            )
-
-        # 2) commits.atom（带发布时间）
-        atom_result = await self._fetch_latest_commit_via_atom(目标分支)
-        if atom_result and atom_result.get("sha"):
-            self._commit_cache[目标分支] = (now, atom_result)
-            return dict(atom_result)
-
-        # 3) git ls-remote（无时间）
-        try:
-            output = await self._git_ls_remote(
-                "--heads",
-                ref=f"refs/heads/{目标分支}",
-            )
-            sha = ""
-            for line in output.splitlines():
-                line = line.strip()
-                if not line or "\t" not in line:
-                    continue
-                maybe_sha, ref = line.split("\t", 1)
-                if ref.endswith(f"refs/heads/{目标分支}") or ref == 目标分支:
-                    sha = maybe_sha
-                    break
-            if not sha:
-                first = output.strip().splitlines()[0] if output.strip() else ""
-                if first and "\t" in first:
-                    sha = first.split("\t", 1)[0]
-            if not sha:
-                raise Exception(f"git ls-remote 未找到分支 {目标分支}")
-            result = {
-                "sha": sha,
-                "message": f"分支 {目标分支} 最新提交（git ls-remote）",
-                "published_at": "",
-                "html_url": f"{self.仓库网页地址}/commit/{sha}",
-            }
-            self._commit_cache[目标分支] = (now, result)
-            return dict(result)
-        except Exception as git_exc:
-            raise Exception(
-                f"无法获取分支 {目标分支} 最新提交：API / Atom / git 均失败"
-            ) from git_exc
 
     def _build_core_package_url(self, version: str | None) -> str | None:
         """魔改版不使用官方托管包。"""
@@ -657,77 +519,60 @@ class AstrBotUpdator(RepoZipUpdator):
         current_version: str | None,
         consider_prerelease: bool = True,
     ) -> ReleaseInfo | None:
-        """检查 landamao/ldm_AstrBot 是否有新版本。"""
+        """检查 landamao/ldm_AstrBot 是否有新 Release（仅 tag，不检查 commit）。"""
         import re
 
         current = VERSION if current_version is None else current_version
         try:
             releases = await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
         except Exception as exc:
-            logger.warning(f"获取版本列表失败，将回退到分支提交检查: {exc}")
-            releases = []
+            logger.warning(f"获取 Release 列表失败: {exc}")
+            raise
 
-        if releases:
-            sel = None
-            if consider_prerelease:
-                sel = releases[0]
-            else:
-                for data in releases:
-                    tag_name = str(data.get("tag_name") or "")
-                    if re.search(
-                        r"[\-_.]?(alpha|beta|rc|dev)[\-_.]?\d*$",
-                        tag_name,
-                        re.IGNORECASE,
-                    ):
-                        continue
-                    sel = data
-                    break
-            if sel and sel.get("tag_name"):
-                tag_name = str(sel["tag_name"])
-                # 仅对 vX.Y.Z 风格做 semver 比较；其它 tag 交给 commit 回退
-                if tag_name.startswith("v") or tag_name[:1].isdigit():
-                    if self.compare_version(current, tag_name) < 0:
-                        return ReleaseInfo(
-                            version=tag_name,
-                            published_at=sel.get("published_at") or "",
-                            body=f"{tag_name}\n\n{sel.get('body') or ''}",
-                        )
-
-        # 无可用 Release 或已是最新 tag：回退 commit 检查
-        try:
-            latest = await self._获取最新提交()
-        except Exception as exc:
-            logger.warning(f"获取默认分支最新提交失败: {exc}")
+        if not releases:
+            logger.info("远端没有可用的 GitHub Release，判定为无更新。")
             return None
 
-        latest_sha = (latest.get("sha") or "").strip()
-        if not latest_sha:
+        sel = None
+        if consider_prerelease:
+            sel = releases[0]
+        else:
+            for data in releases:
+                tag_name = str(data.get("tag_name") or "")
+                if re.search(
+                    r"[\-_.]?(alpha|beta|rc|dev)[\-_.]?\d*$",
+                    tag_name,
+                    re.IGNORECASE,
+                ):
+                    continue
+                sel = data
+                break
+
+        if not sel or not sel.get("tag_name"):
             return None
 
-        meta = self._读取更新元数据()
-        local_sha = str(meta.get("sha") or "").strip()
-        if local_sha and local_sha == latest_sha:
+        tag_name = str(sel["tag_name"])
+        # 仅对 vX.Y.Z / 数字开头 tag 做 semver 比较
+        if not (tag_name.startswith("v") or tag_name[:1].isdigit()):
+            logger.info(f"最新 Release tag 非版本号风格，跳过比较: {tag_name}")
             return None
 
-        short = latest_sha[:8]
-        body = latest.get("message") or ""
-        return ReleaseInfo(
-            version=f"commit-{short}",
-            published_at=latest.get("published_at") or "",
-            body=(
-                f"检测到默认分支 {self.默认分支} 有新提交\n"
-                f"SHA: {latest_sha}\n\n"
-                f"{body}"
-            ),
-        )
+        if self.compare_version(current, tag_name) < 0:
+            return ReleaseInfo(
+                version=tag_name,
+                published_at=sel.get("published_at") or "",
+                body=f"{tag_name}\n\n{sel.get('body') or ''}",
+            )
+        return None
 
     async def get_releases(self) -> list:
-        """返回可安装版本列表（默认分支最新提交 + 标签，新版本在前）。"""
+        """返回可安装的 GitHub Release 列表（仅 tag，新版本在前）。"""
         releases: list = []
         try:
             releases = await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
         except Exception as exc:
             logger.warning(f"获取 GitHub Releases 列表失败: {exc}")
+            raise
 
         # 再保险排一次：API 返回顺序不一定是新→旧，且要处理 -v2/-v3
         releases = sorted(
@@ -735,25 +580,6 @@ class AstrBotUpdator(RepoZipUpdator):
             key=lambda item: self._tag_sort_key(str(item.get("tag_name") or "")),
             reverse=True,
         )
-
-        try:
-            latest = await self._获取最新提交()
-            sha = latest.get("sha") or ""
-            if sha:
-                short = sha[:8]
-                releases = [
-                    {
-                        "version": f"分支 {self.默认分支} @ {short}",
-                        "published_at": latest.get("published_at") or "",
-                        "body": latest.get("message") or "",
-                        "tag_name": sha,
-                        "zipball_url": self._构建源码包地址(sha=sha),
-                    },
-                    *releases,
-                ]
-        except Exception as exc:
-            logger.warning(f"附加默认分支提交到版本列表失败: {exc}")
-
         return releases
 
     async def update(
@@ -791,37 +617,31 @@ class AstrBotUpdator(RepoZipUpdator):
 
         file_url = None
         target_version = None
-        target_sha = None
         version_text = "" if version is None else str(version).strip()
 
         if latest or version_text in {"", "latest"}:
             try:
                 update_data = await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
-            except Exception:
-                update_data = []
+            except Exception as exc:
+                raise Exception(f"获取 GitHub Release 失败，无法下载最新版: {exc}") from exc
 
-            if update_data:
-                latest_version = update_data[0]["tag_name"]
-                if self.compare_version(VERSION, latest_version) >= 0:
-                    # tag 不比当前新时，仍允许用户强制拉最新分支
-                    logger.info(
-                        f"当前版本 {VERSION} 不小于最新 Release {latest_version}，"
-                        f"改为下载默认分支 {self.默认分支}。"
-                    )
-                    latest_commit = await self._获取最新提交()
-                    target_sha = latest_commit["sha"]
-                    target_version = f"commit-{target_sha[:8]}"
-                    file_url = self._构建源码包地址(sha=target_sha)
-                else:
-                    target_version = latest_version
-                    file_url = update_data[0].get("zipball_url") or self._构建源码包地址(
-                        tag=latest_version
-                    )
-            else:
-                latest_commit = await self._获取最新提交()
-                target_sha = latest_commit["sha"]
-                target_version = f"commit-{target_sha[:8]}"
-                file_url = self._构建源码包地址(sha=target_sha)
+            if not update_data:
+                raise Exception(
+                    f"仓库 {self.仓库所有者}/{self.仓库名} 没有可用的 GitHub Release，"
+                    "无法按最新版更新（已禁用 commit 回退）。"
+                )
+
+            # 只走 Release：即便当前版本不落后，也安装列表中最新的 tag
+            latest_version = update_data[0]["tag_name"]
+            target_version = latest_version
+            file_url = update_data[0].get("zipball_url") or self._构建源码包地址(
+                tag=latest_version
+            )
+            if self.compare_version(VERSION, latest_version) >= 0:
+                logger.info(
+                    f"当前版本 {VERSION} 不小于最新 Release {latest_version}，"
+                    "仍按该 Release 重新安装（不再回退 commit）。"
+                )
         elif version_text.startswith("v") or version_text.startswith("V"):
             update_data = await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
             for data in update_data:
@@ -835,23 +655,10 @@ class AstrBotUpdator(RepoZipUpdator):
                 # 没有对应 release 时，直接按 tag 归档下载
                 target_version = version_text
                 file_url = self._构建源码包地址(tag=version_text)
-        elif len(version_text) == 40 and all(
-            ch in "0123456789abcdefABCDEF" for ch in version_text
-        ):
-            target_sha = version_text
-            target_version = f"commit-{target_sha[:8]}"
-            file_url = self._构建源码包地址(sha=target_sha)
-        elif version_text in {self.默认分支, "main", "master"}:
-            latest_commit = await self._获取最新提交(version_text)
-            target_sha = latest_commit["sha"]
-            target_version = f"commit-{target_sha[:8]}"
-            file_url = self._构建源码包地址(sha=target_sha)
         else:
-            # 当作分支名
-            latest_commit = await self._获取最新提交(version_text)
-            target_sha = latest_commit["sha"]
-            target_version = f"commit-{target_sha[:8]}"
-            file_url = self._构建源码包地址(sha=target_sha)
+            raise Exception(
+                f"仅支持按 GitHub Release / tag 更新，不支持 commit 或分支: {version_text!r}"
+            )
 
         if not file_url:
             raise Exception(f"无法解析更新地址: version={version_text!r}")
@@ -877,7 +684,7 @@ class AstrBotUpdator(RepoZipUpdator):
             json.dumps(
                 {
                     "version": target_version,
-                    "sha": target_sha,
+                    "sha": None,
                     "source": f"{self.仓库所有者}/{self.仓库名}",
                 },
                 ensure_ascii=False,

@@ -5,6 +5,36 @@
 
 ---
 
+## [4.26.7] — 2026-07-13
+
+基于 ldm v4.26.6 的增量更新。
+
+### 更新检查
+
+- **只检查正式发版（Release）**：有新 tag/Release 才会提示可更新
+- 不再把默认分支的日常提交当成“有新版本”
+- 版本列表只显示已发布的版本号，更清晰、更稳
+
+### 平台日志
+
+- **自动滚动更像终端**：滑到最底部会自动跟随新日志；往上翻会暂停；再滑回底部会恢复
+- 去掉了手动“自动滚动”开关，用滚动位置自动控制
+- **字体亮度可选「亮色 / 柔和」**：
+  - 亮色：更鲜艳，对比更强，黑色背景下观感更好
+  - 柔和：亮度官方风格一致，除了日志级别颜色，适合习惯官方风格的
+- 亮度选择会记住，刷新后仍保留
+- 页面说明合并成一行，日志区域更省空间
+
+### 其他
+
+- 版本号更新为 **4.26.7**
+
+### 反馈交流：
+   - QQ 群：`1103659691`
+   - Telegram：`@landamaogroup`
+
+---
+
 ## [4.26.6] — 2026-07-12
 
 基于官方 AstrBot v4.26.5 的 ldm 魔改发版。  
@@ -21,8 +51,8 @@
 ### 新增
 
 - **自更新（核心 + WebUI）**：恢复 WebUI / 管理端更新能力，统一从 `landamao/ldm_AstrBot` 拉取，不再走官方 `soulter` 托管包
-  - 检查更新：优先比较 GitHub Release tag（semver）；无可用 Release 或已是最新 tag 时，回退比较默认分支最新 commit 与本地 `data/ldm_update_meta.json`
-  - 版本列表：默认分支最新提交 + 全部 tag，新版本在前
+  - 检查更新：仅比较 GitHub Release tag（semver）；无可用 Release 或已是最新 tag 时视为无更新（**不**再回退 commit）
+  - 版本列表：仅全部 Release/tag，新版本在前
   - 安装方式：下载源码 zip → 校验 → 解压 → 覆盖安装目录
   - WebUI：从包内 `dashboard/dist` 或 `data/dist` 同步到本地 `data/dist`
   - 保护运行态：不整目录覆盖 `data` / `.venv` / `venv` / `node_modules` / `.git` 等；`data` 仅同步 `data/dist`
@@ -44,7 +74,6 @@
 |------|------|------|
 | `LDM_ASTRBOT_REPO_OWNER` | 更新仓库所有者 | `landamao` |
 | `LDM_ASTRBOT_REPO_NAME` | 更新仓库名 | `ldm_AstrBot` |
-| `LDM_ASTRBOT_BRANCH` | 默认分支 | `main` |
 | `LDM_ASTRBOT_UPDATE_CACHE_TTL` | 远端信息缓存秒数 | `300` |
 | `LDM_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` / `ASTRBOT_GITHUB_TOKEN` | GitHub API Token（提高限额） | 无 |
 
