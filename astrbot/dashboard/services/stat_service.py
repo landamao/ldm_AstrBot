@@ -93,8 +93,7 @@ class StatService:
         ) and not DEMO_MODE
 
     async def get_version(self) -> dict:
-        # Customized: never surface the forced password-change / upgrade hints,
-        # so the account dialog does not auto-open on login.
+        # 首次改密提示改走 /auth/setup 页面（可跳过），此处不再触发顶栏账户弹窗。
         return {
             "version": VERSION,
             "dashboard_version": await get_dashboard_version(),

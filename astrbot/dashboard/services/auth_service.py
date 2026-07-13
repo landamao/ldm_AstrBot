@@ -122,6 +122,28 @@ class AuthService:
             }
         )
 
+    async def skip_setup(self, authenticated_username) -> AuthServiceResult:
+        """跳过首次改用户名/密码提示（仅登录后可用）。"""
+        if not isinstance(authenticated_username, str) or not authenticated_username.strip():
+            return self.error("未授权", status_code=401)
+        if not await self.is_setup_required():
+            return self.error("无需设置")
+
+        await set_password_change_required(self.db, self.config, False)
+        username = self.config["dashboard"]["username"]
+        token = self.generate_jwt(username)
+        return AuthServiceResult(
+            data={
+                "token": token,
+                "username": username,
+                "change_pwd_hint": False,
+                "md5_pwd_hint": False,
+                "password_upgrade_required": False,
+            },
+            message="已跳过账户设置",
+            jwt_token=token,
+        )
+
     async def totp_setup(self, post_data: object) -> AuthServiceResult:
         if isinstance(post_data, dict) and post_data.get("secret"):
             secret = post_data["secret"]
@@ -304,9 +326,9 @@ class AuthService:
                 else:
                     return self.error("恢复码无效", status_code=401)
 
-        # Customized: never force the first-login password change flow.
-        change_pwd_hint = False
-        md5_pwd_hint = False
+        # 首次启动/默认口令：提示修改用户名密码（前端可跳过）
+        change_pwd_hint = await is_password_change_required(self.db, self.config)
+        md5_pwd_hint = is_md5_dashboard_password(password)
         token = self.generate_jwt(username)
         result = AuthServiceResult(
             data={
@@ -393,9 +415,8 @@ class AuthService:
         return jwt.encode(payload, jwt_token, algorithm="HS256")
 
     async def is_setup_required(self) -> bool:
-        # Customized: the first-login username/password setup flow has been
-        # removed. Setup is never required.
-        return False
+        # 首次部署生成默认口令后，提示修改用户名/密码（可跳过）。
+        return await is_password_change_required(self.db, self.config)
 
     def can_skip_default_password_auth(self) -> bool:
         if not self.env_flag_enabled(SKIP_DEFAULT_PASSWORD_AUTH_ENV):

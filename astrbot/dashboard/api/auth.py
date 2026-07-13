@@ -331,6 +331,17 @@ async def _setup(
     )
 
 
+async def _skip_setup(
+    request: Request,
+    service: AuthService,
+    auth: AuthContext,
+):
+    return _auth_service_response(
+        request,
+        await service.skip_setup(auth.username),
+    )
+
+
 async def _totp_setup(
     request: Request,
     payload: TotpSetupRequest | None,
@@ -435,6 +446,25 @@ async def dashboard_setup_authenticated(
 ):
     auth = AuthContext(username=username, scopes=["*"], via="jwt")
     return await _setup(request, payload, service, auth)
+
+
+@router.post("/auth/setup/skip")
+async def skip_setup(
+    request: Request,
+    auth: AuthContext = Depends(require_system_scope),
+    service: AuthService = Depends(get_auth_service),
+):
+    return await _skip_setup(request, service, auth)
+
+
+@legacy_router.post("/setup/skip")
+async def dashboard_skip_setup(
+    request: Request,
+    username: str = Depends(require_dashboard_user),
+    service: AuthService = Depends(get_auth_service),
+):
+    auth = AuthContext(username=username, scopes=["*"], via="jwt")
+    return await _skip_setup(request, service, auth)
 
 
 @router.post("/auth/totp/setup")
