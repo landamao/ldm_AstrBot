@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import os
+import secrets
 from dataclasses import dataclass
 
 import jwt
@@ -96,6 +97,8 @@ class AuthServiceResult:
     status_code: int = 200
     jwt_token: str | None = None
     trusted_device_token: str | None = None
+    # 改密后轮换 jwt_secret 时填入新密钥，供 API 层同步运行时缓存
+    rotated_jwt_secret: str | None = None
 
 
 class AuthService:
@@ -239,6 +242,9 @@ class AuthService:
         set_dashboard_password_hashes(self.config, new_password)
         await set_password_storage_upgraded(self.db, self.config, True)
         await set_password_change_required(self.db, self.config, False)
+        # 初次设置密码也轮换密钥，作废默认口令期间发出的旧会话
+        new_jwt_secret = self.rotate_jwt_secret()
+        await revoke_user_trusted_devices(self.db)
         self.config.save_config()
 
         token = self.generate_jwt(username)
@@ -252,6 +258,7 @@ class AuthService:
             },
             message="Setup completed successfully",
             jwt_token=token,
+            rotated_jwt_secret=new_jwt_secret,
         )
 
     async def login(
@@ -381,6 +388,8 @@ class AuthService:
                 return self.error("用户名不能为空")
             username_to_save = new_username.strip()
 
+        password_changed = False
+        rotated_jwt_secret = None
         if new_pwd:
             if not isinstance(new_pwd, str):
                 return self.error("新密码无效")
@@ -394,14 +403,31 @@ class AuthService:
             set_dashboard_password_hashes(self.config, new_pwd)
             await set_password_storage_upgraded(self.db, self.config, True)
             await set_password_change_required(self.db, self.config, False)
-            if is_totp_enabled(self.config):
-                await revoke_user_trusted_devices(self.db)
+            # 改密 = 作废全部仪表盘会话：轮换 JWT 密钥，旧 token 立刻验签失败
+            rotated_jwt_secret = self.rotate_jwt_secret()
+            await revoke_user_trusted_devices(self.db)
+            password_changed = True
         if username_to_save:
             self.config["dashboard"]["username"] = username_to_save
 
         self.config.save_config()
 
-        return AuthServiceResult(message="Updated account successfully")
+        if password_changed:
+            return AuthServiceResult(
+                message="密码已更新，所有登录会话已失效，请重新登录",
+                rotated_jwt_secret=rotated_jwt_secret,
+            )
+        return AuthServiceResult(message="账户信息已更新")
+
+    def rotate_jwt_secret(self) -> str:
+        """轮换仪表盘 JWT 密钥，使已发出的会话令牌全部失效。
+
+        Returns:
+            新的 JWT 密钥（同时已写入 self.config）。
+        """
+        new_secret = secrets.token_hex(32)
+        self.config["dashboard"]["jwt_secret"] = new_secret
+        return new_secret
 
     def generate_jwt(self, username: str):
         payload = {

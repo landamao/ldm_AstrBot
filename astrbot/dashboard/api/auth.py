@@ -255,12 +255,23 @@ def _auth_service_response(
     request: Request,
     result: AuthServiceResult,
 ) -> JSONResponse:
+    # 改密/初次设置会轮换 jwt_secret：同步进程内缓存，否则旧密钥仍会把旧 token 验过
+    if result.rotated_jwt_secret:
+        request.app.state.jwt_secret = result.rotated_jwt_secret
+        adapter = getattr(request.app.state, "dashboard_app_adapter", None)
+        server = getattr(adapter, "_dashboard_server", None) if adapter is not None else None
+        if server is not None and hasattr(server, "_jwt_secret"):
+            server._jwt_secret = result.rotated_jwt_secret
+
     response = JSONResponse(
         _auth_result_payload(result),
         status_code=result.status_code,
     )
     if result.jwt_token:
         _set_dashboard_jwt_cookie(request, response, result.jwt_token)
+    elif result.rotated_jwt_secret:
+        # 改密后不返回新 token：清掉 cookie，强制各端重新登录
+        _clear_dashboard_jwt_cookie(request, response)
     if result.trusted_device_token:
         _set_trusted_device_cookie(request, response, result.trusted_device_token)
     return response

@@ -331,7 +331,11 @@ class AstrBotDashboard:
             present only when the token is valid for the current request path.
         """
         try:
-            payload = jwt.decode(token, self._jwt_secret, algorithms=["HS256"])
+            # 优先读 config 里的最新密钥（改密会轮换）；回退到启动时缓存
+            jwt_secret = (
+                self.config.get("dashboard", {}).get("jwt_secret") or self._jwt_secret
+            )
+            payload = jwt.decode(token, jwt_secret, algorithms=["HS256"])
         except jwt.ExpiredSignatureError:
             return None, "Token 过期"
         except jwt.InvalidTokenError:
