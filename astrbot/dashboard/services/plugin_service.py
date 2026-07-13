@@ -654,6 +654,8 @@ class PluginService:
             "update_disabled_reason": ""
             if updates_enabled
             else PLUGIN_UPDATE_DISABLED_MESSAGE,
+            # 列表卡片「N个行为」chip：只需要数量，详情页再拉完整 components
+            "handlers": list(plugin.star_handler_full_names or []),
         }
 
     def get_failed_plugins(self) -> dict:

@@ -277,7 +277,8 @@ class LogManager:
             logging.Formatter(
                 "%(ansi_prefix)s[%(asctime)s.%(msecs)03d] %(plugin_tag)s [%(short_levelname)s]%(astrbot_version_tag)s "
                 "[%(source_file)s:%(source_line)d]: %(message)s%(ansi_reset)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
+                # WebUI 面板日志：年份几乎无用还占宽，只保留 月-日 时:分:秒
+                datefmt="%m-%d %H:%M:%S",
             ),
         )
         logger.addHandler(handler)

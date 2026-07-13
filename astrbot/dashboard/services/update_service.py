@@ -357,9 +357,9 @@ class UpdateService:
                         98,
                     )
                     await self.core_lifecycle.restart()
-                    message = "更新成功，AstrBot 将在 2 秒内全量重启以应用新的代码。"
+                    message = "更新成功，ldm 将在 2 秒内全量重启以应用新的代码。"
                 else:
-                    message = "更新成功，AstrBot 将在下次启动时应用新的代码。"
+                    message = "更新成功，ldm 将在下次启动时应用新的代码。"
 
                 self.update_progress[progress_id].update(
                     {
