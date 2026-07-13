@@ -1283,7 +1283,7 @@ class ProviderOpenAIOfficial(Provider):
         image_fallback_used = False
 
         last_exception = None
-        retry_cnt = 0
+        succeeded = False
         for retry_cnt in range(max_retries):
             try:
                 self.client.api_key = chosen_key
@@ -1292,6 +1292,7 @@ class ProviderOpenAIOfficial(Provider):
                     func_tool,
                     request_max_retries=request_max_retries,
                 )
+                succeeded = True
                 break
             except Exception as e:
                 last_exception = e
@@ -1315,9 +1316,12 @@ class ProviderOpenAIOfficial(Provider):
                     image_fallback_used=image_fallback_used,
                 )
                 if success:
+                    # 错误已在处理路径中消化，视为本轮可结束
+                    succeeded = True
                     break
 
-        if retry_cnt == max_retries - 1 or llm_response is None:
+        # 仅在从未成功时抛错，避免「最后一次重试成功却因 retry_cnt 仍被当成失败」
+        if not succeeded or llm_response is None:
             logger.error(f"API 调用失败，重试 {max_retries} 次仍然失败。")
             if last_exception is None:
                 raise Exception("未知错误")
@@ -1359,7 +1363,7 @@ class ProviderOpenAIOfficial(Provider):
         image_fallback_used = False
 
         last_exception = None
-        retry_cnt = 0
+        succeeded = False
         for retry_cnt in range(max_retries):
             try:
                 self.client.api_key = chosen_key
@@ -1369,6 +1373,7 @@ class ProviderOpenAIOfficial(Provider):
                     request_max_retries=request_max_retries,
                 ):
                     yield response
+                succeeded = True
                 break
             except Exception as e:
                 last_exception = e
@@ -1392,9 +1397,12 @@ class ProviderOpenAIOfficial(Provider):
                     image_fallback_used=image_fallback_used,
                 )
                 if success:
+                    # 错误已在处理路径中消化，视为本轮可结束
+                    succeeded = True
                     break
 
-        if retry_cnt == max_retries - 1:
+        # 仅在从未成功时抛错，避免「最后一次重试成功却因 retry_cnt 仍被当成失败」
+        if not succeeded:
             logger.error(f"API 调用失败，重试 {max_retries} 次仍然失败。")
             if last_exception is None:
                 raise Exception("未知错误")

@@ -149,7 +149,8 @@ async def require_scope(request: Request, scope: str) -> AuthContext:
 
     token = _extract_dashboard_jwt(request)
     if not token:
-        raise ApiError("Missing API key", status_code=401)
+        # 仪表盘 JWT 与 OpenAPI Key 共用此入口；无凭证时给中文未授权，避免误导成「缺 API key」
+        raise ApiError("未授权", status_code=401)
     try:
         payload = jwt.decode(
             token,
@@ -196,17 +197,37 @@ def _auth_result_payload(result: AuthServiceResult) -> dict:
 
 
 def _use_secure_dashboard_jwt_cookie(request: Request) -> bool:
+    """是否给仪表盘 JWT Cookie 加 Secure。
+
+    HTTP 明文访问时绝不能 Secure，否则浏览器会丢弃/不回传 Cookie，
+    导致仅靠 Cookie 的原生下载（尤其手机端 location 跳转）变成未授权。
+    """
     adapter = getattr(request.app.state, "dashboard_app_adapter", None)
     adapter_config = getattr(adapter, "config", {}) if adapter is not None else {}
+    if "DASHBOARD_JWT_COOKIE_SECURE" in adapter_config:
+        return bool(adapter_config.get("DASHBOARD_JWT_COOKIE_SECURE"))
+
+    # 请求本身是 http，或反代声明 X-Forwarded-Proto=http → 不设 Secure
+    try:
+        if str(getattr(request.url, "scheme", "") or "").lower() == "http":
+            return False
+        xf_proto = (
+            request.headers.get("x-forwarded-proto", "")
+            .split(",", 1)[0]
+            .strip()
+            .lower()
+        )
+        if xf_proto == "http":
+            return False
+        if xf_proto == "https":
+            return True
+    except Exception:
+        pass
+
     default_secure = not bool(getattr(adapter, "debug", False)) and not bool(
         getattr(adapter, "testing", False)
     )
-    return bool(
-        adapter_config.get(
-            "DASHBOARD_JWT_COOKIE_SECURE",
-            default_secure,
-        )
-    )
+    return default_secure
 
 
 def _set_dashboard_jwt_cookie(
@@ -219,7 +240,7 @@ def _set_dashboard_jwt_cookie(
         token,
         max_age=DASHBOARD_JWT_COOKIE_MAX_AGE,
         httponly=True,
-        samesite="strict",
+        samesite="lax",  # 同站导航下载更稳；strict 在部分移动浏览器跳转场景易丢
         secure=_use_secure_dashboard_jwt_cookie(request),
         path="/",
     )
@@ -229,7 +250,7 @@ def _clear_dashboard_jwt_cookie(request: Request, response: JSONResponse) -> Non
     response.delete_cookie(
         DASHBOARD_JWT_COOKIE_NAME,
         httponly=True,
-        samesite="strict",
+        samesite="lax",
         secure=_use_secure_dashboard_jwt_cookie(request),
         path="/",
     )

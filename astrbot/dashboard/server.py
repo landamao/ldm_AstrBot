@@ -273,7 +273,9 @@ class AstrBotDashboard:
             "/api/v1/files/tokens",
             "/api/platform/webhook",
             "/api/stat/start-time",
-            "/api/backup/download",  # 备份下载使用 URL 参数传递 token
+            # legacy 备份下载：用一次性 ticket query 鉴权，不旁路到无鉴权
+            # （路由内校验 ticket；无 ticket 时仍走 require_dashboard_user）
+            "/api/backup/download",
         ]
         if path in allowed_exact_endpoints or any(
             path.startswith(prefix) for prefix in allowed_endpoint_prefixes

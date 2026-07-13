@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from astrbot.core import logger
 from astrbot.dashboard.async_utils import run_maybe_async
@@ -73,6 +73,11 @@ async def _run(operation, *, prefix: str):
         return error(f"{prefix}: {exc!s}")
 
 
+def _download_error_response(message: str, *, status_code: int = 400) -> JSONResponse:
+    """下载失败必须带正确 HTTP 状态码，避免浏览器把错误 JSON 当 zip 保存。"""
+    return JSONResponse(error(message), status_code=status_code)
+
+
 def _download_response(download) -> FileResponse:
     return FileResponse(
         download.path,
@@ -84,23 +89,32 @@ def _download_response(download) -> FileResponse:
 def _download_backup(
     *,
     filename: str | None,
-    token: str | None,
     service: BackupService,
+    ticket: str | None = None,
 ):
     try:
         filename = _safe_backup_filename(filename)
-        return _download_response(
-            service.prepare_download(
+        if ticket:
+            download = service.consume_download_ticket(
                 filename=filename,
-                token=token,
-                jwt_secret=service.config.get("dashboard", {}).get("jwt_secret"),
+                ticket=ticket,
             )
-        )
+        else:
+            download = service.prepare_download(filename=filename)
+        return _download_response(download)
     except BackupServiceError as exc:
-        return error(str(exc))
+        msg = str(exc)
+        # 凭证类问题用 401/403 更合适；不存在用 404；其余 400
+        if "不存在" in msg:
+            code = 404
+        elif "凭证" in msg or "过期" in msg or "不匹配" in msg:
+            code = 401
+        else:
+            code = 400
+        return _download_error_response(msg, status_code=code)
     except Exception as exc:
         logger.error("下载备份失败: %s", exc, exc_info=True)
-        return error(f"下载备份失败: {exc!s}")
+        return _download_error_response(f"下载备份失败: {exc!s}", status_code=500)
 
 
 @router.get("/backups")
@@ -292,22 +306,63 @@ async def get_dashboard_backup_progress(
     )
 
 
-@router.get("/backups/{filename:path}")
-async def download_backup(
+@router.post("/backups/{filename:path}/download-ticket")
+async def issue_backup_download_ticket(
     filename: str,
-    token: str | None = Query(default=None),
+    auth: AuthContext = Depends(require_system_scope),
     service: BackupService = Depends(get_service),
 ):
-    return _download_backup(filename=filename, token=token, service=service)
+    """签发短时可复用下载票据（需登录）。随后用原生导航流式下载大文件。"""
+    return await _run(
+        lambda: service.issue_download_ticket(
+            _safe_backup_filename(filename),
+            username=auth.username,
+        ),
+        prefix="签发下载凭证失败",
+    )
+
+
+@legacy_router.post("/download-ticket")
+async def issue_dashboard_backup_download_ticket(
+    filename: str | None = Query(default=None),
+    username: str = Depends(require_dashboard_user),
+    service: BackupService = Depends(get_service),
+):
+    return await _run(
+        lambda: service.issue_download_ticket(
+            _safe_backup_filename(filename),
+            username=username,
+        ),
+        prefix="签发下载凭证失败",
+    )
+
+
+@router.get("/backups/{filename:path}")
+async def download_backup(
+    request: Request,
+    filename: str,
+    ticket: str | None = Query(default=None),
+    service: BackupService = Depends(get_service),
+):
+    # 优先：短时票据 → 浏览器原生流式（适合 GB 级，URL 不带登录 JWT）
+    # 票据有效期内可重复使用（兼容手机 HEAD/重试）；否则走会话鉴权
+    if ticket:
+        return _download_backup(filename=filename, service=service, ticket=ticket)
+    await require_system_scope(request)
+    return _download_backup(filename=filename, service=service)
 
 
 @legacy_router.get("/download")
 async def download_dashboard_backup(
+    request: Request,
     filename: str | None = Query(default=None),
-    token: str | None = Query(default=None),
+    ticket: str | None = Query(default=None),
     service: BackupService = Depends(get_service),
 ):
-    return _download_backup(filename=filename, token=token, service=service)
+    if ticket:
+        return _download_backup(filename=filename, service=service, ticket=ticket)
+    await require_dashboard_user(request)
+    return _download_backup(filename=filename, service=service)
 
 
 @router.patch("/backups/{filename:path}")

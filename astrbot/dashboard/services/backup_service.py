@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import time
 import traceback
@@ -14,8 +15,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import jwt
 
 from astrbot.core import logger
 from astrbot.core.backup.exporter import AstrBotExporter
@@ -29,6 +28,11 @@ from astrbot.core.utils.astrbot_path import (
 
 CHUNK_SIZE = 1024 * 1024
 UPLOAD_EXPIRE_SECONDS = 3600
+# 下载票据：短时可复用（非一次性）。
+# 手机下载器常会 HEAD/重试/并发二次请求同一 URL；一次性 pop 会把第二次变成 61B 错误 JSON。
+# URL 只带随机串，不带登录 JWT；真正的大文件仍走 FileResponse 流式。
+DOWNLOAD_TICKET_TTL_SECONDS = 600  # 10 分钟，覆盖慢网/大文件启动与短时重试
+DOWNLOAD_TICKET_MAX_ENTRIES = 256
 
 
 class BackupServiceError(Exception):
@@ -73,6 +77,7 @@ class BackupService:
         self.backup_tasks: dict[str, dict] = {}
         self.backup_progress: dict[str, dict] = {}
         self.upload_sessions: dict[str, dict] = {}
+        self.download_tickets: dict[str, dict] = {}
         self._cleanup_task: asyncio.Task | None = None
 
     @staticmethod
@@ -587,37 +592,81 @@ class BackupService:
         self,
         *,
         filename: str | None,
-        token: str | None,
-        jwt_secret: str | None,
     ) -> BackupDownload:
-        if not filename:
-            raise BackupServiceError("缺少参数 filename")
-        if not token:
-            raise BackupServiceError("缺少参数 token")
-        if not jwt_secret:
-            raise BackupServiceError("服务器配置错误")
-
-        try:
-            jwt.decode(
-                token,
-                jwt_secret,
-                algorithms=["HS256"],
-                options={
-                    "require": ["exp"],
-                    "verify_signature": True,
-                    "verify_exp": True,
-                },
-            )
-        except jwt.ExpiredSignatureError as exc:
-            raise BackupServiceError("Token 已过期，请刷新页面后重试") from exc
-        except jwt.InvalidTokenError as exc:
-            raise BackupServiceError("Token 无效") from exc
-
+        """准备备份下载（调用方须已完成会话/票据鉴权）。"""
         filename = self._validate_backup_filename(filename, missing="缺少参数 filename")
         file_path = os.path.join(self.backup_dir, filename)
         if not os.path.exists(file_path):
             raise BackupServiceError("备份文件不存在")
         return BackupDownload(path=file_path, filename=filename)
+
+    def _purge_expired_download_tickets(self) -> None:
+        now = time.time()
+        expired = [
+            ticket
+            for ticket, info in self.download_tickets.items()
+            if float(info.get("exp", 0)) <= now
+        ]
+        for ticket in expired:
+            self.download_tickets.pop(ticket, None)
+        # 防止异常堆积
+        if len(self.download_tickets) > DOWNLOAD_TICKET_MAX_ENTRIES:
+            ordered = sorted(
+                self.download_tickets.items(),
+                key=lambda item: float(item[1].get("exp", 0)),
+            )
+            for ticket, _ in ordered[: len(ordered) - DOWNLOAD_TICKET_MAX_ENTRIES]:
+                self.download_tickets.pop(ticket, None)
+
+    def issue_download_ticket(
+        self,
+        filename: str | None,
+        *,
+        username: str | None = None,
+    ) -> dict:
+        """签发短时可复用下载票据。需已登录；票据本身不是登录 JWT。"""
+        download = self.prepare_download(filename=filename)
+        self._purge_expired_download_tickets()
+        ticket = secrets.token_urlsafe(32)
+        now = time.time()
+        self.download_tickets[ticket] = {
+            "filename": download.filename,
+            "exp": now + DOWNLOAD_TICKET_TTL_SECONDS,
+            "username": (username or "").strip(),
+        }
+        return {
+            "ticket": ticket,
+            "filename": download.filename,
+            "expires_in": DOWNLOAD_TICKET_TTL_SECONDS,
+        }
+
+    def consume_download_ticket(
+        self,
+        *,
+        filename: str | None,
+        ticket: str | None,
+    ) -> BackupDownload:
+        """校验下载票据（有效期内可重复使用），返回可流式发送的文件信息。
+
+        不做一次性 pop：手机浏览器/下载管理器常对同一 URL 发 HEAD + GET、
+        或并发/重试第二次请求；一次性作废会导致第二次拿到错误 JSON 并被当成文件保存。
+        """
+        if not ticket or not str(ticket).strip():
+            raise BackupServiceError("缺少下载凭证")
+        self._purge_expired_download_tickets()
+        key = str(ticket).strip()
+        info = self.download_tickets.get(key)
+        if not info:
+            raise BackupServiceError("下载凭证无效或已过期")
+        if time.time() > float(info.get("exp", 0)):
+            self.download_tickets.pop(key, None)
+            raise BackupServiceError("下载凭证已过期，请重试")
+
+        download = self.prepare_download(filename=filename)
+        expected = str(info.get("filename") or "")
+        if download.filename != expected:
+            raise BackupServiceError("下载凭证与文件不匹配")
+        return download
 
     def delete_backup(self, data: object) -> tuple[dict | None, str | None]:
         payload = self._payload(data)
