@@ -61,6 +61,23 @@ async def require_plugin_scope(request: Request) -> AuthContext:
     return await require_scope(request, "plugin")
 
 
+async def require_plugin_file_auth(
+    request: Request,
+    *,
+    plugin_id: str,
+    service: PluginService,
+) -> AuthContext | None:
+    """插件 Markdown 相对资源鉴权。
+
+    优先接受 query 里的短时 asset_token（给 <img>/<a> 用，不依赖 Cookie），
+    否则回退到常规 JWT / API key 鉴权。
+    """
+    asset_token = request.query_params.get("asset_token", "").strip()
+    if asset_token and service.verify_markdown_asset_token(asset_token, plugin_id):
+        return AuthContext(username="markdown_asset", scopes=["plugin"], via="asset_token")
+    return await require_scope(request, "plugin")
+
+
 def get_service(request: Request) -> PluginService:
     return request.app.state.services.plugins
 
@@ -841,11 +858,12 @@ async def _serve_plugin_relative_file(
 
 @router.get("/plugins/files")
 async def get_plugin_file_by_id(
+    request: Request,
     plugin_id: str = Query(...),
     path: str = Query(..., description="插件目录内相对路径，例如 docs/demo.png"),
-    _auth: AuthContext = Depends(require_plugin_scope),
     service: PluginService = Depends(get_service),
 ):
+    await require_plugin_file_auth(request, plugin_id=plugin_id, service=service)
     return await _serve_plugin_relative_file(
         service=service,
         plugin_id=plugin_id,
@@ -1113,11 +1131,12 @@ async def get_plugin_changelog(
 
 @router.get("/plugins/{plugin_id}/files/{relative_path:path}")
 async def get_plugin_file(
+    request: Request,
     plugin_id: str,
     relative_path: str,
-    _auth: AuthContext = Depends(require_plugin_scope),
     service: PluginService = Depends(get_service),
 ):
+    await require_plugin_file_auth(request, plugin_id=plugin_id, service=service)
     return await _serve_plugin_relative_file(
         service=service,
         plugin_id=plugin_id,
@@ -1466,12 +1485,18 @@ async def dashboard_get_plugin_changelog(
 async def dashboard_get_plugin_file(
     relative_path: str,
     request: Request,
-    _username: str = Depends(require_dashboard_user),
     service: PluginService = Depends(get_service),
 ):
+    plugin_id = request.query_params.get("name") or ""
+    asset_token = request.query_params.get("asset_token", "").strip()
+    if not (
+        asset_token and service.verify_markdown_asset_token(asset_token, plugin_id)
+    ):
+        # 无有效 asset_token 时仍要求仪表盘登录
+        await require_dashboard_user(request)
     return await _serve_plugin_relative_file(
         service=service,
-        plugin_id=request.query_params.get("name") or "",
+        plugin_id=plugin_id,
         relative_path=relative_path,
     )
 

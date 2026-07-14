@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import aiohttp
@@ -32,6 +32,12 @@ from astrbot.core.star.star_manager import (
 )
 from astrbot.core.star.updator import PLUGIN_METADATA_FILENAMES
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_temp_path
+
+import jwt
+from datetime import datetime, timedelta, timezone
+
+PLUGIN_MARKDOWN_ASSET_TOKEN_TYPE = "plugin_markdown_asset"
+PLUGIN_MARKDOWN_ASSET_TOKEN_TTL_SECONDS = 30 * 60
 
 PLUGIN_UPDATE_CONCURRENCY = 3
 PLUGIN_OPERATION_FAILED_MESSAGE = "插件操作失败，请查看服务端日志。"
@@ -2072,15 +2078,72 @@ class PluginService:
             raise PluginServiceError(f"插件 {plugin_name} 没有README文件")
 
         try:
-            return {
-                "content": readme_path.read_text(encoding="utf-8")
-            }, "成功获取README内容"
+            data = {"content": readme_path.read_text(encoding="utf-8")}
+            asset_token = self.issue_markdown_asset_token(plugin_name)
+            if asset_token:
+                data["asset_token"] = asset_token
+            return data, "成功获取README内容"
         except Exception as exc:
             logger.warning(f"读取插件 {plugin_name} README 文件失败: {exc}")
             raise PluginServiceError(
                 "读取README文件失败",
                 public_message="读取README文件失败",
             ) from exc
+
+    def _jwt_secret(self) -> str | None:
+        config = getattr(self.core_lifecycle, "astrbot_config", None)
+        if config is None:
+            return None
+        secret = config.get("dashboard", {}).get("jwt_secret")
+        if isinstance(secret, str) and secret.strip():
+            return secret
+        return None
+
+    def issue_markdown_asset_token(self, plugin_name: str | None) -> str | None:
+        """签发 Markdown 相对资源短时 token。
+
+        浏览器 <img>/<a> 不会带 Authorization，仅靠 Cookie 在部分部署场景会失败；
+        把短时 token 挂到资源 URL 上，服务器/反代下更稳。
+        """
+        if not plugin_name or not str(plugin_name).strip():
+            return None
+        jwt_secret = self._jwt_secret()
+        if not jwt_secret:
+            return None
+        now = datetime.now(timezone.utc)
+        payload = {
+            "token_type": PLUGIN_MARKDOWN_ASSET_TOKEN_TYPE,
+            "plugin_name": str(plugin_name).strip(),
+            "iat": now,
+            "exp": now + timedelta(seconds=PLUGIN_MARKDOWN_ASSET_TOKEN_TTL_SECONDS),
+        }
+        try:
+            return cast(str, jwt.encode(payload, jwt_secret, algorithm="HS256"))
+        except Exception as exc:
+            logger.warning(f"签发插件 Markdown 资源 token 失败: {exc}")
+            return None
+
+    def verify_markdown_asset_token(
+        self,
+        asset_token: str | None,
+        plugin_name: str | None,
+    ) -> bool:
+        if not asset_token or not plugin_name:
+            return False
+        jwt_secret = self._jwt_secret()
+        if not jwt_secret:
+            return False
+        try:
+            payload = jwt.decode(asset_token, jwt_secret, algorithms=["HS256"])
+        except Exception:
+            return False
+        if payload.get("token_type") != PLUGIN_MARKDOWN_ASSET_TOKEN_TYPE:
+            return False
+        token_plugin = payload.get("plugin_name")
+        return (
+            isinstance(token_plugin, str)
+            and token_plugin.strip() == str(plugin_name).strip()
+        )
 
     def resolve_plugin_relative_file(
         self,
@@ -2142,10 +2205,11 @@ class PluginService:
             if not changelog_path.is_file():
                 continue
             try:
-                return (
-                    {"content": changelog_path.read_text(encoding="utf-8")},
-                    "成功获取更新日志",
-                )
+                data = {"content": changelog_path.read_text(encoding="utf-8")}
+                asset_token = self.issue_markdown_asset_token(plugin_name)
+                if asset_token:
+                    data["asset_token"] = asset_token
+                return data, "成功获取更新日志"
             except Exception as exc:
                 logger.warning(f"读取插件 {plugin_name} 更新日志失败: {exc}")
                 raise PluginServiceError(
