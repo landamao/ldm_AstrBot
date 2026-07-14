@@ -17,6 +17,14 @@ class PersonaService:
         folder_id: str | None,
         filter_by_folder: bool,
     ) -> list[dict]:
+        # 进入人格设定页 / 刷新列表：全量 DB ↔ 本地副本 同步
+        try:
+            await self.persona_mgr.reconcile_all_persona_prompt_mirrors(
+                prune_orphans=False,
+            )
+        except Exception:
+            pass
+
         if filter_by_folder:
             personas = await self.persona_mgr.get_personas_by_folder(
                 folder_id if folder_id else None
@@ -32,9 +40,26 @@ class PersonaService:
         if not persona_id:
             raise PersonaServiceError("缺少必要参数: persona_id")
 
-        persona = await self.persona_mgr.get_persona(persona_id)
+        # WebUI 点击/打开该人格时：先做一次 DB ↔ 本地副本 时间同步
+        try:
+            await self.persona_mgr.reconcile_persona_prompt_mirror(str(persona_id))
+        except Exception:
+            # 同步失败不影响打开人格详情
+            pass
+
+        # 同步后再从数据库取最新，避免返回旧缓存
+        persona = await self.persona_mgr.db.get_persona_by_id(str(persona_id))
         if not persona:
             raise PersonaServiceError("人格不存在")
+
+        # 同步更新 manager 内存缓存，供其它路径使用
+        for i, p in enumerate(self.persona_mgr.personas):
+            if p.persona_id == persona.persona_id:
+                self.persona_mgr.personas[i] = persona
+                break
+        else:
+            self.persona_mgr.personas.append(persona)
+        self.persona_mgr.get_v3_persona_data()
 
         return self.serialize_persona(persona)
 

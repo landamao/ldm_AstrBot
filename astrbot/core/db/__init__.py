@@ -448,6 +448,7 @@ class BaseDatabase(abc.ABC):
         tools: list[str] | None | object = NOT_GIVEN,
         skills: list[str] | None | object = NOT_GIVEN,
         custom_error_message: str | None | object = NOT_GIVEN,
+        system_prompt_stored_at: object = NOT_GIVEN,
     ) -> Persona | None:
         """Update a persona record.
 
@@ -458,6 +459,9 @@ class BaseDatabase(abc.ABC):
             tools: Tool names, None for all tools, or NOT_GIVEN to leave unchanged.
             skills: Skill names, None for all skills, or NOT_GIVEN to leave unchanged.
             custom_error_message: Custom fallback message, None to clear, or NOT_GIVEN to leave unchanged.
+            system_prompt_stored_at: Optional prompt storage timestamp; when
+                system_prompt is set and this is NOT_GIVEN, implementation should
+                stamp current UTC time.
 
         Returns:
             Updated persona, or None when no fields were updated.

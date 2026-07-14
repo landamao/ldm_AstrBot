@@ -2082,6 +2082,47 @@ class PluginService:
                 public_message="读取README文件失败",
             ) from exc
 
+    def resolve_plugin_relative_file(
+        self,
+        plugin_name: str | None,
+        relative_path: str | None,
+    ) -> Path:
+        """解析插件目录内的相对路径文件（供 README/CHANGELOG 等 Markdown 引用）。
+
+        仅允许插件根目录下的普通文件，拒绝绝对路径、URL、目录穿越。
+        """
+        if not plugin_name:
+            raise PluginServiceError("插件名称不能为空")
+        if not relative_path or not str(relative_path).strip():
+            raise PluginServiceError("文件路径不能为空")
+
+        raw = str(relative_path).strip().replace("\\", "/")
+        # 去掉常见前缀，避免 md 里写 ./docs/a.png
+        while raw.startswith("./"):
+            raw = raw[2:]
+        raw = raw.lstrip("/")
+
+        if not raw:
+            raise PluginServiceError("文件路径不能为空")
+        if raw.startswith("../") or "/../" in f"/{raw}/" or raw == "..":
+            raise PluginServiceError("非法文件路径")
+        if ":" in raw.split("/")[0]:
+            # 拒绝 file:、C: 等 scheme/盘符
+            raise PluginServiceError("非法文件路径")
+        if any(part in ("", ".", "..") for part in raw.split("/")):
+            raise PluginServiceError("非法文件路径")
+
+        plugin_dir = self.resolve_plugin_dir(plugin_name).resolve()
+        target = (plugin_dir / raw).resolve(strict=False)
+        try:
+            target.relative_to(plugin_dir)
+        except ValueError as exc:
+            raise PluginServiceError("非法文件路径") from exc
+
+        if not target.is_file():
+            raise PluginServiceError("文件不存在", public_message="文件不存在")
+        return target
+
     def get_plugin_readme_from_dashboard_query(
         self,
         plugin_name: str | None,

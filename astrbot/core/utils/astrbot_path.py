@@ -98,3 +98,11 @@ def get_astrbot_knowledge_base_path() -> str:
 def get_astrbot_backups_path() -> str:
     """Return the AstrBot backups directory path."""
     return os.path.realpath(os.path.join(get_astrbot_data_path(), "backups"))
+
+
+def get_astrbot_persona_prompts_path() -> str:
+    """Return the persona prompt mirror directory path.
+
+    仅用于查看/备份人格系统提示词，运行时仍以数据库为准。
+    """
+    return os.path.realpath(os.path.join(get_astrbot_data_path(), "persona_prompts"))

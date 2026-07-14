@@ -63,6 +63,7 @@ class SQLiteDatabase(BaseDatabase):
             await self._ensure_persona_folder_columns(conn)
             await self._ensure_persona_skills_column(conn)
             await self._ensure_persona_custom_error_message_column(conn)
+            await self._ensure_persona_system_prompt_stored_at_column(conn)
             await self._ensure_platform_message_history_checkpoint_column(conn)
             await self._ensure_chatui_project_workspace_columns(conn)
             await conn.commit()
@@ -108,6 +109,30 @@ class SQLiteDatabase(BaseDatabase):
             await conn.execute(
                 text("ALTER TABLE personas ADD COLUMN custom_error_message TEXT")
             )
+
+    async def _ensure_persona_system_prompt_stored_at_column(self, conn) -> None:
+        """确保 personas 表有 system_prompt_stored_at 列，并回填旧数据。
+
+        该字段记录系统提示词写入时间，用于与本地副本文件 mtime 做双向同步。
+        """
+        result = await conn.execute(text("PRAGMA table_info(personas)"))
+        columns = {row[1] for row in result.fetchall()}
+
+        if "system_prompt_stored_at" not in columns:
+            await conn.execute(
+                text(
+                    "ALTER TABLE personas ADD COLUMN "
+                    "system_prompt_stored_at DATETIME DEFAULT NULL"
+                )
+            )
+        # 旧行用 updated_at/created_at 回填，避免首次比对全部当“无时间”
+        await conn.execute(
+            text(
+                "UPDATE personas SET system_prompt_stored_at = "
+                "COALESCE(system_prompt_stored_at, updated_at, created_at) "
+                "WHERE system_prompt_stored_at IS NULL"
+            )
+        )
 
     async def _ensure_platform_message_history_checkpoint_column(self, conn) -> None:
         """Ensure platform_message_history has llm_checkpoint_id."""
@@ -948,12 +973,16 @@ class SQLiteDatabase(BaseDatabase):
         sort_order=0,
     ):
         """Insert a new persona record."""
+        from datetime import datetime, timezone
+
         async with self.get_db() as session:
             session: AsyncSession
             async with session.begin():
+                now = datetime.now(timezone.utc)
                 new_persona = Persona(
                     persona_id=persona_id,
                     system_prompt=system_prompt,
+                    system_prompt_stored_at=now,
                     begin_dialogs=begin_dialogs or [],
                     tools=tools,
                     skills=skills,
@@ -990,8 +1019,11 @@ class SQLiteDatabase(BaseDatabase):
         tools=NOT_GIVEN,
         skills=NOT_GIVEN,
         custom_error_message=NOT_GIVEN,
+        system_prompt_stored_at=NOT_GIVEN,
     ):
         """Update a persona's system prompt or begin dialogs."""
+        from datetime import datetime, timezone
+
         async with self.get_db() as session:
             session: AsyncSession
             async with session.begin():
@@ -999,6 +1031,11 @@ class SQLiteDatabase(BaseDatabase):
                 values = {}
                 if system_prompt is not None:
                     values["system_prompt"] = system_prompt
+                    # 未显式指定存储时间时，提示词变更用当前 UTC 时间
+                    if system_prompt_stored_at is NOT_GIVEN:
+                        values["system_prompt_stored_at"] = datetime.now(timezone.utc)
+                if system_prompt_stored_at is not NOT_GIVEN:
+                    values["system_prompt_stored_at"] = system_prompt_stored_at
                 if begin_dialogs is not None:
                     values["begin_dialogs"] = begin_dialogs
                 if tools is not NOT_GIVEN:

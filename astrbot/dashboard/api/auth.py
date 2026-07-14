@@ -330,6 +330,18 @@ async def _login(
             "",
         ).strip(),
     )
+    # 登录成功后触发一次人格提示词 DB ↔ 本地副本全量校验（失败不影响登录）
+    if getattr(result, "status", "ok") == "ok":
+        try:
+            core_lifecycle = getattr(request.app.state, "core_lifecycle", None)
+            persona_mgr = getattr(core_lifecycle, "persona_mgr", None)
+            if persona_mgr is not None:
+                await persona_mgr.reconcile_all_persona_prompt_mirrors(
+                    prune_orphans=False,
+                )
+        except Exception:  # noqa: BLE001
+            # 登录路径绝不能因副本同步失败而 500
+            pass
     return _auth_service_response(
         request,
         result,

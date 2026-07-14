@@ -144,6 +144,11 @@ class Persona(TimestampMixin, SQLModel, table=True):
     )
     persona_id: str = Field(max_length=255, nullable=False)
     system_prompt: str = Field(sa_type=Text, nullable=False)
+    system_prompt_stored_at: datetime | None = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        nullable=True,
+    )
+    """系统提示词最后写入时间（DB 侧）。用于与 data/persona_prompts 副本 mtime 比对同步。"""
     begin_dialogs: list | None = Field(default=None, sa_type=JSON)
     """a list of strings, each representing a dialog to start with"""
     tools: list | None = Field(default=None, sa_type=JSON)

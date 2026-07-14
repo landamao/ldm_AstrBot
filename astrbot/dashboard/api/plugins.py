@@ -5,8 +5,11 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Body, Depends, Query, Request
-from fastapi.responses import PlainTextResponse, Response
+import mimetypes
+from pathlib import Path
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from astrbot.api.web import PluginRequest, bind_request_context
 from astrbot.core import logger
@@ -817,6 +820,39 @@ async def get_plugin_changelog_by_id(
     )
 
 
+def _plugin_file_response(file_path: Path) -> FileResponse:
+    media_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    return FileResponse(file_path, media_type=media_type)
+
+
+async def _serve_plugin_relative_file(
+    *,
+    service: PluginService,
+    plugin_id: str,
+    relative_path: str,
+):
+    try:
+        file_path = service.resolve_plugin_relative_file(plugin_id, relative_path)
+    except PluginServiceError as exc:
+        status = 404 if "不存在" in exc.public_message else 400
+        raise HTTPException(status_code=status, detail=exc.public_message) from exc
+    return _plugin_file_response(file_path)
+
+
+@router.get("/plugins/files")
+async def get_plugin_file_by_id(
+    plugin_id: str = Query(...),
+    path: str = Query(..., description="插件目录内相对路径，例如 docs/demo.png"),
+    _auth: AuthContext = Depends(require_plugin_scope),
+    service: PluginService = Depends(get_service),
+):
+    return await _serve_plugin_relative_file(
+        service=service,
+        plugin_id=plugin_id,
+        relative_path=path,
+    )
+
+
 @router.post("/plugins/reload")
 async def reload_plugin_by_id(
     payload: PluginByIdRequest,
@@ -1072,6 +1108,20 @@ async def get_plugin_changelog(
     return await _run_service(
         lambda: service.get_plugin_changelog(plugin_id),
         log_label="/api/plugin/changelog",
+    )
+
+
+@router.get("/plugins/{plugin_id}/files/{relative_path:path}")
+async def get_plugin_file(
+    plugin_id: str,
+    relative_path: str,
+    _auth: AuthContext = Depends(require_plugin_scope),
+    service: PluginService = Depends(get_service),
+):
+    return await _serve_plugin_relative_file(
+        service=service,
+        plugin_id=plugin_id,
+        relative_path=relative_path,
     )
 
 
@@ -1409,6 +1459,20 @@ async def dashboard_get_plugin_changelog(
     return await _run_service(
         lambda: service.get_plugin_changelog(request.query_params.get("name")),
         log_label="/api/plugin/changelog",
+    )
+
+
+@legacy_router.get("/api/plugin/file/{relative_path:path}")
+async def dashboard_get_plugin_file(
+    relative_path: str,
+    request: Request,
+    _username: str = Depends(require_dashboard_user),
+    service: PluginService = Depends(get_service),
+):
+    return await _serve_plugin_relative_file(
+        service=service,
+        plugin_id=request.query_params.get("name") or "",
+        relative_path=relative_path,
     )
 
 

@@ -5,6 +5,14 @@ from astrbot.core.db import BaseDatabase
 from astrbot.core.db.po import Persona, PersonaFolder, Personality
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.sentinels import NOT_GIVEN
+from astrbot.core.utils.persona_prompt_mirror import (
+    delete_persona_prompt_mirror,
+    extract_file_prompt_for_db_write,
+    persona_prompt_path,
+    prune_orphan_persona_prompt_files,
+    reconcile_persona_prompt,
+    write_persona_prompt_mirror,
+)
 
 DEFAULT_PERSONALITY = Personality(
     prompt="You are a helpful and friendly assistant.",
@@ -35,6 +43,8 @@ class PersonaManager:
     async def initialize(self) -> None:
         self.personas = await self.get_all_personas()
         self.get_v3_persona_data()
+        # 启动：DB ↔ 本地副本 双向时间同步（仅查看/备份用，失败不阻断）
+        await self.reconcile_all_persona_prompt_mirrors(prune_orphans=True)
         logger.info("已加载 %s 个人格。", len(self.personas))
 
     async def get_persona(self, persona_id: str):
@@ -119,6 +129,25 @@ class PersonaManager:
             persona_id = "_chatui_default_"
             use_webchat_special_default = True
 
+        # LLM 取人格前：对当前人格做 DB ↔ 文件 时间同步（1 秒容差）
+        if (
+            persona
+            and persona_id
+            and persona_id not in ("[%None]", "_chatui_default_", "default")
+        ):
+            try:
+                await self.reconcile_persona_prompt_mirror(persona_id)
+                persona = next(
+                    (item for item in self.personas_v3 if item["name"] == persona_id),
+                    persona,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "人格提示词副本校验失败 persona_id=%s: %s",
+                    persona_id,
+                    exc,
+                )
+
         return (
             persona_id,
             persona,
@@ -132,6 +161,7 @@ class PersonaManager:
             raise ValueError(f"Persona with ID {persona_id} does not exist.")
         await self.db.delete_persona(persona_id)
         self.personas = [p for p in self.personas if p.persona_id != persona_id]
+        delete_persona_prompt_mirror(persona_id)
         self.get_v3_persona_data()
 
     async def update_persona(
@@ -166,6 +196,12 @@ class PersonaManager:
                 if p.persona_id == persona_id:
                     self.personas[i] = persona
                     break
+            # WebUI/API 更新后：以 DB 为准写出副本，并把文件 mtime 对齐 stored_at
+            write_persona_prompt_mirror(
+                persona.persona_id,
+                persona.system_prompt,
+                mtime=getattr(persona, "system_prompt_stored_at", None),
+            )
         self.get_v3_persona_data()
         return persona
 
@@ -347,8 +383,109 @@ class PersonaManager:
             sort_order=sort_order,
         )
         self.personas.append(new_persona)
+        write_persona_prompt_mirror(
+            new_persona.persona_id,
+            new_persona.system_prompt,
+            mtime=getattr(new_persona, "system_prompt_stored_at", None),
+        )
         self.get_v3_persona_data()
         return new_persona
+
+    async def reconcile_persona_prompt_mirror(self, persona_id: str) -> bool:
+        """对单个人格做 DB ↔ 本地副本 双向同步。
+
+        Returns:
+            是否发生了内容变更（写文件或写 DB）。
+        """
+        if not persona_id or persona_id in ("[%None]", "_chatui_default_", "default"):
+            return False
+
+        # 始终以数据库最新行为准，避免内存缓存导致同步判断失真
+        persona = await self.db.get_persona_by_id(persona_id)
+        if not persona:
+            return False
+
+        result = reconcile_persona_prompt(persona)
+        if result.action == "write_db":
+            payload = extract_file_prompt_for_db_write(persona_id)
+            if not payload:
+                return False
+            new_prompt, stored_at = payload
+            updated = await self.db.update_persona(
+                persona_id,
+                system_prompt=new_prompt,
+                system_prompt_stored_at=stored_at,
+            )
+            if updated:
+                for i, p in enumerate(self.personas):
+                    if p.persona_id == persona_id:
+                        self.personas[i] = updated
+                        break
+                else:
+                    self.personas.append(updated)
+                # 写回 DB 后把文件 mtime 对齐到 stored_at，避免 1 秒误差反复触发
+                write_persona_prompt_mirror(
+                    persona_id,
+                    updated.system_prompt,
+                    mtime=getattr(updated, "system_prompt_stored_at", stored_at),
+                )
+                self.get_v3_persona_data()
+                logger.info(
+                    "人格提示词已从本地副本写回数据库: %s",
+                    persona_id,
+                )
+                return True
+            return False
+
+        if result.changed:
+            # 文件侧被 DB 覆盖时，刷新内存中的该条（时间可能已对齐）
+            refreshed = await self.db.get_persona_by_id(persona_id)
+            if refreshed:
+                for i, p in enumerate(self.personas):
+                    if p.persona_id == persona_id:
+                        self.personas[i] = refreshed
+                        break
+            logger.info(
+                "人格提示词副本已更新: %s (%s)",
+                persona_id,
+                result.action,
+            )
+        return result.changed
+
+    async def reconcile_all_persona_prompt_mirrors(
+        self,
+        *,
+        prune_orphans: bool = False,
+    ) -> int:
+        """对全部人格做双向同步。返回发生内容变更的数量。"""
+        changed = 0
+        # 全量同步前强制从 DB 刷新列表，避免漏人 / 用旧缓存
+        personas = await self.get_all_personas()
+        self.personas = list(personas)
+
+        for persona in list(personas):
+            try:
+                if await self.reconcile_persona_prompt_mirror(persona.persona_id):
+                    changed += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "人格提示词副本全量校验失败 persona_id=%s: %s",
+                    getattr(persona, "persona_id", None),
+                    exc,
+                )
+
+        # 同步后再次从 DB 刷新缓存与 v3 数据
+        self.personas = list(await self.get_all_personas())
+        self.get_v3_persona_data()
+
+        if prune_orphans:
+            expected = {
+                persona_prompt_path(p.persona_id).name
+                for p in self.personas
+                if getattr(p, "persona_id", None)
+            }
+            prune_orphan_persona_prompt_files(expected)
+        return changed
 
     def get_v3_persona_data(
         self,
