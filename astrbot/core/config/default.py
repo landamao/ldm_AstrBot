@@ -119,6 +119,8 @@ DEFAULT_CONFIG = {
             # Reply 行为（吸收自分段插件：智能回复 / 保留回复）
             "enable_smart_reply": True,
             "enable_keep_reply": True,
+            # 私聊始终不进行引用回复（覆盖全局 reply_with_quote / 智能回复 / 保留回复）
+            "disable_quote_in_private": True,
         },
         "no_permission_reply": True,
         "empty_mention_waiting": True,
@@ -133,7 +135,7 @@ DEFAULT_CONFIG = {
             "notify_user": True,
             "notify_text": "打断当前回复，开始处理新消息。",
             "add_to_context": True,
-            "context_text": "用户发送了新消息导致打断了此条回复",
+            "context_text": "[系统提示]用户发送了新消息导致打断了此条回复，请联系上下文继续做出回复",
             "wait_timeout": 8.0,
         },
     },
@@ -145,6 +147,7 @@ DEFAULT_CONFIG = {
         "fallback_chat_models": [],
         "request_max_retries": 2,
         "default_image_caption_provider_id": "",
+        "always_use_image_caption_provider": False,
         "image_caption_prompt": "Please describe the image using Chinese.",
         "provider_pool": ["*"],  # "*" 表示使用所有可用的提供者
         "wake_prefix": "",
@@ -1147,6 +1150,7 @@ CONFIG_METADATA_2 = {
                             "trim_edge_blank_lines": {"type": "bool"},
                             "enable_smart_reply": {"type": "bool"},
                             "enable_keep_reply": {"type": "bool"},
+                            "disable_quote_in_private": {"type": "bool"},
                         },
                     },
                     "reply_prefix": {
@@ -3252,6 +3256,11 @@ CONFIG_METADATA_3 = {
                         "_special": "select_provider",
                         "hint": "留空代表不使用，可用于非多模态模型",
                     },
+                    "provider_settings.always_use_image_caption_provider": {
+                        "description": "始终使用默认图片转述模型",
+                        "type": "bool",
+                        "hint": "开启后，即使当前对话模型支持图片识别，也会先用默认图片转述模型描述图片，再把文字结果交给对话模型；可避免把 base64 大图写入对话历史。需同时配置「默认图片转述模型」。",
+                    },
                     "provider_stt_settings.enable": {
                         "description": "启用语音转文本",
                         "type": "bool",
@@ -4250,6 +4259,19 @@ CONFIG_METADATA_3 = {
                         "condition": {
                             "platform_settings.segmented_reply.enable": True,
                             "platform_settings.segmented_reply.config_mode": ["advanced", "pro"],
+                        },
+                    },
+                    "platform_settings.segmented_reply.disable_quote_in_private": {
+                        "description": "私聊始终不引用回复",
+                        "type": "bool",
+                        "hint": "开启后，私聊（好友消息）中不使用引用回复，包括全局「回复时引用」、智能回复、保留回复。群聊不受影响。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": [
+                                "simple",
+                                "advanced",
+                                "pro",
+                            ],
                         },
                     },
                     # ---- 进阶额外 ----

@@ -34,6 +34,13 @@ class ResultDecorateStage(Stage):
         self.reply_with_quote = ctx.astrbot_config["platform_settings"][
             "reply_with_quote"
         ]
+        # 走 resolve，保证简易/进阶/专业模式可见项与残留隔离一致
+        seg_cfg = resolve_segmented_reply_config(
+            ctx.astrbot_config["platform_settings"].get("segmented_reply", {}),
+        )
+        self.disable_quote_in_private = bool(
+            seg_cfg.get("disable_quote_in_private", True)
+        )
         self.t2i_word_threshold = ctx.astrbot_config["t2i_word_threshold"]
         try:
             self.t2i_word_threshold = int(self.t2i_word_threshold)
@@ -360,4 +367,9 @@ class ResultDecorateStage(Stage):
 
                 # 引用回复
                 if self.reply_with_quote:
-                    result.chain.insert(0, Reply(id=event.message_obj.message_id))
+                    # 分段回复：私聊始终不引用
+                    if not (
+                        self.disable_quote_in_private
+                        and event.get_message_type() == MessageType.FRIEND_MESSAGE
+                    ):
+                        result.chain.insert(0, Reply(id=event.message_obj.message_id))

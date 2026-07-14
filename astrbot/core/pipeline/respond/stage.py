@@ -8,6 +8,7 @@ from astrbot.core import logger
 from astrbot.core.message.components import BaseMessageComponent, ComponentType
 from astrbot.core.message.message_event_result import MessageChain, ResultContentType
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.star_handler import EventType
 from astrbot.core.utils.path_util import path_Mapping
 from astrbot.core.utils.segmented_reply import (
@@ -81,6 +82,9 @@ class RespondStage(Stage):
         self.fixed_delay = float(seg_cfg.get("fixed_delay", 1.5) or 1.5)
         self.enable_smart_reply = bool(seg_cfg.get("enable_smart_reply", True))
         self.enable_keep_reply = bool(seg_cfg.get("enable_keep_reply", True))
+        self.disable_quote_in_private = bool(
+            seg_cfg.get("disable_quote_in_private", True)
+        )
         self.interval = [1.5, 3.5]
         if self.enable_seg:
             interval_str = str(seg_cfg.get("interval", "1.5,3.5") or "1.5,3.5")
@@ -136,6 +140,7 @@ class RespondStage(Stage):
                 delay_desc,
                 f"智能回复: {on_off(self.enable_smart_reply)}",
                 f"保留回复: {on_off(self.enable_keep_reply)}",
+                f"私聊不引用: {on_off(self.disable_quote_in_private)}",
             ]
             if mode == "advanced":
                 parts.insert(3, f"仅LLM分段: {on_off(self.only_llm_result)}")
@@ -158,7 +163,8 @@ class RespondStage(Stage):
             f"间隔策略: {method_label} "
             f"{delay_desc} "
             f"智能回复: {on_off(self.enable_smart_reply)} "
-            f"保留回复: {on_off(self.enable_keep_reply)}"
+            f"保留回复: {on_off(self.enable_keep_reply)} "
+            f"私聊不引用: {on_off(self.disable_quote_in_private)}"
         )
 
     async def _word_cnt(self, text: str) -> int:
@@ -397,8 +403,17 @@ class RespondStage(Stage):
                     getattr(getattr(event, "message_obj", None), "message_id", "") or ""
                 )
                 tracker = get_segmented_reply_session_tracker()
+                # 私聊始终不引用：关闭智能回复/保留回复带来的 Reply 注入
+                is_private = (
+                    event.get_message_type() == MessageType.FRIEND_MESSAGE
+                )
+                allow_quote = not (self.disable_quote_in_private and is_private)
+                use_smart_reply = self.enable_smart_reply and allow_quote
+                use_keep_reply = self.enable_keep_reply and allow_quote
+                if not allow_quote:
+                    reply_headers = []
                 first_reply_chain: list[BaseMessageComponent] = list(reply_headers)
-                if self.enable_smart_reply and source_id:
+                if use_smart_reply and source_id:
                     if tracker.should_add_smart_reply(
                         str(getattr(event, "unified_msg_origin", "") or ""),
                         source_id,
@@ -407,14 +422,14 @@ class RespondStage(Stage):
                         if not any(isinstance(c, Comp.Reply) for c in first_reply_chain):
                             first_reply_chain.insert(0, Comp.Reply(id=source_id))
                             logger.info("智能回复：检测到插话，第一段附加 Reply")
-                if self.enable_keep_reply and source_id and not first_reply_chain:
+                if use_keep_reply and source_id and not first_reply_chain:
                     # keep-reply: ensure there is a Reply even if platform quote is off
                     first_reply_chain = [Comp.Reply(id=source_id)]
                 # last segment Reply set (keep-reply only)
                 last_reply_chain: list[BaseMessageComponent] = (
                     list(reply_headers)
                     if reply_headers
-                    else (list(first_reply_chain) if self.enable_keep_reply else [])
+                    else (list(first_reply_chain) if use_keep_reply else [])
                 )
 
                 comps = list(result.chain)
@@ -447,7 +462,7 @@ class RespondStage(Stage):
                             # - 最后一段：仅「保留回复」开启时继续带原 Reply
                             if idx == 0:
                                 prefix = [*first_reply_chain, *at_headers]
-                            elif self.enable_keep_reply and idx == len(comps) - 1:
+                            elif use_keep_reply and idx == len(comps) - 1:
                                 prefix = list(last_reply_chain)
                             else:
                                 prefix = []
@@ -465,7 +480,7 @@ class RespondStage(Stage):
                             f"发送消息链失败: chain = {MessageChain([comp])}, error = {e}",
                             exc_info=True,
                         )
-                if self.enable_smart_reply and source_id:
+                if use_smart_reply and source_id:
                     tracker.mark_bot_reply(
                         str(getattr(event, "unified_msg_origin", "") or ""),
                         source_id,

@@ -984,12 +984,21 @@ async def _decorate_llm_request(
         provider, "image"
     )
     img_cap_prov_id: str = cfg.get("default_image_caption_provider_id") or ""
+    always_use_image_caption = bool(
+        cfg.get("always_use_image_caption_provider", False)
+    )
+    # 配置了默认图片转述模型时：
+    # - 主模型不支持图片 → 始终转述
+    # - 主模型支持图片但开启「始终使用默认图片转述模型」→ 也转述（避免 base64 入历史）
+    should_caption_images = bool(img_cap_prov_id) and (
+        always_use_image_caption or not main_provider_supports_image
+    )
     quote_images_already_captioned = False
 
     if req.conversation:
         await _ensure_persona_and_skills(req, cfg, plugin_context, event)
 
-        if img_cap_prov_id and req.image_urls and not main_provider_supports_image:
+        if should_caption_images and req.image_urls:
             await _ensure_img_caption(
                 event,
                 req,
@@ -1007,7 +1016,10 @@ async def _decorate_llm_request(
         plugin_context,
         quoted_message_settings,
         config,
-        main_provider_supports_image=main_provider_supports_image,
+        # 强制转述时，引用图也应走转述，而不是因主模型支持图片被跳过
+        main_provider_supports_image=(
+            main_provider_supports_image and not always_use_image_caption
+        ),
         skip_quote_image_caption=quote_images_already_captioned,
     )
 

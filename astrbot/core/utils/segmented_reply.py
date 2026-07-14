@@ -549,6 +549,7 @@ _SEGMENTED_REPLY_MODE_EDITABLE: dict[str, frozenset[str]] = {
             "send_speed",
             "clean_before_items",
             "words_count_threshold",
+            "disable_quote_in_private",
         }
     ),
     "advanced": frozenset(
@@ -561,6 +562,7 @@ _SEGMENTED_REPLY_MODE_EDITABLE: dict[str, frozenset[str]] = {
             "words_count_threshold",
             "enable_smart_reply",
             "enable_keep_reply",
+            "disable_quote_in_private",
             "only_llm_result",
             "split_words",
             "no_split_around",
@@ -617,6 +619,7 @@ def _segmented_reply_template() -> dict:
         "trim_edge_blank_lines": True,
         "enable_smart_reply": True,
         "enable_keep_reply": True,
+        "disable_quote_in_private": True,
     }
 
 
@@ -731,6 +734,9 @@ def resolve_segmented_reply_config(raw: dict | None) -> dict:
         "send_speed": pick("send_speed", cast=str, default="natural"),
         "enable_smart_reply": pick("enable_smart_reply", cast=bool, default=True),
         "enable_keep_reply": pick("enable_keep_reply", cast=bool, default=True),
+        "disable_quote_in_private": pick(
+            "disable_quote_in_private", cast=bool, default=True
+        ),
     }
 
     if mode == "simple":
