@@ -8,12 +8,27 @@
 ## 📥 一键安装（推荐）
 
 在终端执行以下命令，自动下载并运行安装脚本：
-
+### 方式1：一键下载并执行
 ```bash
 curl -fsSL -o ldm_AstrBot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh && chmod +x ldm_AstrBot_install.sh && ./ldm_AstrBot_install.sh
 ```
+### 方式2：先下载再执行
+  - 第一步：下载脚本
+    - 方式1
+    ```bash
+    curl -fsSL -o ldm_AstrBot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh && chmod +x ldm_AstrBot_install.sh
+    ```
+    - 方式2（代理加速）
+    ```bash
+    curl -fsSL -o ldm_AstrBot_install.sh https://gh-proxy.org/https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh && chmod +x ldm_AstrBot_install.sh
+    ```
+  - 第二步：执行脚本
+    ```bash
+     ./ldm_AstrBot_install.sh
+    ```
 
-脚本会自动解压项目、配置依赖并启动。首次运行后再次执行可**直接启动**、**重建**、**更新**、**从官方版迁移**。
+### 脚本选项：
+![img_13.jpg](readme_image/img_13.jpg)
 
 
 > 如需**手动安装**（分步控制），请跳转到文档末尾的 [📄 手动安装教程](#-手动安装教程)。
