@@ -1018,7 +1018,19 @@ class ChatService:
             raise ChatServiceError("Permission denied")
 
         unified_msg_origin = build_webchat_unified_msg_origin(session)
-        stopped_count = active_event_registry.request_agent_stop_all(unified_msg_origin)
+        # Dashboard 停止按钮视作强制停止：尽快中断且不写入对话历史
+        stopped_count = active_event_registry.request_agent_stop_all(
+            unified_msg_origin,
+            extra_updates={"agent_force_stop": True},
+        )
+        try:
+            from astrbot.core.pipeline.process_stage.follow_up import get_active_runner
+
+            active_runner = get_active_runner(unified_msg_origin)
+            if active_runner is not None:
+                active_runner.request_stop()
+        except Exception:
+            pass
         return {"stopped_count": stopped_count}
 
     async def stop_session_from_dashboard_payload(

@@ -279,8 +279,12 @@ class RespondStage(Stage):
         注意：不要用 event.is_stopped()。
         插件里常见写法是先 stop_event() 再 yield result——stop 只表示终止事件传播
         （后续插件/默认 LLM 不再跑），当前这次 yield 仍应由 RespondStage 正常发出。
-        真正的打断信号是 agent_stop_requested / agent_user_aborted。
+        真正的打断信号：
+        - agent_stop_requested / agent_user_aborted：软打断（新消息）
+        - agent_force_stop：/stop 或 Dashboard 强制停止
         """
+        if event.get_extra("agent_force_stop"):
+            return True
         if event.get_extra("agent_stop_requested"):
             return True
         if event.get_extra("agent_user_aborted"):

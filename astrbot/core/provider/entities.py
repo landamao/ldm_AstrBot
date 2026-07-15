@@ -32,6 +32,24 @@ class ProviderType(enum.Enum):
     RERANK = "rerank"
 
 
+def format_provider_display_id(
+    provider_id: str | None,
+    *,
+    default: str = "unknown",
+) -> str:
+    """展示用提供商名。
+
+    AstrBot 会把提供商源前缀拼进实例 id（如 ``ldmapi/英伟达/deepseek-v4-pro``），
+    用户可见的「提供商」应取第一个 ``/`` 之前的部分（``ldmapi``），
+    其后段落属于模型/路由信息，不应整段当提供商名展示。
+    """
+    text = str(provider_id or "").strip()
+    if not text:
+        return default
+    head = text.split("/", 1)[0].strip()
+    return head or default
+
+
 @dataclass
 class ProviderMeta:
     """The basic metadata of a provider instance."""

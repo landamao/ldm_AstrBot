@@ -108,7 +108,12 @@ class ConversationCommands:
         message.set_result(MessageEventResult().message(ret))
 
     async def stop(self, message: AstrMessageEvent) -> None:
-        """停止当前会话正在运行的 Agent"""
+        """强制停止当前会话正在运行的 Agent（/stop）。
+
+        与「新消息软打断」不同：
+        - 立即 request_stop 活跃 runner，尽快中断生成
+        - 标记 agent_force_stop，整轮不写入对话历史
+        """
         cfg = self.context.get_config(umo=message.unified_msg_origin)
         agent_runner_type = cfg["provider_settings"]["agent_runner_type"]
         umo = message.unified_msg_origin
@@ -116,15 +121,28 @@ class ConversationCommands:
         if agent_runner_type in THIRD_PARTY_AGENT_RUNNER_KEY:
             stopped_count = active_event_registry.stop_all(umo, exclude=message)
         else:
+            # 强制停止：停发送 + 不落库；与软打断的 agent_user_aborted 区分
             stopped_count = active_event_registry.request_agent_stop_all(
                 umo,
                 exclude=message,
+                extra_updates={"agent_force_stop": True},
             )
+            # 立即打断活跃 runner，避免仅靠 0.5s 轮询 watcher 才停
+            try:
+                from astrbot.core.pipeline.process_stage.follow_up import (
+                    get_active_runner,
+                )
+
+                active_runner = get_active_runner(umo)
+                if active_runner is not None:
+                    active_runner.request_stop()
+            except Exception:
+                pass
 
         if stopped_count > 0:
             message.set_result(
                 MessageEventResult().message(
-                    f"已请求停止 {stopped_count} 个运行中的任务。"
+                    f"已强制停止 {stopped_count} 个运行中的任务。"
                 )
             )
             return

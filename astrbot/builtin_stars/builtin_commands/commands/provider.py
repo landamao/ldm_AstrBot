@@ -209,7 +209,10 @@ class ProviderCommands:
     ) -> str:
         prov.set_model(model_name)
         self.invalidate_provider_models_cache(prov.meta().id, umo=umo)
-        return f"切换模型成功。当前提供商: [{prov.meta().id}] 当前模型: [{prov.get_model()}]"
+        return (
+            f"切换模型成功。当前提供商: [{prov.display_provider_id()}] "
+            f"当前模型: [{prov.get_model()}]"
+        )
 
     async def _get_provider_models(
         self,
@@ -440,11 +443,14 @@ class ProviderCommands:
                 else:
                     reachable_flag = reachable
 
-                # 根据类型构建显示名称
+                # 根据类型构建显示名称：提供商取 id 第一个 / 前缀
                 if p_type == "llm":
-                    info = f"{id_} ({meta.model})"
+                    info = f"{p.display_provider_id()} · {meta.model or id_}"
                 else:
-                    info = f"{id_}"
+                    info = f"{p.display_provider_id()}"
+                    if id_ and "/" in str(id_):
+                        # 同前缀多实例时附上完整 id 便于区分
+                        info = f"{info} ({id_})"
 
                 # 确定状态标记
                 if reachable_flag is True:
@@ -526,7 +532,11 @@ class ProviderCommands:
                 provider_type=ProviderType.TEXT_TO_SPEECH,
                 umo=umo,
             )
-            event.set_result(MessageEventResult().message(f"成功切换到 {id_}。"))
+            event.set_result(
+                MessageEventResult().message(
+                    f"成功切换到提供商 [{provider.display_provider_id()}]。"
+                )
+            )
         elif idx == "stt":
             if idx2 is None:
                 event.set_result(MessageEventResult().message("请输入序号。"))
@@ -541,7 +551,11 @@ class ProviderCommands:
                 provider_type=ProviderType.SPEECH_TO_TEXT,
                 umo=umo,
             )
-            event.set_result(MessageEventResult().message(f"成功切换到 {id_}。"))
+            event.set_result(
+                MessageEventResult().message(
+                    f"成功切换到提供商 [{provider.display_provider_id()}]。"
+                )
+            )
         elif isinstance(idx, int):
             if idx > len(self.context.get_all_providers()) or idx < 1:
                 event.set_result(MessageEventResult().message("无效的提供商序号。"))
@@ -553,7 +567,11 @@ class ProviderCommands:
                 provider_type=ProviderType.CHAT_COMPLETION,
                 umo=umo,
             )
-            event.set_result(MessageEventResult().message(f"成功切换到 {id_}。"))
+            event.set_result(
+                MessageEventResult().message(
+                    f"成功切换到提供商 [{provider.display_provider_id()}] · 模型 [{provider.get_model()}]。"
+                )
+            )
         else:
             event.set_result(MessageEventResult().message("无效的参数。"))
 

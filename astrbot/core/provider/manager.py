@@ -11,7 +11,7 @@ from astrbot.core.db import BaseDatabase
 from astrbot.core.utils.error_redaction import safe_error
 
 from ..persona_mgr import PersonaManager
-from .entities import ProviderType
+from .entities import ProviderType, format_provider_display_id
 from .provider import (
     EmbeddingProvider,
     Provider,
@@ -694,7 +694,9 @@ class ProviderManager:
                     ):
                         self.curr_provider_inst = inst
                         logger.info(
-                            f"已选择 {provider_config['type']}({provider_config['id']}) 作为默认对话模型提供商",
+                            "已选择 %s(%s) 作为默认对话模型提供商",
+                            provider_config["type"],
+                            format_provider_display_id(provider_config["id"]),
                         )
                     if not self.curr_provider_inst:
                         self.curr_provider_inst = inst
@@ -753,7 +755,8 @@ class ProviderManager:
             elif self.curr_provider_inst is None and len(self.provider_insts) > 0:
                 self.curr_provider_inst = self.provider_insts[0]
                 logger.info(
-                    f"自动选择 {self.curr_provider_inst.meta().id} 作为当前提供商适配器。",
+                    "自动选择 %s 作为当前提供商适配器。",
+                    self.curr_provider_inst.display_provider_id(),
                 )
 
             if len(self.stt_provider_insts) == 0:
@@ -763,7 +766,8 @@ class ProviderManager:
             ):
                 self.curr_stt_provider_inst = self.stt_provider_insts[0]
                 logger.info(
-                    f"自动选择 {self.curr_stt_provider_inst.meta().id} 作为当前语音转文本提供商适配器。",
+                    "自动选择 %s 作为当前语音转文本提供商适配器。",
+                    self.curr_stt_provider_inst.display_provider_id(),
                 )
 
             if len(self.tts_provider_insts) == 0:
@@ -773,7 +777,8 @@ class ProviderManager:
             ):
                 self.curr_tts_provider_inst = self.tts_provider_insts[0]
                 logger.info(
-                    f"自动选择 {self.curr_tts_provider_inst.meta().id} 作为当前文本转语音提供商适配器。",
+                    "自动选择 %s 作为当前文本转语音提供商适配器。",
+                    self.curr_tts_provider_inst.display_provider_id(),
                 )
 
     def get_insts(self):

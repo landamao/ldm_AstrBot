@@ -69,13 +69,25 @@ class EventBus:
             event (AstrMessageEvent): 事件对象
 
         """
-        # 如果有发送者名称: [平台名] 发送者名称/发送者ID: 消息概要
+        hide_conf_platform = bool(
+            self.astrbot_config_mgr.default_conf.get("log_hide_conf_platform", False),
+        )
+        if hide_conf_platform:
+            prefix = ""
+        else:
+            prefix = (
+                f"[{conf_name}] "
+                f"[{event.get_platform_id()}({event.get_platform_name()})] "
+            )
+
+        # 如果有发送者名称: [配置名] [平台ID(平台名)] 发送者名称/发送者ID: 消息概要
         if event.get_sender_name():
             logger.info(
-                f"[{conf_name}] [{event.get_platform_id()}({event.get_platform_name()})] {event.get_sender_name()}/{event.get_sender_id()}: {event.get_message_outline()}",
+                f"{prefix}{event.get_sender_name()}/{event.get_sender_id()}: "
+                f"{event.get_message_outline()}",
             )
-        # 没有发送者名称: [平台名] 发送者ID: 消息概要
+        # 没有发送者名称: [配置名] [平台ID(平台名)] 发送者ID: 消息概要
         else:
             logger.info(
-                f"[{conf_name}] [{event.get_platform_id()}({event.get_platform_name()})] {event.get_sender_id()}: {event.get_message_outline()}",
+                f"{prefix}{event.get_sender_id()}: {event.get_message_outline()}",
             )

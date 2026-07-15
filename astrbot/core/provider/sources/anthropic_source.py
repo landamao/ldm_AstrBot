@@ -785,11 +785,10 @@ class ProviderAnthropic(Provider):
         model = model or self.get_model()
 
         payloads = {"messages": new_messages, "model": model}
-        provider_id = self.provider_config.get("id", "unknown")
         logger.info(
             "正在请求 LLM，使用模型: %s（提供商: %s）",
             model,
-            provider_id,
+            self.display_provider_id(),
         )
         if func_tool and not func_tool.empty():
             payloads["tool_choice"] = tool_choice
@@ -863,11 +862,10 @@ class ProviderAnthropic(Provider):
         model = model or self.get_model()
 
         payloads = {"messages": new_messages, "model": model}
-        provider_id = self.provider_config.get("id", "unknown")
         logger.info(
             "正在请求 LLM，使用模型: %s（提供商: %s）",
             model,
-            provider_id,
+            self.display_provider_id(),
         )
         if func_tool and not func_tool.empty():
             payloads["tool_choice"] = tool_choice

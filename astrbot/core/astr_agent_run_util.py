@@ -25,7 +25,12 @@ AgentRunner = ToolLoopAgentRunner[AstrAgentContext]
 
 
 def _should_stop_agent(astr_event) -> bool:
-    return astr_event.is_stopped() or bool(astr_event.get_extra("agent_stop_requested"))
+    # agent_stop_requested：请求停止；agent_force_stop：/stop 强制停止（通常会同时设前者）
+    return (
+        astr_event.is_stopped()
+        or bool(astr_event.get_extra("agent_stop_requested"))
+        or bool(astr_event.get_extra("agent_force_stop"))
+    )
 
 
 def _truncate_tool_result(text: str, limit: int = 70) -> str:
@@ -162,13 +167,15 @@ async def run_agent(
                     if can_buffer_llm_result:
                         merged_chain = _merge_buffered_llm_chains(buffered_llm_chains)
                         if merged_chain:
-                            astr_event.set_result(
-                                MessageEventResult(
-                                    chain=merged_chain.chain,
-                                    result_content_type=ResultContentType.LLM_RESULT,
-                                ),
-                            )
-                            yield merged_chain
+                            # /stop 强制停止：丢弃缓冲内容，不向用户继续投递
+                            if not astr_event.get_extra("agent_force_stop"):
+                                astr_event.set_result(
+                                    MessageEventResult(
+                                        chain=merged_chain.chain,
+                                        result_content_type=ResultContentType.LLM_RESULT,
+                                    ),
+                                )
+                                yield merged_chain
                             astr_event.clear_result()
                     if not stop_watcher.done():
                         stop_watcher.cancel()
@@ -176,7 +183,9 @@ async def run_agent(
                             await stop_watcher
                         except asyncio.CancelledError:
                             pass
-                    astr_event.set_extra("agent_user_aborted", True)
+                    # 软打断（新消息）记 agent_user_aborted；/stop 强制停止保留 agent_force_stop
+                    if not astr_event.get_extra("agent_force_stop"):
+                        astr_event.set_extra("agent_user_aborted", True)
                     astr_event.set_extra("agent_stop_requested", False)
                     return
 

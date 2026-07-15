@@ -334,6 +334,7 @@ DEFAULT_CONFIG = {
     },
     "wake_prefix": ["/"],
     "log_level": "INFO",
+    "log_hide_conf_platform": False,
     "log_file_enable": False,
     "log_file_path": "logs/astrbot.log",
     "log_file_max_mb": 20,
@@ -3093,6 +3094,7 @@ CONFIG_METADATA_2 = {
                 "type": "string",
                 "options": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
             },
+            "log_hide_conf_platform": {"type": "bool"},
             "dashboard.ssl.enable": {"type": "bool"},
             "dashboard.trust_proxy_headers": {"type": "bool"},
             "dashboard.auth_rate_limit.enable": {"type": "bool"},
@@ -4627,6 +4629,11 @@ CONFIG_METADATA_3_SYSTEM = {
                         "type": "string",
                         "hint": "控制台输出日志的级别。",
                         "options": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                    },
+                    "log_hide_conf_platform": {
+                        "description": "隐藏日志中的配置与平台信息",
+                        "type": "bool",
+                        "hint": "开启后，入站消息日志不再显示如 [default] [NapCat(aiocqhttp)] 的配置名与平台前缀。",
                     },
                     "dashboard.ssl.enable": {
                         "description": "启用 WebUI HTTPS",

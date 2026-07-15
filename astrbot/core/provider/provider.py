@@ -11,6 +11,7 @@ from astrbot.core.provider.entities import (
     ProviderMeta,
     RerankResult,
     ToolCallsResult,
+    format_provider_display_id,
 )
 from astrbot.core.provider.register import provider_cls_map
 from astrbot.core.utils.astrbot_path import get_astrbot_path
@@ -53,6 +54,13 @@ class AbstractProvider(abc.ABC):
             provider_type=meta_data.provider_type,
         )
         return meta
+
+    def display_provider_id(self) -> str:
+        """用户可见的提供商名：取配置 id 第一个 ``/`` 前的前缀。"""
+        return format_provider_display_id(
+            self.provider_config.get("id"),
+            default="unknown",
+        )
 
     async def test(self) -> None:
         """test the provider is a

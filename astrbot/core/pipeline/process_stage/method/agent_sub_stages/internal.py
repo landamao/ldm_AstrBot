@@ -697,6 +697,16 @@ class InternalAgentSubStage(Stage):
         if not req or not req.conversation:
             return
 
+        # /stop 或 Dashboard 强制停止：整轮作废，不写入对话历史
+        # 与「新消息软打断」区分：软打断会保留已发送内容并可选写入打断提示
+        if event.get_extra("agent_force_stop"):
+            logger.info(
+                "/stop 强制停止，跳过写入对话历史: umo=%s, runner_aborted=%s",
+                event.unified_msg_origin,
+                runner_aborted,
+            )
+            return
+
         interrupted = bool(
             user_aborted
             or event.get_extra("agent_stop_requested")
