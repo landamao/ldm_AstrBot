@@ -1,7 +1,7 @@
 # 🚀 **ldm** · 个人魔改版 AstrBot
 
 > **高度定制 · 拒绝官方覆盖**  
-> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5 二次修改 · 当前 ldm 版本 **v4.26.15**
+> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5 二次修改 · 当前 ldm 版本 **v4.26.16**
 
 ---
 
@@ -10,21 +10,21 @@
 在终端执行以下命令，自动下载并运行安装脚本：
 ### 方式1：一键下载并执行
 ```bash
-curl -fsSL -o ldm_AstrBot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh && chmod +x ldm_AstrBot_install.sh && ./ldm_AstrBot_install.sh
+curl -fsSL -o ldmbot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh && ./ldmbot_install.sh
 ```
 ### 方式2：先下载再执行
   - 第一步：下载脚本
     - 方式1
     ```bash
-    curl -fsSL -o ldm_AstrBot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh && chmod +x ldm_AstrBot_install.sh
+    curl -fsSL -o ldmbot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh
     ```
     - 方式2（代理加速）
     ```bash
-    curl -fsSL -o ldm_AstrBot_install.sh https://gh-proxy.org/https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh && chmod +x ldm_AstrBot_install.sh
+    curl -fsSL -o ldmbot_install.sh https://gh-proxy.org/https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh
     ```
   - 第二步：执行脚本
     ```bash
-     ./ldm_AstrBot_install.sh
+     ./ldmbot_install.sh
     ```
 
 ### 脚本选项：
@@ -74,46 +74,46 @@ curl -fsSL -o ldm_AstrBot_install.sh https://github.com/landamao/ldm_AstrBot/rel
 
 ## 📄 手动安装教程
 
-> 以下步骤基于 `ldm_AstrBot_install.sh` 脚本的逻辑，适合希望完全掌控每个环节的用户。
+> 以下步骤基于 `ldmbot_install.sh` 脚本的逻辑，适合希望完全掌控每个环节的用户。
 
 ### 1. 下载安装脚本
 ```bash
-wget https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh
+wget https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh
 # 或 curl
-curl -LO https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldm_AstrBot_install.sh
+curl -LO https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh
 ```
 
 ### 2. 赋予执行权限
 ```bash
-chmod +x ldm_AstrBot_install.sh
+chmod +x ldmbot_install.sh
 ```
 
 ### 3. 运行脚本（自动解压 + 环境配置）
 ```bash
-./ldm_AstrBot_install.sh
+./ldmbot_install.sh
 ```
 
 常用参数：
 
 ```bash
-./ldm_AstrBot_install.sh -up -ns   # 推荐：更新程序，不同步依赖
-./ldm_AstrBot_install.sh -up       # 更新程序，并同步依赖
-./ldm_AstrBot_install.sh -ns       # 安装/启动，不同步依赖
-./ldm_AstrBot_install.sh -y        # 非交互安装
+./ldmbot_install.sh -up -ns   # 推荐：更新程序，不同步依赖
+./ldmbot_install.sh -up       # 更新程序，并同步依赖
+./ldmbot_install.sh -ns       # 安装/启动，不同步依赖
+./ldmbot_install.sh -y        # 非交互安装
 ```
 
 脚本会自动执行以下操作：
-- 解压内嵌的 `ldmbot.zip` 到当前目录
+- 从 GitHub Releases 下载 `ldmbot.zip` 并解压到当前目录
 - 检测本地代理（端口 `7890` 或 `7897`），询问是否启用
 - 检查 `uv` 包管理器，若缺失则自动安装
 - 默认优先使用 `uv sync` 安装依赖并启动；加 `-ns` 则跳过依赖同步，直接 `uv run main.py`
 - 若 `uv` 失败，回退到 `pip`：自动创建 Python 3.12 虚拟环境，安装 `requirements.txt` 并启动（`-ns` 同样跳过 pip 安装）
 
 ### 4. （可选）手动解压部署与启动
-若只想解压不自动启动，可将脚本后缀改为 `.zip` 后解压：
+若只想解压不自动启动，可直接下载源码包后解压：
 ```bash
-cp ldm_AstrBot_install.sh ldmbot.zip
-unzip ldmbot.zip -d ldmbot
+curl -fsSL -o ldmbot.zip https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot.zip
+unzip ldmbot.zip -d .
 cd ldmbot
 ```
 - **部署**
@@ -134,7 +134,7 @@ cd ldmbot
 
 ### 5. 后续维护
 - 再次执行同一安装脚本，会检测到已存在 `ldmbot` 目录，提供 **直接启动** / **删除重建** / **重命名重建** / **更新** / **覆盖解压** 选项。
-- **推荐更新方式**：`./ldm_AstrBot_install.sh -up -ns`  
+- **推荐更新方式**：`./ldmbot_install.sh -up -ns`  
 
 ### 6. 反馈交流
 - qq群 1103659691 [点击跳转](https://qm.qq.com/q/c7Nc3Tl1Je) (https://qm.qq.com/q/c7Nc3Tl1Je)

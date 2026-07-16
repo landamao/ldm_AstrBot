@@ -1,0 +1,1 @@
+import o from"./CodeBlockNode-BNlLIqu4.js";import"./index-DHiqKIF8.js";import"./ThemeAwareMarkdownCodeBlock.vue_vue_type_script_setup_true_lang-Bmi4yPJI.js";import"./shiki-CcKxT-6F.js";import"./safeRaf-DGuzXxDK.js";import"./CodeBlockShell.vue_vue_type_style_index_0_lang-Bglh7oD0.js";o.install=t=>{t.component(o.__name,o)};export{o as default};

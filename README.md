@@ -1,7 +1,7 @@
 # 🚀 **[ldmbot](https://github.com/landamao/ldm_AstrBot)** · 个人魔改版 AstrBot
 
 > **高度定制 · 拒绝官方覆盖**  
-> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5 二次修改 · 当前 ldm 版本 **v4.26.15**
+> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5 二次修改 · 当前 ldm 版本 **v4.26.16**
 
 ---
 
@@ -17,7 +17,7 @@
     ```bash
     curl -fsSL -o ldmbot_install.sh https://gh-proxy.org/https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh && ./ldmbot_install.sh -y
     ```
-  - 提示：删掉命令后面的`-y`，可进入交互菜单模式
+  - **提示：删掉命令后面的`-y`，可进入交互菜单模式**
 ### 方式2：先下载再执行
   - 第一步：下载脚本
     - 方式1
@@ -109,7 +109,7 @@ chmod +x ldmbot_install.sh
 ```
 
 脚本会自动执行以下操作：
-- 解压内嵌的 `ldmbot.zip` 到当前目录
+- 从 GitHub Releases 下载 `ldmbot.zip` 并解压到当前目录
 - 检测本地代理（端口 `7890` 或 `7897`），询问是否启用
 - 检查 `uv` 包管理器，若缺失则自动安装
 - 默认优先使用 `uv sync` 安装依赖并启动；加 `-ns` 则跳过依赖同步，直接 `uv run main.py`

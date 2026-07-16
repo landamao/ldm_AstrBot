@@ -269,6 +269,10 @@ DEFAULT_CONFIG = {
         "group_message_max_cnt": 300,
         "image_caption": False,
         "image_caption_provider_id": "",
+        # 群黑白名单：空=不限制；all/*=全部；/群号=黑名单。规则同插件解析黑白名单。
+        "image_caption_group_list": [],
+        # 同一群两次自动理解图片的最小间隔（秒），0 表示不限制，用于防止表情包刷屏。
+        "image_caption_min_interval": 0,
         "active_reply": {
             "enable": False,
             "method": "possibility_reply",
@@ -3028,6 +3032,13 @@ CONFIG_METADATA_2 = {
                     "image_caption_provider_id": {
                         "type": "string",
                     },
+                    "image_caption_group_list": {
+                        "type": "list",
+                        "items": {"type": "string"},
+                    },
+                    "image_caption_min_interval": {
+                        "type": "float",
+                    },
                     "image_caption_prompt": {
                         "type": "string",
                     },
@@ -4539,6 +4550,25 @@ CONFIG_METADATA_3 = {
                         "type": "string",
                         "_special": "select_provider",
                         "hint": "用于群聊上下文感知的图片理解，与默认图片转述模型分开配置。",
+                        "condition": {
+                            "provider_ltm_settings.group_icl_enable": True,
+                            "provider_ltm_settings.image_caption": True,
+                        },
+                    },
+                    "provider_ltm_settings.image_caption_group_list": {
+                        "description": "自动理解图片群黑白名单",
+                        "type": "list",
+                        "items": {"type": "string"},
+                        "hint": "为空时不限制群。规则：直接写群号为白名单；以 / 开头为黑名单；all 或 * 表示全部。示例：all + /123456 表示除 123456 外都启用；仅 111,222 表示只在这两个群启用。",
+                        "condition": {
+                            "provider_ltm_settings.group_icl_enable": True,
+                            "provider_ltm_settings.image_caption": True,
+                        },
+                    },
+                    "provider_ltm_settings.image_caption_min_interval": {
+                        "description": "自动理解图片最小间隔（秒）",
+                        "type": "float",
+                        "hint": "同一群两次自动理解图片的最小间隔，用于防止表情包刷屏。0 表示不限制。",
                         "condition": {
                             "provider_ltm_settings.group_icl_enable": True,
                             "provider_ltm_settings.image_caption": True,
