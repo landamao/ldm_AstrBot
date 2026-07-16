@@ -8,9 +8,9 @@
 ## 📥 一键安装（推荐）
 
 在终端执行以下命令，自动下载并运行安装脚本：
-### 方式1：一键下载并执行
+### 方式1：一键下载并执行安装
 ```bash
-curl -fsSL -o ldmbot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh && ./ldmbot_install.sh
+curl -fsSL -o ldmbot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh && ./ldmbot_install.sh -y
 ```
 ### 方式2：先下载再执行
   - 第一步：下载脚本
