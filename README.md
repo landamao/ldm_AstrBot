@@ -17,6 +17,7 @@
     ```bash
     curl -fsSL -o ldmbot_install.sh https://gh-proxy.org/https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh && ./ldmbot_install.sh -y
     ```
+  - 提示：删掉命令后面的`-y`，可进入交互菜单模式
 ### 方式2：先下载再执行
   - 第一步：下载脚本
     - 方式1
