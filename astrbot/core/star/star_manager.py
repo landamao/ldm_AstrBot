@@ -1669,7 +1669,7 @@ class PluginManager:
             if not plugin:
                 raise Exception("插件不存在。")
             if plugin.reserved:
-                raise Exception("该插件是 AstrBot 保留插件，无法卸载。")
+                raise Exception("该插件是 ldm 保留插件，无法卸载。")
             root_dir_name = plugin.root_dir_name
             ppath = self.plugin_store_path
 
