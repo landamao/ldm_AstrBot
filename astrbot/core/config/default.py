@@ -3267,7 +3267,7 @@ CONFIG_METADATA_3 = {
                         "description": "默认图片转述模型",
                         "type": "string",
                         "_special": "select_provider",
-                        "hint": "留空代表不使用，可用于非多模态模型",
+                        "hint": "留空代表不使用，可用于非多模态模型。配置后会启用内置图片识别工具 astrbot_image_caption，LLM 可主动调用该模型识别图片。",
                     },
                     "provider_settings.always_use_image_caption_provider": {
                         "description": "始终使用默认图片转述模型",

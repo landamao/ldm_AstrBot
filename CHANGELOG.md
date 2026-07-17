@@ -1,15 +1,120 @@
 # 更新日志（CHANGELOG）
 
-本文档记录 AstrBot（ldm 魔改）的重要变更。  
+本文档记录 ldmbot（AstrBot 魔改版）的重要变更。  
 格式大致遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，正文保持中文。
 
 ---
 
-## [Unreleased]
+<details>
+<summary><strong>[4.26.17] — 2026-07-17</strong></summary>
 
----
+基于 ldm v4.26.16 的增量更新。
 
-## [4.26.16] — 2026-07-16
+### 优化
+
+- **LLM 响应日志补齐模型 / 提供商**
+  - 请求侧已有：`正在请求 LLM，使用模型: xxx（提供商: yyy）`
+  - 响应侧原先只有耗时与正文，无法和请求一一对应
+  - 现与请求侧对齐，例如：
+    - `LLM 响应（耗时 31.72s，模型: grok-4.5，提供商: ldmapi）：...`
+    - 无耗时：`LLM 响应（模型: grok-4.5，提供商: ldmapi）：...`
+  - 涉及：`entities.log_llm_response`，以及 OpenAI / Anthropic / Gemini 三处 source 调用
+
+- **`/plugin ls` 列表可读性**
+  - 启用 / 未启用分组，组内按插件名排序
+  - 顶部汇总总数与启用/停用数量
+  - 每个插件按字段分行；没有值的字段不显示
+  - 最终字段格式：
+    - `插件名：...`
+    - `显示名：...`（与插件名相同则不显示）
+    - `作者：...`
+    - `简介：...`
+
+  示例：
+
+  ```text
+  插件列表  共 3 个（启用 2 / 停用 1）
+
+  ✅ 已启用（2）
+
+  插件名：ldm
+  显示名：ldm
+  作者：懒大猫
+  简介：ldm自带插件
+
+  插件名：指令拦截
+  作者：懒大猫
+  简介：拦截指令消息，防止 LLM 被误唤醒。
+
+  ⏸ 未启用（1）
+
+  插件名：群管理员识别
+  作者：懒大猫
+  简介：群管理员识别
+
+  ────────
+  /plugin help <名>     查看帮助与指令
+  /plugin on|off <名>   启用 / 禁用
+  /plugin restart <名>  重启
+  /plugin update <名>   更新
+  ```
+
+- **仅输入 `/plugin` 时显示美化帮助**
+  - 原先：`插件 builtin_commands: 参数不足。plugin 指令组下有如下指令…` + 树状参数说明
+  - 现在改为人工整理的帮助文案，不再带「插件 builtin_commands:」前缀
+  - 最终效果：
+
+  ```text
+  插件管理  /plugin
+
+  用法：
+  /plugin ls
+    查看已安装插件列表
+
+  /plugin help <插件名>
+    查看指定插件帮助与指令
+
+  /plugin on <插件名>
+    启用插件（管理员）
+
+  /plugin off <插件名>
+    禁用插件（管理员）
+
+  /plugin restart <插件名>
+    重启插件（管理员）
+
+  /plugin update <插件名>
+    更新插件（管理员）
+
+  /plugin get <插件仓库地址>
+    从仓库安装插件（管理员）
+
+  示例：
+  /plugin ls
+  /plugin help 指令拦截
+  /plugin on astrbot_plugin_stealer
+  ```
+
+### 其他
+
+- 版本号更新为 **4.26.17**
+
+### 使用说明
+
+1. 更新后请手动重启一次服务
+2. 若面板显示异常，可用顶栏「强制刷新面板」
+3. 建议验证：
+   - 发一轮对话：请求日志与响应日志都应带「模型 / 提供商」
+   - `/plugin ls`：分组、字段分行、空字段不出现
+   - 仅发 `/plugin`：收到美化帮助，而不是树状参数错误
+4. 反馈交流：
+   - QQ 群：`1103659691`
+   - Telegram：`@landamaogroup`
+
+</details>
+
+<details>
+<summary><strong>[4.26.16] — 2026-07-16</strong></summary>
 
 基于 ldm v4.26.15 的增量更新。
 
@@ -54,9 +159,10 @@
    - QQ 群：`1103659691`
    - Telegram：`@landamaogroup`
 
----
+</details>
 
-## [4.26.15] — 2026-07-15
+<details>
+<summary><strong>[4.26.15] — 2026-07-15</strong></summary>
 
 基于 ldm v4.26.14 的增量更新。
 
@@ -87,9 +193,10 @@
    - QQ 群：`1103659691`
    - Telegram：`@landamaogroup`
 
----
+</details>
 
-## [4.26.14] — 2026-07-14
+<details>
+<summary><strong>[4.26.14] — 2026-07-14</strong></summary>
 
 基于 ldm v4.26.13 的增量更新。
 
@@ -127,9 +234,10 @@
    - QQ 群：`1103659691`
    - Telegram：`@landamaogroup`
 
----
+</details>
 
-## [4.26.13] — 2026-07-14
+<details>
+<summary><strong>[4.26.13] — 2026-07-14</strong></summary>
 
 基于 ldm v4.26.12 的增量更新。
 
@@ -152,9 +260,10 @@
    - QQ 群：`1103659691`
    - Telegram：`@landamaogroup`
 
----
+</details>
 
-## [4.26.12] — 2026-07-14
+<details>
+<summary><strong>[4.26.12] — 2026-07-14</strong></summary>
 
 基于 ldm v4.26.11 的增量更新。
 
@@ -203,9 +312,10 @@
    - QQ 群：`1103659691`
    - Telegram：`@landamaogroup`
 
----
+</details>
 
-## [4.26.11] — 2026-07-13
+<details>
+<summary><strong>[4.26.11] — 2026-07-13</strong></summary>
 
 基于 ldm v4.26.10 的增量更新。
 
@@ -237,9 +347,10 @@
    - QQ 群：`1103659691`
    - Telegram：`@landamaogroup`
 
----
+</details>
 
-## [4.26.10] — 2026-07-13
+<details>
+<summary><strong>[4.26.10] — 2026-07-13</strong></summary>
 
 基于 ldm v4.26.9 的增量更新。
 
@@ -275,9 +386,10 @@
    - QQ 群：`1103659691`
    - Telegram：`@landamaogroup`
 
----
+</details>
 
-## [4.26.9] — 2026-07-13
+<details>
+<summary><strong>[4.26.9] — 2026-07-13</strong></summary>
 
 基于 ldm v4.26.8 的增量更新。
 
@@ -302,9 +414,10 @@
    - QQ 群：`1103659691`
    - Telegram：`@landamaogroup`
 
----
+</details>
 
-## [4.26.8] — 2026-07-13
+<details>
+<summary><strong>[4.26.8] — 2026-07-13</strong></summary>
 
 基于 ldm v4.26.7 的增量更新。
 
@@ -334,9 +447,10 @@
    - QQ 群：`1103659691`
    - Telegram：`@landamaogroup`
 
----
+</details>
 
-## [4.26.7] — 2026-07-13
+<details>
+<summary><strong>[4.26.7] — 2026-07-13</strong></summary>
 
 基于 ldm v4.26.6 的增量更新。
 
@@ -364,9 +478,10 @@
    - QQ 群：`1103659691`
    - Telegram：`@landamaogroup`
 
----
+</details>
 
-## [4.26.6] — 2026-07-12
+<details>
+<summary><strong>[4.26.6] — 2026-07-12</strong></summary>
 
 基于官方 AstrBot v4.26.5 的 ldm 魔改发版。  
 更新源：`landamao/ldm_AstrBot`（可用环境变量覆盖）。
@@ -771,3 +886,4 @@ provider_ltm_settings               # 群聊上下文 + 主动回复
 - 独立说明文档：`扩展功能更新说明.md`  
 - 排查日志关键词：`分段回复节奏`、`分段发送`、`智能回复`、打断相关 INFO
 
+</details>

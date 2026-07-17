@@ -76,6 +76,7 @@ from astrbot.core.tools.computer_tools import (
     SyncSkillReleaseTool,
 )
 from astrbot.core.tools.cron_tools import FutureTaskTool
+from astrbot.core.tools.image_tools import ImageCaptionTool
 from astrbot.core.tools.knowledge_base_tools import (
     KnowledgeBaseQueryTool,
     retrieve_knowledge_base,
@@ -1219,6 +1220,28 @@ def _proactive_cron_job_tools(req: ProviderRequest, plugin_context: Context) -> 
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FutureTaskTool))
 
 
+def _apply_image_caption_tool(
+    event: AstrMessageEvent,
+    req: ProviderRequest,
+    plugin_context: Context,
+) -> None:
+    """配置了默认图片转述模型时，注入图片识别工具。"""
+    cfg = plugin_context.get_config(umo=event.unified_msg_origin)
+    provider_settings = cfg.get("provider_settings", {})
+    if not isinstance(provider_settings, dict):
+        return
+    provider_id = str(
+        provider_settings.get("default_image_caption_provider_id") or ""
+    ).strip()
+    if not provider_id:
+        return
+
+    if req.func_tool is None:
+        req.func_tool = ToolSet()
+    tool_mgr = plugin_context.get_llm_tool_manager()
+    req.func_tool.add_tool(tool_mgr.get_builtin_tool(ImageCaptionTool))
+
+
 async def _apply_web_search_tools(
     event: AstrMessageEvent,
     req: ProviderRequest,
@@ -1568,6 +1591,7 @@ async def build_main_agent(
 
     _plugin_tool_fix(event, req)
     await _apply_web_search_tools(event, req, plugin_context)
+    _apply_image_caption_tool(event, req, plugin_context)
 
     if config.llm_safety_mode:
         _apply_llm_safety_mode(config, req)

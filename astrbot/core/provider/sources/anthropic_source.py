@@ -571,7 +571,12 @@ class ProviderAnthropic(Provider):
             completion_id=completion.id,
             stop_reason=completion.stop_reason,
         )
-        log_llm_response(llm_response, elapsed_s=time.perf_counter() - t0)
+        log_llm_response(
+            llm_response,
+            elapsed_s=time.perf_counter() - t0,
+            model=payloads.get("model") or self.get_model(),
+            provider=self.display_provider_id(),
+        )
         return llm_response
 
     async def _query_stream(
@@ -732,7 +737,12 @@ class ProviderAnthropic(Provider):
             completion_id=id,
             stop_reason=None,
         )
-        log_llm_response(final_response, elapsed_s=time.perf_counter() - t0)
+        log_llm_response(
+            final_response,
+            elapsed_s=time.perf_counter() - t0,
+            model=payloads.get("model") or self.get_model(),
+            provider=self.display_provider_id(),
+        )
         yield final_response
 
     async def text_chat(

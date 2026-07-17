@@ -616,7 +616,12 @@ class ProviderOpenAIOfficial(Provider):
         logger.debug(f"completion: {completion}")
 
         llm_response = await self._parse_openai_completion(completion, tools)
-        log_llm_response(llm_response, elapsed_s=time.perf_counter() - t0)
+        log_llm_response(
+            llm_response,
+            elapsed_s=time.perf_counter() - t0,
+            model=payloads.get("model") or self.get_model(),
+            provider=self.display_provider_id(),
+        )
         return llm_response
 
     async def _collect_forced_stream(
@@ -757,7 +762,12 @@ class ProviderOpenAIOfficial(Provider):
         try:
             final_completion = state.get_final_completion()
             llm_response = await self._parse_openai_completion(final_completion, tools)
-            log_llm_response(llm_response, elapsed_s=time.perf_counter() - t0)
+            log_llm_response(
+                llm_response,
+                elapsed_s=time.perf_counter() - t0,
+                model=payloads.get("model") or self.get_model(),
+                provider=self.display_provider_id(),
+            )
             yield llm_response
         except Exception as e:
             logger.error("get_final_completion error: " + str(e))

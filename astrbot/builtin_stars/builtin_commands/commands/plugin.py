@@ -11,23 +11,110 @@ class PluginCommands:
     def __init__(self, context: star.Context) -> None:
         self.context = context
 
+    @staticmethod
+    def build_group_help_message() -> str:
+        """仅输入 /plugin 时展示的指令组帮助。"""
+        return "\n".join(
+            [
+                "插件管理  /plugin",
+                "",
+                "用法：",
+                "/plugin ls",
+                "  查看已安装插件列表",
+                "",
+                "/plugin help <插件名>",
+                "  查看指定插件帮助与指令",
+                "",
+                "/plugin on <插件名>",
+                "  启用插件（管理员）",
+                "",
+                "/plugin off <插件名>",
+                "  禁用插件（管理员）",
+                "",
+                "/plugin restart <插件名>",
+                "  重启插件（管理员）",
+                "",
+                "/plugin update <插件名>",
+                "  更新插件（管理员）",
+                "",
+                "/plugin get <插件仓库地址>",
+                "  从仓库安装插件（管理员）",
+                "",
+                "示例：",
+                "/plugin ls",
+                "/plugin help 指令拦截",
+                "/plugin on astrbot_plugin_stealer",
+            ]
+        )
+
     async def plugin_ls(self, event: AstrMessageEvent) -> None:
         """获取已经安装的插件列表。"""
-        parts = ["已加载的插件：\n"]
-        for plugin in self.context.get_all_stars():
-            line = f"- `{plugin.name}` By {plugin.author}: {plugin.desc}"
-            if not plugin.activated:
-                line += " (未启用)"
-            parts.append(line + "\n")
+        plugins = list(self.context.get_all_stars())
+        if not plugins:
+            event.set_result(
+                MessageEventResult().message("没有加载任何插件。").use_t2i(False),
+            )
+            return
 
-        if len(parts) == 1:
-            plugin_list_info = "没有加载任何插件。"
-        else:
-            plugin_list_info = "".join(parts)
+        # 启用在前、停用在后；同组内按名称排序
+        def _sort_key(p) -> tuple:
+            return (0 if p.activated else 1, (p.name or "").casefold())
 
-        plugin_list_info += "\n使用 /plugin help <插件名> 查看插件帮助和加载的指令。\n使用 /plugin on/off <插件名> 启用或者禁用插件。\n使用 /plugin restart <插件名> 重启插件。\n使用 /plugin update <插件名> 更新插件。"
+        plugins_sorted = sorted(plugins, key=_sort_key)
+        enabled = [p for p in plugins_sorted if p.activated]
+        disabled = [p for p in plugins_sorted if not p.activated]
+
+        def _format_plugin(plugin) -> list[str]:
+            """按字段逐行输出，空值字段不显示。"""
+            name = (plugin.name or "").strip()
+            display = (getattr(plugin, "display_name", None) or "").strip()
+            author = (plugin.author or "").strip()
+            desc = (plugin.desc or plugin.short_desc or "").strip()
+
+            lines: list[str] = []
+            if name:
+                lines.append(f"插件名：{name}")
+            if display and display != name:
+                lines.append(f"显示名：{display}")
+            if author:
+                lines.append(f"作者：{author}")
+            if desc:
+                lines.append(f"简介：{desc}")
+            return lines
+
+        def _format_group(title: str, items: list) -> list[str]:
+            if not items:
+                return []
+            lines = [f"{title}（{len(items)}）", ""]
+            for plugin in items:
+                block = _format_plugin(plugin)
+                if block:
+                    lines.extend(block)
+                    lines.append("")  # 插件之间空一行
+            return lines
+
+        parts: list[str] = [
+            f"插件列表  共 {len(plugins)} 个（启用 {len(enabled)} / 停用 {len(disabled)}）",
+            "",
+        ]
+        parts.extend(_format_group("✅ 已启用", enabled))
+        parts.extend(_format_group("⏸ 未启用", disabled))
+        while parts and parts[-1] == "":
+            parts.pop()
+
+        parts.extend(
+            [
+                "",
+                "────────",
+                "/plugin help <名>     查看帮助与指令",
+                "/plugin on|off <名>   启用 / 禁用",
+                "/plugin restart <名>  重启",
+                "/plugin update <名>   更新",
+            ]
+        )
+
         event.set_result(
-            MessageEventResult().message(f"{plugin_list_info}").use_t2i(False),
+            MessageEventResult().message("\n".join(parts)).use_t2i(False),
         )
 
     async def plugin_off(self, event: AstrMessageEvent, plugin_name: str = "") -> None:

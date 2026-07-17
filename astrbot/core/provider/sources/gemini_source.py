@@ -678,7 +678,12 @@ class ProviderGoogleGenAI(Provider):
         llm_response.id = result.response_id
         if result.usage_metadata:
             llm_response.usage = self._extract_usage(result.usage_metadata)
-        log_llm_response(llm_response, elapsed_s=time.perf_counter() - t0)
+        log_llm_response(
+            llm_response,
+            elapsed_s=time.perf_counter() - t0,
+            model=model,
+            provider=self.display_provider_id(),
+        )
         return llm_response
 
     async def _query_stream(
@@ -761,7 +766,12 @@ class ProviderGoogleGenAI(Provider):
                 llm_response.id = chunk.response_id
                 if chunk.usage_metadata:
                     llm_response.usage = self._extract_usage(chunk.usage_metadata)
-                log_llm_response(llm_response, elapsed_s=time.perf_counter() - t0)
+                log_llm_response(
+                    llm_response,
+                    elapsed_s=time.perf_counter() - t0,
+                    model=model,
+                    provider=self.display_provider_id(),
+                )
                 yield llm_response
                 return
 
@@ -815,7 +825,12 @@ class ProviderGoogleGenAI(Provider):
             finish_reason=None,
         )
 
-        log_llm_response(final_response, elapsed_s=time.perf_counter() - t0)
+        log_llm_response(
+            final_response,
+            elapsed_s=time.perf_counter() - t0,
+            model=model,
+            provider=self.display_provider_id(),
+        )
         yield final_response
 
     async def text_chat(

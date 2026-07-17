@@ -12,6 +12,7 @@ TFunctionTool = TypeVar("TFunctionTool", bound=type[FunctionTool])
 _BUILTIN_TOOL_MODULES = (
     "astrbot.core.tools.computer_tools",
     "astrbot.core.tools.cron_tools",
+    "astrbot.core.tools.image_tools",
     "astrbot.core.tools.knowledge_base_tools",
     "astrbot.core.tools.message_tools",
     "astrbot.core.tools.web_search_tools",
@@ -195,6 +196,22 @@ def _register_builtin_tool_config_rule(
 _register_builtin_tool_config_rule(
     ("send_message_to_user",),
     BuiltinToolConfigRule(evaluator=_evaluate_send_message_tool),
+)
+
+_register_builtin_tool_config_rule(
+    ("astrbot_image_caption",),
+    BuiltinToolConfigRule(
+        conditions=(
+            BuiltinToolConfigCondition(
+                key="provider_settings.default_image_caption_provider_id",
+                operator="truthy",
+                message=(
+                    "需配置 provider_settings.default_image_caption_provider_id"
+                    "（默认图片转述模型）后才会注入此工具"
+                ),
+            ),
+        )
+    ),
 )
 
 

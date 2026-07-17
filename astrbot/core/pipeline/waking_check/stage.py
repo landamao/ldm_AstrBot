@@ -185,11 +185,28 @@ class WakingCheckStage(Stage):
                         passed = False
                         break
                 except Exception as e:
-                    await event.send(
-                        MessageEventResult().message(
-                            f"插件 {star_map[handler.handler_module_path].name}: {e}",
-                        ),
-                    )
+                    err_text = str(e)
+                    # plugin 指令组仅输入组名时：发送好看的帮助文案，而不是默认树状错误
+                    if (
+                        isinstance(filter, CommandGroupFilter)
+                        and filter.group_name == "plugin"
+                        and err_text.startswith("参数不足。")
+                    ):
+                        from astrbot.builtin_stars.builtin_commands.commands.plugin import (
+                            PluginCommands,
+                        )
+
+                        help_msg = PluginCommands.build_group_help_message()
+                        await event.send(
+                            MessageEventResult().message(help_msg).use_t2i(False),
+                        )
+                    else:
+                        plugin_name = star_map[handler.handler_module_path].name
+                        await event.send(
+                            MessageEventResult().message(
+                                f"插件 {plugin_name}: {err_text}",
+                            ),
+                        )
                     event.stop_event()
                     passed = False
                     break

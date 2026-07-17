@@ -461,8 +461,15 @@ def log_llm_response(
     llm_response: "LLMResponse",
     *,
     elapsed_s: float | None = None,
+    model: str | None = None,
+    provider: str | None = None,
 ) -> None:
-    """打印完整（非流式 chunk）LLM 响应的 INFO 日志，与「正在请求 LLM」成对。"""
+    """打印完整（非流式 chunk）LLM 响应的 INFO 日志，与「正在请求 LLM」成对。
+
+    格式与请求侧对齐，便于对照：
+    - 请求：正在请求 LLM，使用模型: xxx（提供商: yyy）
+    - 响应：LLM 响应（耗时 N.NNs，模型: xxx，提供商: yyy）：...
+    """
     if getattr(llm_response, "is_chunk", False):
         return
     text = (llm_response.completion_text or "").strip()
@@ -477,10 +484,24 @@ def log_llm_response(
         body = "（仅有 reasoning，无正文）"
     else:
         body = "（空）"
+
+    model_name = (model or "").strip() or "unknown"
+    provider_name = (provider or "").strip() or "unknown"
     if elapsed_s is not None:
-        logger.info("LLM 响应（耗时 %.2fs）：%s", elapsed_s, body)
+        logger.info(
+            "LLM 响应（耗时 %.2fs，模型: %s，提供商: %s）：%s",
+            elapsed_s,
+            model_name,
+            provider_name,
+            body,
+        )
     else:
-        logger.info("LLM 响应：%s", body)
+        logger.info(
+            "LLM 响应（模型: %s，提供商: %s）：%s",
+            model_name,
+            provider_name,
+            body,
+        )
 
 
 @dataclass

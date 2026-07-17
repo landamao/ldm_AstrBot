@@ -128,6 +128,7 @@ class CommandGroupFilter(HandlerFilter):
                 + "\n"
                 + self.print_cmd_tree(self.sub_command_filters, event=event, cfg=cfg)
             )
+            # 仅输入指令组名时参数不足。plugin 组会在 waking_check 里替换为美化帮助。
             raise ValueError(
                 f"参数不足。{self.group_name} 指令组下有如下指令，请参考：\n" + tree,
             )
