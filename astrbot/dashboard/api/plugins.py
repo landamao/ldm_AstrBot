@@ -624,6 +624,27 @@ async def list_plugin_sources(
     return ok({"sources": await service.get_custom_sources()})
 
 
+@router.get("/plugins/pinned")
+async def get_pinned_plugins(
+    _auth: AuthContext = Depends(require_plugin_scope),
+    service: PluginService = Depends(get_service),
+):
+    """获取 WebUI 已安装插件置顶列表（服务端全局偏好，跨浏览器共享）。"""
+    return ok({"names": await service.get_pinned_plugins()})
+
+
+@router.put("/plugins/pinned")
+async def put_pinned_plugins(
+    request: Request,
+    _auth: AuthContext = Depends(require_plugin_scope),
+    service: PluginService = Depends(get_service),
+):
+    """覆盖保存 WebUI 已安装插件置顶列表。"""
+    body = await _json_or_empty(request)
+    names = await service.set_pinned_plugins(body)
+    return ok({"names": names}, message="置顶列表已保存")
+
+
 @router.post("/plugin-sources")
 async def create_plugin_source(
     payload: PluginSourceRequest,
@@ -1507,6 +1528,25 @@ async def dashboard_get_custom_source(
     service: PluginService = Depends(get_service),
 ):
     return await _run_service(service.get_custom_sources)
+
+
+@legacy_router.get("/api/plugin/pinned")
+async def dashboard_get_pinned_plugins(
+    _username: str = Depends(require_dashboard_user),
+    service: PluginService = Depends(get_service),
+):
+    return ok({"names": await service.get_pinned_plugins()})
+
+
+@legacy_router.post("/api/plugin/pinned")
+async def dashboard_save_pinned_plugins(
+    request: Request,
+    _username: str = Depends(require_dashboard_user),
+    service: PluginService = Depends(get_service),
+):
+    body = await _json_or_empty(request)
+    names = await service.set_pinned_plugins(body)
+    return ok({"names": names}, message="置顶列表已保存")
 
 
 @legacy_router.post("/api/plugin/source/save")

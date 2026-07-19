@@ -27,6 +27,9 @@ from astrbot.dashboard.services.config_service import (
 )
 from astrbot.dashboard.services.conversation_service import ConversationService
 from astrbot.dashboard.services.cron_service import CronService
+from astrbot.dashboard.services.dashboard_preference_service import (
+    DashboardPreferenceService,
+)
 from astrbot.dashboard.services.file_service import FileService
 from astrbot.dashboard.services.knowledge_base_service import KnowledgeBaseService
 from astrbot.dashboard.services.live_chat_service import LiveChatService
@@ -62,6 +65,7 @@ from .chat_projects import legacy_router as legacy_chat_projects_router
 from .config_profiles import legacy_router as legacy_config_profiles_router
 from .conversations import legacy_router as legacy_conversations_router
 from .cron import legacy_router as legacy_cron_router
+from .dashboard_preferences import legacy_router as legacy_dashboard_preferences_router
 from .extensions import legacy_router as legacy_extensions_router
 from .files import legacy_router as legacy_files_router
 from .knowledge_bases import legacy_router as legacy_knowledge_bases_router
@@ -129,6 +133,7 @@ def create_dashboard_asgi_app(
             core_lifecycle.plugin_manager,
             core_lifecycle=core_lifecycle,
         ),
+        dashboard_preferences=DashboardPreferenceService(),
         open_api=OpenApiService(db, core_lifecycle),
         sessions=SessionManagementService(core_lifecycle, db),
         skills=SkillsService(core_lifecycle),
@@ -207,6 +212,7 @@ def create_dashboard_asgi_app(
     app.include_router(legacy_tools_router)
     app.include_router(legacy_platform_router)
     app.include_router(legacy_plugins_router)
+    app.include_router(legacy_dashboard_preferences_router)
     app.include_router(legacy_t2i_router)
     app.include_router(legacy_personas_router)
     app.include_router(legacy_updates_router)

@@ -6,6 +6,29 @@
 ---
 
 <details>
+<summary><strong>[4.26.20] — 2026-07-19</strong></summary>
+
+基于 ldm v4.26.19 的小修复。
+
+### 修复
+
+- **QQ / NapCat 误发 token 用量 JSON 卡片**
+  - 每轮 Agent 结束后，内部 `agent_stats`（token 用量 / 上下文占用 / 首 token 耗时）被当成普通消息发到 QQ
+  - NapCat 按 JSON 卡片处理会超时：`NodeIKernelMsgService/sendMsg` retcode 1200
+  - 现已在 Agent 运行层跳过该内部统计，不再发到 QQ 等 IM
+  - WebChat / 仪表盘仍可正常接收用量信息
+
+### 新增
+
+- **Agent 用量中文日志**
+  - 每轮结束后打印一行 INFO，例如：
+    - `Agent 用量: 输入 63.58k | 输出 53 | 合计 63.63k | 上下文 63.58k | 耗时 8.52s | 首token 5.39s | 状态 完成 | 模型 …（提供商: …）`
+  - token 按 k 格式化；有缓存时展示「非缓存 / 缓存」拆分
+  - 仅写日志与统计库，不发送到聊天平台
+
+</details>
+
+<details>
 <summary><strong>[4.26.19] — 2026-07-19</strong></summary>
 
 基于 ldm v4.26.18 的增量更新。合入官方 AstrBot **4.26.5→4.26.7** 一批稳定性修复，并补充本地增强。

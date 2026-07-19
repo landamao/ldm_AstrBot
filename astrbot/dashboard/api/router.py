@@ -11,6 +11,7 @@ from .chat_projects import router as chat_projects_router
 from .config_profiles import router as config_profiles_router
 from .conversations import router as conversations_router
 from .cron import router as cron_router
+from .dashboard_preferences import router as dashboard_preferences_router
 from .extensions import router as extensions_router
 from .files import router as files_router
 from .knowledge_bases import router as knowledge_bases_router
@@ -41,6 +42,7 @@ def build_api_router() -> APIRouter:
     router.include_router(bots_router)
     router.include_router(providers_router)
     router.include_router(plugins_router)
+    router.include_router(dashboard_preferences_router)
     router.include_router(chat_router)
     router.include_router(chat_projects_router)
     router.include_router(conversations_router)

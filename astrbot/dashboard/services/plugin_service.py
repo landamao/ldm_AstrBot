@@ -43,6 +43,8 @@ PLUGIN_UPDATE_CONCURRENCY = 3
 PLUGIN_OPERATION_FAILED_MESSAGE = "插件操作失败，请查看服务端日志。"
 PLUGIN_UPDATE_FAILED_MESSAGE = "更新失败，请查看服务端日志。"
 PLUGIN_INSTALL_SOURCES_KEY = "plugin_install_sources"
+# WebUI 已安装插件置顶列表（插件 name 有序列表），存在全局 preference，跨浏览器共享
+PLUGIN_PINNED_EXTENSIONS_KEY = "dashboard_pinned_plugins"
 PLUGIN_DEFAULT_REGISTRY_NAME = "Default"
 PLUGIN_UPDATE_DISABLED_MESSAGE = "该插件不是通过插件市场安装，无法检测或执行更新。"
 PLUGIN_UPDATE_SOURCE_REQUIRED_MESSAGE = "请先选择插件安装源后再更新。"
@@ -378,6 +380,44 @@ class PluginService:
             records: Mapping keyed by local plugin root directory name.
         """
         await sp.global_put(PLUGIN_INSTALL_SOURCES_KEY, records)
+
+    @staticmethod
+    def normalize_pinned_plugin_names(value: object) -> list[str]:
+        """规范化置顶插件名列表：去空、去重、保序。"""
+        if not isinstance(value, list):
+            return []
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            name = item.strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            result.append(name)
+        return result
+
+    async def get_pinned_plugins(self) -> list[str]:
+        """读取 WebUI 已安装插件置顶列表（服务端全局偏好）。"""
+        raw = await sp.global_get(PLUGIN_PINNED_EXTENSIONS_KEY, [])
+        return self.normalize_pinned_plugin_names(raw)
+
+    async def set_pinned_plugins(self, data: object) -> list[str]:
+        """保存 WebUI 已安装插件置顶列表。
+
+        Args:
+            data: 可为 list[str]，或 ``{\"names\": list[str]}`` / ``{\"pinned\": list[str]}``。
+        """
+        if isinstance(data, list):
+            names = data
+        elif isinstance(data, dict):
+            names = data.get("names", data.get("pinned", []))
+        else:
+            names = []
+        normalized = self.normalize_pinned_plugin_names(names)
+        await sp.global_put(PLUGIN_PINNED_EXTENSIONS_KEY, normalized)
+        return normalized
 
     @staticmethod
     def resolve_plugin_install_source(

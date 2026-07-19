@@ -789,6 +789,91 @@ BLOCKED = {"dGZid2h2d3IuY2xvdWQuc2VhbG9zLmlv", "a291cmljaGF0"}
 decoded_blocked = [base64.b64decode(b).decode("utf-8") for b in BLOCKED]
 
 
+def _format_tokens_k(n: int | float | None) -> str:
+    """token 数量格式化：<1000 原样，否则按 k（两位小数）。"""
+    try:
+        value = int(n or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if abs(value) < 1000:
+        return str(value)
+    return f"{value / 1000:.2f}k"
+
+
+def _format_seconds(seconds: float | None) -> str:
+    try:
+        value = float(seconds or 0.0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value <= 0:
+        return "-"
+    if value < 10:
+        return f"{value:.2f}s"
+    return f"{value:.1f}s"
+
+
+def _agent_status_label(status: str) -> str:
+    return {
+        "completed": "完成",
+        "aborted": "已中断",
+        "error": "错误",
+    }.get(status, status or "未知")
+
+
+def _log_internal_agent_usage(
+    *,
+    provider,
+    stats: AgentStats,
+    status: str,
+) -> None:
+    """把本轮 Agent token/耗时用量打成一条中文 INFO 日志（不发到 IM）。"""
+    usage = stats.token_usage
+    input_other = int(getattr(usage, "input_other", 0) or 0)
+    input_cached = int(getattr(usage, "input_cached", 0) or 0)
+    output = int(getattr(usage, "output", 0) or 0)
+    input_total = input_other + input_cached
+    total = input_total + output
+    context_tokens = int(getattr(stats, "current_context_tokens", 0) or 0)
+    duration = float(getattr(stats, "duration", 0.0) or 0.0)
+    ttft = float(getattr(stats, "time_to_first_token", 0.0) or 0.0)
+
+    model = ""
+    provider_display = ""
+    try:
+        model = str(provider.get_model() or "")
+    except Exception:
+        model = ""
+    try:
+        if hasattr(provider, "display_provider_id"):
+            provider_display = str(provider.display_provider_id() or "")
+        else:
+            provider_display = str(getattr(provider.meta(), "id", "") or "")
+    except Exception:
+        provider_display = ""
+
+    # 缓存为 0 时不啰嗦展示
+    if input_cached > 0:
+        input_part = (
+            f"输入 {_format_tokens_k(input_total)}"
+            f"（非缓存 {_format_tokens_k(input_other)} / 缓存 {_format_tokens_k(input_cached)}）"
+        )
+    else:
+        input_part = f"输入 {_format_tokens_k(input_total)}"
+
+    logger.info(
+        "Agent 用量: %s | 输出 %s | 合计 %s | 上下文 %s | 耗时 %s | 首token %s | 状态 %s | 模型 %s（提供商: %s）",
+        input_part,
+        _format_tokens_k(output),
+        _format_tokens_k(total),
+        _format_tokens_k(context_tokens),
+        _format_seconds(duration),
+        _format_seconds(ttft),
+        _agent_status_label(status),
+        model or "unknown",
+        provider_display or "unknown",
+    )
+
+
 async def _record_internal_agent_stats(
     event: AstrMessageEvent,
     req: ProviderRequest | None,
@@ -818,6 +903,16 @@ async def _record_internal_agent_stats(
             status = "error"
         else:
             status = "completed"
+
+        # 全平台可见的用量日志；token 按 k 格式化，不发送到 QQ 等 IM
+        try:
+            _log_internal_agent_usage(
+                provider=provider,
+                stats=stats,
+                status=status,
+            )
+        except Exception as log_err:
+            logger.debug("打印 Agent 用量日志失败: %s", log_err)
 
         await db_helper.insert_provider_stat(
             umo=event.unified_msg_origin,

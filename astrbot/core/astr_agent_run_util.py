@@ -252,6 +252,12 @@ async def run_agent(
                         # For streaming mode, we yield content immediately when received a reasoning chunk but not in here, see below.
                         continue
 
+                # agent_stats 仅供 WebChat / 仪表盘展示 token 与耗时，
+                # 绝不能当普通消息段 set_result 后发到 QQ/NapCat（会变成非法 json 卡片并超时）。
+                # WebChat 在 agent 结束后另有专用 send(type=agent_stats)，这里统一跳过。
+                if resp.type == "agent_stats":
+                    continue
+
                 if stream_to_general and resp.type == "streaming_delta":
                     continue
 
