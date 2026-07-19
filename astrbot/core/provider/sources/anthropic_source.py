@@ -36,6 +36,8 @@ from .request_retry import retry_provider_request, retry_provider_request_contex
     "Anthropic Claude API 提供商适配器",
 )
 class ProviderAnthropic(Provider):
+    _PROMPT_CACHE_CONTROL = {"type": "ephemeral"}
+
     @staticmethod
     def _ensure_usable_response(
         llm_response: LLMResponse,
@@ -480,6 +482,17 @@ class ProviderAnthropic(Provider):
         logger.warning(f"未知的 tool_choice 值: {tool_choice}，已回退为 'auto'")
         return {"type": "auto"}
 
+    @classmethod
+    def _apply_explicit_prompt_cache_breakpoints(cls, payloads: dict) -> None:
+        """给 system 最后一块加 ephemeral cache_control，提高 Anthropic 缓存命中率。"""
+        system_blocks = payloads.get("system")
+        if not isinstance(system_blocks, list) or not system_blocks:
+            return
+
+        last_block = system_blocks[-1]
+        if isinstance(last_block, dict) and "cache_control" not in last_block:
+            last_block["cache_control"] = dict(cls._PROMPT_CACHE_CONTROL)
+
     async def _query(
         self,
         payloads: dict,
@@ -499,6 +512,7 @@ class ProviderAnthropic(Provider):
 
         if "max_tokens" not in payloads:
             payloads["max_tokens"] = 65536
+        self._apply_explicit_prompt_cache_breakpoints(payloads)
         self._apply_thinking_config(payloads)
         self._sanitize_assistant_messages(payloads)
 
@@ -607,6 +621,7 @@ class ProviderAnthropic(Provider):
 
         if "max_tokens" not in payloads:
             payloads["max_tokens"] = 65536
+        self._apply_explicit_prompt_cache_breakpoints(payloads)
         self._apply_thinking_config(payloads)
         self._sanitize_assistant_messages(payloads)
 

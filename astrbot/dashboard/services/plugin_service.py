@@ -1076,7 +1076,7 @@ class PluginService:
                 cache_data = json.load(file)
             return cache_data.get("md5")
         except Exception as exc:
-            logger.warning(f"Failed to load cached MD5: {exc}")
+            logger.warning(f"读取插件市场缓存 MD5 失败: {exc}")
             return None
 
     @staticmethod
@@ -1093,37 +1093,42 @@ class PluginService:
                     trust_env=True,
                     connector=connector,
                 ) as session,
-                session.get(md5_url) as response,
+                session.get(md5_url, timeout=aiohttp.ClientTimeout(total=12)) as response,
             ):
                 if response.status == 200:
                     data = await response.json()
                     return data.get("md5", "")
+                logger.debug(
+                    f"获取远程插件市场 MD5 失败: 状态码 {response.status}，地址 {md5_url}"
+                )
         except Exception as exc:
-            logger.debug(f"Failed to fetch remote MD5: {exc}")
+            logger.debug(f"获取远程插件市场 MD5 失败: {exc}，地址 {md5_url}")
         return None
 
     async def is_cache_valid(self, source: RegistrySource) -> bool:
         try:
             cached_md5 = self.load_cached_md5(source.cache_file)
             if not cached_md5:
-                logger.debug("MD5 not found in cache, treating cache as invalid")
+                logger.debug("本地插件市场缓存无 MD5，视为无效")
                 return False
 
             remote_md5 = await self.fetch_remote_md5(source.md5_url)
             if remote_md5 is None:
+                # 官方 MD5 源（api.soulter.top）在部分网络下会超时；有本地缓存时降级继续用
                 logger.warning(
-                    "Cannot fetch remote MD5, using cache without validation"
+                    "无法获取远程插件市场 MD5（%s），跳过校验并继续使用本地缓存",
+                    source.md5_url or "未知地址",
                 )
                 return True
 
             is_valid = cached_md5 == remote_md5
             logger.debug(
-                f"Plugin cache: local={cached_md5}, remote={remote_md5}, effective={is_valid}",
+                f"插件市场缓存校验: 本地={cached_md5}, 远程={remote_md5}, 有效={is_valid}",
             )
             return is_valid
 
         except Exception as exc:
-            logger.warning(f"检查缓存有效性失败: {exc}")
+            logger.warning(f"检查插件市场缓存有效性失败: {exc}")
             return False
 
     @staticmethod
@@ -1134,11 +1139,11 @@ class PluginService:
                     cache_data = json.load(file)
                     if "data" in cache_data and "timestamp" in cache_data:
                         logger.debug(
-                            f"Loading cached file: {cache_file}, Cache time: {cache_data['timestamp']}",
+                            f"读取插件市场缓存: {cache_file}，缓存时间: {cache_data['timestamp']}",
                         )
                         return cache_data["data"]
         except Exception as exc:
-            logger.warning(f"Failed to load plugin market cache: {exc}")
+            logger.warning(f"读取插件市场缓存失败: {exc}")
         return None
 
     @staticmethod
@@ -1154,9 +1159,9 @@ class PluginService:
 
             with open(cache_file, "w", encoding="utf-8") as file:
                 json.dump(cache_data, file, ensure_ascii=False, indent=2)
-            logger.debug(f"Cached plugin market data: {cache_file}, MD5: {md5}")
+            logger.debug(f"已写入插件市场缓存: {cache_file}，MD5: {md5}")
         except Exception as exc:
-            logger.warning(f"Failed to save plugin market cache: {exc}")
+            logger.warning(f"保存插件市场缓存失败: {exc}")
 
     @staticmethod
     def iter_market_plugin_entries(market_data: object):
@@ -1563,10 +1568,14 @@ class PluginService:
         repo_url = str(payload.get("url") or "").strip()
         download_url = str(payload.get("download_url") or "").strip()
         ignore_version_check = bool(payload.get("ignore_version_check", False))
+        # 前端是否显式清空了 download_url（选 GitHub 加速时会传空串）
+        force_skip_download_url = "download_url" in payload and not download_url
         market_install_info = await self.resolve_market_install_info(payload)
         if market_install_info:
             repo_url = market_install_info["repo"]
-            download_url = market_install_info["download_url"]
+            # 只有前端没强制跳过时，才用市场 CDN 直链
+            if not force_skip_download_url:
+                download_url = market_install_info["download_url"]
             payload = {
                 **payload,
                 "registry_url": market_install_info["registry_url"] or None,
@@ -1578,6 +1587,13 @@ class PluginService:
         proxy: str | None = payload.get("proxy", None)
         if proxy:
             proxy = proxy.removesuffix("/")
+        # 有加速时再兜底一次：CDN 直链无法套 gh-proxy 前缀
+        if proxy and download_url:
+            logger.info(
+                "安装插件 %s：已选择 GitHub 加速，跳过市场 CDN 直链",
+                repo_url,
+            )
+            download_url = ""
 
         try:
             logger.info(f"正在安装插件 {repo_url}")
@@ -1891,6 +1907,14 @@ class PluginService:
                 public_message="该失败插件缺少可用的仓库地址或下载地址，无法更新。",
             )
 
+        # 选了 GitHub 加速且有仓库地址时，跳过 CDN 直链
+        if proxy and download_url and repo_url:
+            logger.info(
+                "更新失败插件 %s：已选择 GitHub 加速，跳过市场 CDN 直链",
+                dir_name,
+            )
+            download_url = ""
+
         logger.info(f"正在更新失败插件 {dir_name}")
         try:
             await self.plugin_manager.update_failed_plugin(
@@ -1929,9 +1953,16 @@ class PluginService:
         self._ensure_not_demo()
         payload = data if isinstance(data, dict) else {}
         plugin_name = payload["name"]
-        proxy: str | None = payload.get("proxy", None)
+        proxy = str(payload.get("proxy") or "").strip().removesuffix("/")
         update_info = await self.resolve_market_update_info(plugin_name)
         download_url = str(update_info.get("download_url") or "").strip()
+        # 前端传了 GitHub 加速时，改走仓库下载，代理才能生效（市场 CDN 无法套 gh-proxy）
+        if proxy and download_url:
+            logger.info(
+                "更新插件 %s：已选择 GitHub 加速，跳过市场 CDN 直链",
+                plugin_name,
+            )
+            download_url = ""
         logger.info(f"正在更新插件 {plugin_name}")
         await self.plugin_manager.update_plugin(
             plugin_name, proxy or "", download_url=download_url
@@ -1960,8 +1991,10 @@ class PluginService:
                     logger.info(f"批量更新插件 {name}")
                     update_info = await self.resolve_market_update_info(name)
                     download_url = str(update_info.get("download_url") or "").strip()
+                    # 批量更新若带了 GitHub 加速，同样优先走仓库
+                    effective_download = "" if proxy and download_url else download_url
                     await self.plugin_manager.update_plugin(
-                        name, proxy, download_url=download_url
+                        name, proxy, download_url=effective_download
                     )
                     await self.refresh_plugin_install_source_after_update(
                         name,

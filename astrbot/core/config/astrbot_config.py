@@ -1,8 +1,11 @@
 import enum
+import asyncio
+import copy
 import json
 import logging
 import os
 import tempfile
+import threading
 
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.auth_password import (
@@ -49,6 +52,10 @@ class AstrBotConfig(dict):
         object.__setattr__(self, "config_path", config_path)
         object.__setattr__(self, "default_config", default_config)
         object.__setattr__(self, "schema", schema)
+        object.__setattr__(self, "_save_state_lock", threading.Lock())
+        object.__setattr__(self, "_save_commit_lock", threading.Lock())
+        object.__setattr__(self, "_save_revision", 0)
+        object.__setattr__(self, "_save_committed_revision", 0)
 
         if schema:
             default_config = self._config_schema_to_default_config(schema)
@@ -225,30 +232,77 @@ class AstrBotConfig(dict):
     def save_config(
         self, replace_config: dict | None = None, *, indent: int = 2
     ) -> None:
-        """将配置写入文件
+        """同步持久化当前配置。
 
-        如果传入 replace_config，则将配置替换为 replace_config
+        Args:
+            replace_config: 保存前合并进配置的值。
+            indent: JSON 缩进空格数。
         """
-        if replace_config:
-            self.update(replace_config)
+        snapshot, revision = self._prepare_config_snapshot(replace_config)
+        self._write_config_snapshot(snapshot, revision, indent)
+
+    async def save_config_async(
+        self, replace_config: dict | None = None, *, indent: int = 2
+    ) -> bool:
+        """异步持久化配置快照，避免阻塞事件循环。
+
+        Args:
+            replace_config: 保存前合并进配置的值。
+            indent: JSON 缩进空格数。
+
+        Returns:
+            本快照是否真正落盘。较新的已提交快照会覆盖较旧快照。
+        """
+        snapshot, revision = self._prepare_config_snapshot(replace_config)
+        return await asyncio.to_thread(
+            self._write_config_snapshot,
+            snapshot,
+            revision,
+            indent,
+        )
+
+    def _prepare_config_snapshot(self, replace_config: dict | None) -> tuple[dict, int]:
+        """创建隔离快照并分配保存 revision。"""
+        with self._save_state_lock:
+            if replace_config:
+                self.update(replace_config)
+            snapshot = copy.deepcopy(dict(self))
+            revision = self._save_revision + 1
+            object.__setattr__(self, "_save_revision", revision)
+        return snapshot, revision
+
+    def _write_config_snapshot(
+        self, snapshot: dict, revision: int, indent: int
+    ) -> bool:
+        """写入并有条件提交配置快照。"""
         directory = os.path.dirname(os.path.abspath(self.config_path)) or "."
         fd, temp_path = tempfile.mkstemp(
             dir=directory,
             prefix=f".{os.path.basename(self.config_path)}.",
             suffix=".tmp",
         )
+        committed = False
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self, f, indent=indent, ensure_ascii=False)
+                json.dump(snapshot, f, indent=indent, ensure_ascii=False)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(temp_path, self.config_path)
-        except Exception:
-            try:
-                os.unlink(temp_path)
-            except FileNotFoundError:
-                pass
-            raise
+            with self._save_commit_lock:
+                if revision > self._save_committed_revision:
+                    os.replace(temp_path, self.config_path)
+                    object.__setattr__(
+                        self,
+                        "_save_committed_revision",
+                        revision,
+                    )
+                    committed = True
+        finally:
+            if not committed:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+        return committed
 
     def __getattr__(self, item):
         try:

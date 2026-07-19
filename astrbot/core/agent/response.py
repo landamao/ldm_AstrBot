@@ -18,6 +18,8 @@ class AgentResponse:
 @dataclass
 class AgentStats:
     token_usage: TokenUsage = field(default_factory=TokenUsage)
+    current_context_tokens: int = 0
+    """最近一次 LLM 请求发送的 input tokens，用于上下文占用显示。"""
     start_time: float = 0.0
     end_time: float = 0.0
     time_to_first_token: float = 0.0
@@ -28,7 +30,8 @@ class AgentStats:
 
     def to_dict(self) -> dict:
         return {
-            "token_usage": self.token_usage.__dict__,
+            "token_usage": self.token_usage.__dict__.copy(),
+            "current_context_tokens": self.current_context_tokens,
             "start_time": self.start_time,
             "end_time": self.end_time,
             "time_to_first_token": self.time_to_first_token,

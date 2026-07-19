@@ -536,7 +536,6 @@ class PluginManager:
             )
 
         return metadata
-
     @staticmethod
     def _load_plugin_i18n(plugin_path: str) -> dict[str, dict]:
         plugin_root = Path(plugin_path)
@@ -559,7 +558,8 @@ class PluginManager:
                     continue
 
                 try:
-                    with file_path.open(encoding="utf-8") as f:
+                    # 允许 UTF-8 BOM，避免 Windows 导出的 JSON 解析失败
+                    with file_path.open(encoding="utf-8-sig") as f:
                         locale_data = json.load(f)
                     if isinstance(locale_data, dict):
                         translations[locale] = locale_data
@@ -574,6 +574,32 @@ class PluginManager:
             logger.warning("读取插件 i18n 目录失败 %s: %s", i18n_dir, exc)
 
         return translations
+
+    @staticmethod
+    def _load_plugin_config_schema(schema_path: str) -> dict:
+        """加载插件配置 schema，兼容可选的 UTF-8 BOM。
+
+        Args:
+            schema_path: `_conf_schema.json` 路径。
+
+        Returns:
+            解析后的 schema 字典。
+
+        Raises:
+            ValueError: 编码不是 UTF-8，或内容不是合法 JSON。
+        """
+        try:
+            with open(schema_path, encoding="utf-8-sig") as f:
+                return json.load(f)
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"插件配置 schema 必须使用 UTF-8 编码: {schema_path}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"插件配置 schema 不是有效的 JSON: {schema_path} "
+                f"(line {exc.lineno}, column {exc.colno})"
+            ) from exc
 
     @staticmethod
     def _normalize_plugin_dir_name(plugin_name: str) -> str:
@@ -1110,15 +1136,14 @@ class PluginManager:
                     self.conf_schema_fname,
                 )
                 if os.path.exists(plugin_schema_path):
-                    # 加载插件配置
-                    with open(plugin_schema_path, encoding="utf-8") as f:
-                        plugin_config = AstrBotConfig(
-                            config_path=os.path.join(
-                                self.plugin_config_path,
-                                f"{root_dir_name}_config.json",
-                            ),
-                            schema=json.loads(f.read()),
-                        )
+                    # 加载插件配置，支持 UTF-8 BOM
+                    plugin_config = AstrBotConfig(
+                        config_path=os.path.join(
+                            self.plugin_config_path,
+                            f"{root_dir_name}_config.json",
+                        ),
+                        schema=self._load_plugin_config_schema(plugin_schema_path),
+                    )
                 logo_path = os.path.join(plugin_dir_path, self.logo_fname)
 
                 if path in star_map:
@@ -1192,6 +1217,8 @@ class PluginManager:
                             setattr(metadata.star_cls, "author", p_author)
                             setattr(metadata.star_cls, "plugin_id", plugin_id)
                     else:
+                        # 禁用态不保留旧实例，避免后续重复 load 叠 partial(self)
+                        metadata.star_cls = None
                         logger.info("插件 %s 已被禁用。", metadata.name)
 
                     metadata.module = module
@@ -1202,31 +1229,54 @@ class PluginManager:
                         f"插件 {metadata.name} 的模块路径为空。"
                     )
 
-                    # 绑定 handler
+                    plugin_disabled = metadata.module_path in inactivated_plugins
+
+                    # 绑定 handler：先拆回原始可调用对象，再按当前实例绑一层，
+                    # 避免重复 load/启用时 partial 叠加导致重复传入 self。
                     related_handlers = (
                         star_handlers_registry.get_handlers_by_module_name(
                             metadata.module_path,
                         )
                     )
                     for handler in related_handlers:
-                        handler.handler = functools.partial(
-                            handler.handler,
-                            metadata.star_cls,  # type: ignore
+                        raw_handler = (
+                            handler.handler.func
+                            if isinstance(handler.handler, functools.partial)
+                            else handler.handler
                         )
-                    plugin_disabled = metadata.module_path in inactivated_plugins
+                        handler.handler = raw_handler
+                        if not plugin_disabled and metadata.star_cls is not None:
+                            handler.handler = functools.partial(
+                                raw_handler,
+                                metadata.star_cls,
+                            )
 
-                    # 绑定 llm_tool handler
+                    # LLM 工具同样做幂等绑定
                     for func_tool in llm_tools.func_list:
                         for ft in self._iter_concrete_llm_tools(func_tool):
-                            if (
-                                ft.handler
-                                and ft.handler.__module__ == metadata.module_path
-                            ):
-                                ft.handler_module_path = metadata.module_path
-                                ft.handler = functools.partial(
-                                    ft.handler,
-                                    metadata.star_cls,  # type: ignore
+                            if ft.handler and (
+                                getattr(ft.handler, "__module__", None)
+                                == metadata.module_path
+                                or (
+                                    isinstance(ft.handler, functools.partial)
+                                    and ft.handler_module_path == metadata.module_path
                                 )
+                            ):
+                                raw_handler = (
+                                    ft.handler.func
+                                    if isinstance(ft.handler, functools.partial)
+                                    else ft.handler
+                                )
+                                ft.handler_module_path = metadata.module_path
+                                ft.handler = raw_handler
+                                if (
+                                    not plugin_disabled
+                                    and metadata.star_cls is not None
+                                ):
+                                    ft.handler = functools.partial(
+                                        raw_handler,
+                                        metadata.star_cls,
+                                    )
                             if self._is_plugin_llm_tool(ft, metadata.module_path):
                                 ft.active = (
                                     not plugin_disabled

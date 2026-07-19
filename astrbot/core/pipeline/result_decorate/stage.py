@@ -73,24 +73,33 @@ class ResultDecorateStage(Stage):
         )
         self.enable_segmented_reply = bool(seg_cfg.get("enable", False))
         self.only_llm_result = bool(seg_cfg.get("only_llm_result", True))
-        self.segment_splitter = SegmentedReplySplitter(
-            split_mode=str(seg_cfg.get("split_mode", "chars") or "chars"),
-            split_chars=list(seg_cfg.get("split_words") or []),
-            regex=str(seg_cfg.get("regex") or r"[。？！?!…\n]+"),
-            enable_smart_split=bool(seg_cfg.get("enable_smart_split", True)),
-            balanced_split=bool(seg_cfg.get("balanced_split", True)),
-            max_segments=int(seg_cfg.get("max_segments", 7) or 0),
-            min_segment_length=int(seg_cfg.get("min_segment_length", 10) or 0),
-            balanced_ratio_min=float(seg_cfg.get("balanced_ratio_min", 0.4) or 0.4),
-            balanced_ratio_max=float(seg_cfg.get("balanced_ratio_max", 0.9) or 0.9),
-            no_split_around=list(seg_cfg.get("no_split_around") or []),
-            content_cleanup_rule=str(seg_cfg.get("content_cleanup_rule") or ""),
-            clean_before_items=list(seg_cfg.get("clean_before_items") or []),
-            clean_after_items=list(seg_cfg.get("clean_after_items") or []),
-            trim_edge_blank_lines=bool(seg_cfg.get("trim_edge_blank_lines", True)),
-            max_length_to_disable=int(seg_cfg.get("max_length_to_disable", 0) or 0),
-            min_length_to_split=int(seg_cfg.get("min_length_to_split", 0) or 0),
-        )
+        self.segment_splitter = None
+        if self.enable_segmented_reply:
+            try:
+                self.segment_splitter = SegmentedReplySplitter(
+                    split_mode=str(seg_cfg.get("split_mode", "chars") or "chars"),
+                    split_chars=list(seg_cfg.get("split_words") or []),
+                    regex=str(seg_cfg.get("regex") or r"[。？！?!…\n]+"),
+                    enable_smart_split=bool(seg_cfg.get("enable_smart_split", True)),
+                    balanced_split=bool(seg_cfg.get("balanced_split", True)),
+                    max_segments=int(seg_cfg.get("max_segments", 7) or 0),
+                    min_segment_length=int(seg_cfg.get("min_segment_length", 10) or 0),
+                    balanced_ratio_min=float(seg_cfg.get("balanced_ratio_min", 0.4) or 0.4),
+                    balanced_ratio_max=float(seg_cfg.get("balanced_ratio_max", 0.9) or 0.9),
+                    no_split_around=list(seg_cfg.get("no_split_around") or []),
+                    content_cleanup_rule=str(seg_cfg.get("content_cleanup_rule") or ""),
+                    clean_before_items=list(seg_cfg.get("clean_before_items") or []),
+                    clean_after_items=list(seg_cfg.get("clean_after_items") or []),
+                    trim_edge_blank_lines=bool(seg_cfg.get("trim_edge_blank_lines", True)),
+                    max_length_to_disable=int(seg_cfg.get("max_length_to_disable", 0) or 0),
+                    min_length_to_split=int(seg_cfg.get("min_length_to_split", 0) or 0),
+                )
+            except re.error as exc:
+                logger.warning(
+                    f"分段回复正则配置无效，已自动关闭分段回复：{exc}"
+                )
+                self.enable_segmented_reply = False
+
 
         # exception
         self.content_safe_check_reply = ctx.astrbot_config["content_safety"][
@@ -185,7 +194,7 @@ class ResultDecorateStage(Stage):
                         break
 
             # 分段回复（智能断句 / 均分 / 最大段数）
-            if self.enable_segmented_reply and event.get_platform_name() not in [
+            if self.enable_segmented_reply and self.segment_splitter and event.get_platform_name() not in [
                 "qq_official_webhook",
                 "weixin_official_account",
                 "dingtalk",
@@ -199,6 +208,7 @@ class ResultDecorateStage(Stage):
                         logger.error(
                             f"智能分段失败，保留原文: {traceback.format_exc()}",
                         )
+                        self.enable_segmented_reply = False
 
             # TTS
             tts_provider = self.ctx.plugin_manager.context.get_using_tts_provider(

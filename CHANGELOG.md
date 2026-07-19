@@ -6,6 +6,99 @@
 ---
 
 <details>
+<summary><strong>[4.26.19] — 2026-07-19</strong></summary>
+
+基于 ldm v4.26.18 的增量更新。合入官方 AstrBot **4.26.5→4.26.7** 一批稳定性修复，并补充本地增强。
+
+### 跟随官方更新
+
+- **插件稳定性**
+  - 插件 handler / LLM tool 绑定幂等，减少重复启用后 `self` 多传
+  - 插件 schema / i18n 支持 UTF-8 BOM
+  - 插件搜索不再误匹配仓库 URL
+
+- **Skills / Dashboard**
+  - Skill 版本化下载归档文件名修正
+  - Skill 下载失败返回正确 HTTP 状态
+  - Dashboard API 增加全局异常兜底
+
+- **前端小修**
+  - 未保存的提供商源可直接本地删除
+  - 非安全 HTTP 来源下代码块复制可用
+  - 命令建议面板关闭后隐藏残留 tooltip
+  - 平台页去掉重复日志区
+  - 模型菜单选中态跟随主题色
+  - ChatInput 移动端高度 / 多行布局修正
+  - 人格支持 WebUI 导入 / 导出（导出仅提示词与开场白）
+
+- **后端与能力**
+  - Anthropic ephemeral prompt cache
+  - 重复工具调用改为同名 + 同参计数
+  - Embedding dimensions 发送模式（auto / always / never）
+  - TEI（Text Embeddings Inference）Rerank 适配器
+  - 配置快照异步保存 + revision 防覆盖
+  - 微信 OC context token 保存 revision
+  - Agent 上下文 token 指示与流式 agent_stats
+  - WebChat 私聊免唤醒前缀
+  - NVIDIA MiniMax M3 默认补 `max_tokens=8192`
+  - 本地文件搜索不再依赖 `python_ripgrep`
+  - 知识库上传失败补偿清理
+  - 分段回复非法正则自动关闭，不阻断启动 / 发送
+  - 工具用途说明改为「新类型任务时简要说明」，不必每次 tool call 前都说
+
+### 源自 AstrBot 官方问题（本地修复 / 增强）
+
+- **插件市场安装 / 更新 GitHub 加速选择丢失**
+  - 官方在有市场 `download_url`（CDN）时隐藏了加速选择，并强制不传 proxy
+  - 现恢复始终显示 GitHub 加速
+  - 选了加速时改为走 GitHub 仓库 + 代理；不选仍走市场 CDN
+
+- **插件市场远程 MD5 校验源不可达**
+  - 官方 MD5 地址 `api.soulter.top` 在部分网络超时
+  - 有本地缓存时继续使用缓存，日志改为中文并带上地址
+
+- **分段回复启动崩溃**
+  - 合入官方分段正则容错时漏初始化字段，导致 `enable_segmented_reply` 属性错误
+  - 已补齐初始化，避免启动即崩
+
+### 自己新增 / 本地偏好
+
+- **市场代理策略本地化**
+  - 有加速且仓库是 GitHub 时，后端安装 / 更新跳过市场 CDN，让 gh-proxy 真正生效
+
+- **用户名校验保持非空即可**
+  - 不跟官方用户名 ≥3 位限制
+  - 清理前端残留「用户名至少 3 位」文案
+
+- **日志保持中文**
+  - 不跟官方日志英文化
+  - 插件市场缓存 / MD5 相关日志中文化
+
+- **明确不跟**
+  - WebUI 侧边栏精简
+  - ChatUI 刷新后续流（active_runs）
+  - ChatUI 内联 GenUI
+  - 整树覆盖官方版本
+
+### 其他
+
+- 版本号更新为 **4.26.19**
+- 源码与 WebUI `data/dist` 版本统一为 **v4.26.19**
+
+### 使用说明
+
+1. 更新后请手动重启一次服务
+2. 若面板仍显示旧版本，请用顶栏「强制刷新面板」或浏览器 Ctrl+F5
+3. 建议核对：
+   - 后端版本：`4.26.19`
+   - 面板 `data/dist/version` 与 `assets/version`：`v4.26.19`
+4. 反馈交流：
+   - QQ 群：`1103659691`
+   - Telegram：`@landamaogroup`
+
+</details>
+
+<details>
 <summary><strong>[4.26.18] — 2026-07-18</strong></summary>
 
 基于 ldm v4.26.17 的增量更新。

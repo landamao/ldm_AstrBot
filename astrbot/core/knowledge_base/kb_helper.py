@@ -463,6 +463,21 @@ class KBHelper:
                 except Exception as me:
                     logger.warning(f"清理多媒体文件失败 {media_path}: {me}")
 
+            # 失败后补偿清理：
+            # - 已保存的媒体记录从数据库删除
+            # - 向量库中已写入的向量删除
+            # - 文档元数据删除
+            if doc_id:
+                try:
+                    await self.kb_db.delete_document_by_id(
+                        doc_id=doc_id,
+                        vec_db=self.vec_db,  # type: ignore
+                    )
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        f"清理失败的知识库文档记录时出错 {doc_id}: {cleanup_exc}"
+                    )
+
             raise
 
     async def list_documents(

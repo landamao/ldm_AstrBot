@@ -418,8 +418,18 @@ class ProviderOpenAIOfficial(Provider):
         return bool(value)
 
     def _apply_provider_specific_extra_body_overrides(
-        self, extra_body: dict[str, Any]
+        self, payloads: dict[str, Any], extra_body: dict[str, Any]
     ) -> None:
+        if self.provider_config.get("provider") == "nvidia":
+            model = str(payloads.get("model", "")).lower()
+            # NVIDIA 的 MiniMax M3 在未显式传 max_tokens 时可能返回空结果。
+            if (
+                model == "minimaxai/minimax-m3"
+                and "max_tokens" not in payloads
+                and "max_tokens" not in extra_body
+            ):
+                payloads["max_tokens"] = 8192
+
         if self.provider_config.get("provider") != "ollama":
             return
         if not self._ollama_disable_thinking_enabled():
@@ -557,7 +567,7 @@ class ProviderOpenAIOfficial(Provider):
         custom_extra_body = self.provider_config.get("custom_extra_body", {})
         if isinstance(custom_extra_body, dict):
             extra_body.update(custom_extra_body)
-        self._apply_provider_specific_extra_body_overrides(extra_body)
+        self._apply_provider_specific_extra_body_overrides(payloads, extra_body)
 
         model = payloads.get("model", "").lower()
 
@@ -690,7 +700,7 @@ class ProviderOpenAIOfficial(Provider):
                 to_del.append(key)
         for key in to_del:
             del payloads[key]
-        self._apply_provider_specific_extra_body_overrides(extra_body)
+        self._apply_provider_specific_extra_body_overrides(payloads, extra_body)
 
         self._sanitize_assistant_messages(payloads)
 

@@ -9,8 +9,6 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from python_ripgrep import search
-
 from astrbot.api import logger
 from astrbot.core.computer.file_read_utils import (
     detect_text_encoding,
@@ -20,7 +18,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_root
 
 from ..olayer import FileSystemComponent, PythonComponent, ShellComponent
 from .base import ComputerBooter
-from .shipyard_search_file_util import _truncate_long_lines
+from .shipyard_search_file_util import _truncate_long_lines, build_search_command
 
 _BLOCKED_COMMAND_PATTERNS = [
     " rm -rf ",
@@ -252,15 +250,30 @@ class LocalFileSystemComponent(FileSystemComponent):
         before_context: int | None = None,
     ) -> dict[str, Any]:
         def _run() -> dict[str, Any]:
-            results = search(
-                patterns=[pattern],
-                paths=[path] if path else None,
-                globs=[glob] if glob else None,
+            command = build_search_command(
+                pattern=pattern,
+                path=path or ".",
+                glob=glob,
                 after_context=after_context,
                 before_context=before_context,
-                line_number=True,
             )
-            return {"success": True, "content": _truncate_long_lines("".join(results))}
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=get_astrbot_root(),
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode in (0, 1):
+                return {
+                    "success": True,
+                    "content": _truncate_long_lines(result.stdout or ""),
+                }
+            return {
+                "success": False,
+                "content": "",
+                "error": result.stderr or f"search command failed: {result.returncode}",
+            }
 
         return await asyncio.to_thread(_run)
 
