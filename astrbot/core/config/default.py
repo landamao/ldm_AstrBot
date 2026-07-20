@@ -135,7 +135,7 @@ DEFAULT_CONFIG = {
             "notify_user": True,
             "notify_text": "打断当前回复，开始处理新消息。",
             "add_to_context": True,
-            "context_text": "[系统提示]用户发送了新消息导致打断了此条回复，请联系上下文继续做出回复",
+            "context_text": "[系统提示]用户发来了新消息导致打断了此条回复，请联系上下文继续做出回复",
             "wait_timeout": 8.0,
         },
     },

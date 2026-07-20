@@ -437,8 +437,10 @@ class RespondStage(Stage):
                 )
 
                 comps = list(result.chain)
+                send_truncated = False
                 for idx, comp in enumerate(comps):
                     if self._should_stop_sending(event):
+                        send_truncated = True
                         logger.info("分段发送过程中检测到打断信号，停止后续分段。")
                         break
                     # 第一段立即发；后续段按「本段」字数延迟，模拟打字
@@ -447,6 +449,7 @@ class RespondStage(Stage):
                         slept = 0.0
                         while slept < delay:
                             if self._should_stop_sending(event):
+                                send_truncated = True
                                 logger.info("分段等待期间检测到打断信号，停止后续分段。")
                                 break
                             step = min(0.1, delay - slept)
@@ -455,6 +458,7 @@ class RespondStage(Stage):
                         else:
                             pass
                         if self._should_stop_sending(event):
+                            send_truncated = True
                             break
                     try:
                         if comp.type in need_separately:
@@ -480,10 +484,18 @@ class RespondStage(Stage):
                             event._outline_chain([comp]),
                         )
                     except Exception as e:
+                        # 发送失败不视为「完整发出」，后续软打断仍可按已发送内容裁剪
+                        send_truncated = True
                         logger.error(
                             f"发送消息链失败: chain = {MessageChain([comp])}, error = {e}",
                             exc_info=True,
                         )
+                if result.is_model_result():
+                    if send_truncated:
+                        event.set_extra("_llm_reply_send_truncated", True)
+                    else:
+                        # 全部分段已发出：收尾窗口撞上软打断时不应再写打断提示
+                        event.set_extra("_llm_reply_send_completed", True)
                 if use_smart_reply and source_id:
                     tracker.mark_bot_reply(
                         str(getattr(event, "unified_msg_origin", "") or ""),
@@ -516,10 +528,18 @@ class RespondStage(Stage):
                 chain = result.derive(result.chain)
                 if result.chain and len(result.chain) > 0:
                     try:
-                        await event.send(chain)
-                        if result.is_model_result():
-                            self._record_delivered_llm_plain(event, chain)
+                        if self._should_stop_sending(event):
+                            if result.is_model_result():
+                                event.set_extra("_llm_reply_send_truncated", True)
+                            logger.info("检测到打断信号，跳过非分段发送。")
+                        else:
+                            await event.send(chain)
+                            if result.is_model_result():
+                                self._record_delivered_llm_plain(event, chain)
+                                event.set_extra("_llm_reply_send_completed", True)
                     except Exception as e:
+                        if result.is_model_result():
+                            event.set_extra("_llm_reply_send_truncated", True)
                         logger.error(
                             f"发送消息链失败: chain = {chain}, error = {e}",
                             exc_info=True,

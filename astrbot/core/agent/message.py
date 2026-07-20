@@ -1,6 +1,7 @@
 # Inspired by MoonshotAI/kosong, credits to MoonshotAI/kosong authors for the original implementation.
 # License: Apache License 2.0
 
+import re
 from typing import Any, ClassVar, Literal, TypeVar, cast
 
 from pydantic import (
@@ -307,6 +308,134 @@ def strip_checkpoint_messages(history: list[dict]) -> list[dict]:
     return [message for message in history if not is_checkpoint_message(message)]
 
 
+# 旧版/旁路可能把用户正文写成 "[昵称(ID)]: 正文"，与同轮
+# "正文 + <system_reminder>/<favour>" 多段 user 消息并存，造成重复上下文。
+_USER_IDENTITY_PREFIX_RE = re.compile(
+    r"^\s*\[[^\[\]\n]{1,80}\([^()\[\]\n]{1,64}\)\]\s*[:：]\s*"
+)
+
+
+def _extract_user_plain_from_content(content: Any) -> str:
+    """提取 user 消息中的「正文」纯文本（忽略 system_reminder/favour 等标签块）。"""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        text = content.strip()
+        if not text:
+            return ""
+        # 整段都是标签时不当作正文
+        if text.startswith("<") and text.endswith(">"):
+            return ""
+        return _USER_IDENTITY_PREFIX_RE.sub("", text).strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            text = ""
+            if isinstance(part, dict):
+                if part.get("type") not in (None, "text"):
+                    continue
+                text = str(part.get("text") or "").strip()
+            else:
+                text = str(getattr(part, "text", "") or "").strip()
+            if not text:
+                continue
+            if text.startswith("<") and (
+                text.startswith("<system_reminder>")
+                or text.startswith("<favour>")
+                or text.startswith("<Quoted Message>")
+                or text.startswith("<selected_excerpt>")
+            ):
+                continue
+            parts.append(_USER_IDENTITY_PREFIX_RE.sub("", text).strip())
+        return "\n".join(p for p in parts if p).strip()
+    return str(content).strip()
+
+
+def _is_identity_prefixed_user_message(item: dict[str, Any] | Message) -> bool:
+    """是否为仅含「[昵称(ID)]: 正文」的 user 字符串消息。"""
+    if isinstance(item, Message):
+        if item.role != "user":
+            return False
+        content = item.content
+    else:
+        if item.get("role") != "user":
+            return False
+        content = item.get("content")
+    if not isinstance(content, str):
+        return False
+    text = content.strip()
+    return bool(_USER_IDENTITY_PREFIX_RE.match(text))
+
+
+def dedupe_identity_prefixed_user_messages(
+    history: list[dict[str, Any]] | list[Message],
+) -> list:
+    """去掉与相邻「正文+提示」重复的 [昵称(ID)]: 正文 消息。
+
+    保留目标形态：
+    - 正文
+    - <system_reminder> / <favour> 等提示块
+
+    丢弃：
+    - 仅有 [名字(ID)]: 正文，且与相邻 list/多段 user 正文相同的那条
+    """
+    if not history:
+        return history
+
+    keep_flags = [True] * len(history)
+    plains: list[str | None] = [None] * len(history)
+
+    def plain_at(idx: int) -> str:
+        cached = plains[idx]
+        if cached is not None:
+            return cached
+        item = history[idx]
+        if isinstance(item, Message):
+            role = item.role
+            content = item.content
+        else:
+            role = item.get("role")
+            content = item.get("content")
+        if role != "user":
+            plains[idx] = ""
+            return ""
+        val = _extract_user_plain_from_content(content)
+        plains[idx] = val
+        return val
+
+    for i, item in enumerate(history):
+        if not _is_identity_prefixed_user_message(item):
+            continue
+        plain = plain_at(i)
+        if not plain:
+            continue
+        # 优先与后一条（常见：先写前缀字符串，再写 list 正文+提示）比对
+        for j in (i + 1, i - 1):
+            if j < 0 or j >= len(history) or not keep_flags[j]:
+                continue
+            other = history[j]
+            if isinstance(other, Message):
+                other_role = other.role
+                other_content = other.content
+            else:
+                other_role = other.get("role")
+                other_content = other.get("content")
+            if other_role != "user":
+                continue
+            # 另一条最好是 list 多段（正文+提示）；字符串纯正文也可去重
+            if isinstance(other_content, list) or (
+                isinstance(other_content, str)
+                and not _USER_IDENTITY_PREFIX_RE.match(other_content.strip())
+            ):
+                if plain_at(j) == plain:
+                    keep_flags[i] = False
+                    break
+
+    if all(keep_flags):
+        return history
+    return [item for item, keep in zip(history, keep_flags) if keep]
+
+
 def _get_checkpoint_data(message: Message | dict) -> CheckpointData | None:
     if not is_checkpoint_message(message):
         return None
@@ -326,6 +455,8 @@ def _get_checkpoint_data(message: Message | dict) -> CheckpointData | None:
 
 def bind_checkpoint_messages(history: list[dict]) -> list[Message]:
     """Load persisted history and bind checkpoint segments to prior messages."""
+    # 加载时去掉与「正文+提示」重复的 [昵称(ID)]: 正文
+    history = dedupe_identity_prefixed_user_messages(history)
     messages: list[Message] = []
     for item in history:
         if is_checkpoint_message(item):
@@ -344,6 +475,8 @@ def bind_checkpoint_messages(history: list[dict]) -> list[Message]:
 
 def dump_messages_with_checkpoints(messages: list[Message]) -> list[dict]:
     """Dump runtime messages and reinsert bound checkpoint segments."""
+    # 落库前再去一次，避免新路径继续写入重复前缀消息
+    messages = dedupe_identity_prefixed_user_messages(messages)
     dumped: list[dict] = []
     for message in messages:
         message_data = message.model_dump()

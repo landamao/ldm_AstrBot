@@ -198,10 +198,10 @@ class InternalAgentSubStage(Stage):
             context_text = str(
                 interrupt_cfg.get(
                     "context_text",
-                    "[系统提示]用户发送了新消息导致打断了此条回复，"
+                    "[系统提示]用户发来了新消息导致打断了此条回复，"
                     "请联系上下文继续做出回复",
                 )
-                or "[系统提示]用户发送了新消息导致打断了此条回复，"
+                or "[系统提示]用户发来了新消息导致打断了此条回复，"
                 "请联系上下文继续做出回复"
             ).strip()
 
@@ -590,14 +590,60 @@ class InternalAgentSubStage(Stage):
         if isinstance(content, list):
             parts: list[str] = []
             for part in content:
-                if isinstance(part, TextPart):
-                    parts.append(part.text or "")
+                text = getattr(part, "text", None)
+                if text:
+                    parts.append(str(text))
                 elif isinstance(part, dict) and part.get("type") == "text":
                     parts.append(str(part.get("text") or ""))
-                elif hasattr(part, "text"):
-                    parts.append(getattr(part, "text", "") or "")
             return "".join(parts)
         return str(content)
+
+    @staticmethod
+    def _normalize_plain_for_compare(text: str) -> str:
+        """比较已发送文本与完整回复时忽略空白差异。"""
+        if not text:
+            return ""
+        return "".join(str(text).split())
+
+    def _get_delivered_llm_plain(self, event: AstrMessageEvent) -> str:
+        delivered = event.get_extra("_delivered_llm_plain_text") or ""
+        if not isinstance(delivered, str):
+            delivered = ""
+        delivered = delivered.strip()
+        if not delivered:
+            plain = event.get_extra("_delivered_plain_text") or ""
+            if isinstance(plain, str) and plain.strip():
+                delivered = plain.strip()
+        return delivered
+
+    def _is_llm_reply_fully_delivered(
+        self,
+        event: AstrMessageEvent,
+        *,
+        runner_aborted: bool = False,
+        original_text: str = "",
+        delivered_text: str = "",
+    ) -> bool:
+        """回复是否已完整发给用户。
+
+        用于区分：
+        - 真截断：生成中 / 分段发送中被软打断
+        - 收尾撞车：2/2 已发完，仅写历史/注销阶段被标 abort
+        后者不应再往历史追加打断系统提示。
+        """
+        if runner_aborted:
+            return False
+        if event.get_extra("_llm_reply_send_truncated"):
+            return False
+        if event.get_extra("_llm_reply_send_completed"):
+            return True
+
+        original = self._normalize_plain_for_compare(original_text)
+        delivered = self._normalize_plain_for_compare(delivered_text)
+        if not original or not delivered:
+            return False
+        # delivered 可能因分段用换行拼接，归一化后应覆盖完整正文
+        return delivered == original or original in delivered
 
     def _apply_interrupt_to_messages(
         self,
@@ -606,7 +652,7 @@ class InternalAgentSubStage(Stage):
         *,
         runner_aborted: bool = False,
     ) -> list[Message]:
-        """打断后：历史仅保留已实际发送内容，并在该条 assistant 消息末尾追加打断提示。
+        """打断后：历史仅保留已实际发送内容；真截断时才追加打断提示。
 
         Args:
             event: 被打断的旧事件。
@@ -615,15 +661,7 @@ class InternalAgentSubStage(Stage):
                 True 时若无发送追踪，则信任 runner 已写入的正文；
                 False 表示生成已完成、发送阶段被打断，未发出内容不得入历史。
         """
-        delivered = event.get_extra("_delivered_llm_plain_text") or ""
-        if not isinstance(delivered, str):
-            delivered = ""
-        delivered = delivered.strip()
-        if not delivered:
-            # 流式/平台 send 路径可能只累计了通用已发送文本
-            plain = event.get_extra("_delivered_plain_text") or ""
-            if isinstance(plain, str) and plain.strip():
-                delivered = plain.strip()
+        delivered = self._get_delivered_llm_plain(event)
 
         interrupt_cfg = self._get_interrupt_reply_config(event)
         note = ""
@@ -650,8 +688,29 @@ class InternalAgentSubStage(Stage):
                     target_idx = i
                     break
 
+        original = ""
+        if target_idx is not None:
+            original = self._extract_message_plain(messages[target_idx].content).strip()
+
+        fully_delivered = self._is_llm_reply_fully_delivered(
+            event,
+            runner_aborted=runner_aborted,
+            original_text=original,
+            delivered_text=delivered,
+        )
+        if fully_delivered:
+            # 已完整发出：保留原回复正文，不写打断提示
+            note = ""
+            if not delivered and original:
+                delivered = original
+            logger.info(
+                "软打断时回复已完整发出，跳过打断提示落库: umo=%s, delivered_len=%s",
+                event.unified_msg_origin,
+                len(delivered or original),
+            )
+
         if delivered:
-            final_body = delivered
+            final_body = delivered if not fully_delivered else (original or delivered)
         elif runner_aborted:
             # runner 已按已产出文本裁剪，保留其内容
             final_body = None  # 表示保留原文
@@ -668,7 +727,6 @@ class InternalAgentSubStage(Stage):
             return messages
 
         msg = messages[target_idx]
-        original = self._extract_message_plain(msg.content).strip()
         if final_body is None:
             final_body = original
 
@@ -713,6 +771,24 @@ class InternalAgentSubStage(Stage):
             or event.get_extra("agent_user_aborted")
         )
 
+        # 分段/发送已全部完成时：只是收尾撞上软打断，按正常回复落库
+        if interrupted and not runner_aborted:
+            delivered = self._get_delivered_llm_plain(event)
+            completion = ""
+            if llm_response is not None:
+                completion = (llm_response.completion_text or "").strip()
+            if self._is_llm_reply_fully_delivered(
+                event,
+                runner_aborted=runner_aborted,
+                original_text=completion,
+                delivered_text=delivered,
+            ):
+                logger.info(
+                    "软打断发生在回复完整发出之后，按正常历史落库: umo=%s",
+                    event.unified_msg_origin,
+                )
+                interrupted = False
+
         if not llm_response and not interrupted:
             return
 
@@ -751,15 +827,10 @@ class InternalAgentSubStage(Stage):
                 runner_aborted=runner_aborted,
             )
             logger.info(
-                "打断后按已发送内容裁剪历史: delivered_len=%s, runner_aborted=%s",
-                len(
-                    str(
-                        event.get_extra("_delivered_llm_plain_text")
-                        or event.get_extra("_delivered_plain_text")
-                        or ""
-                    )
-                ),
+                "打断后按已发送内容裁剪历史: delivered_len=%s, runner_aborted=%s, send_completed=%s",
+                len(self._get_delivered_llm_plain(event)),
                 runner_aborted,
+                bool(event.get_extra("_llm_reply_send_completed")),
             )
 
         checkpoint_id = event.get_extra("llm_checkpoint_id")
@@ -781,6 +852,7 @@ class InternalAgentSubStage(Stage):
             history=message_to_save,
             token_usage=token_usage,
         )
+
 
 
 # we prevent astrbot from connecting to known malicious hosts
