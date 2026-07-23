@@ -66,8 +66,8 @@ def _record_tool_call_name(
 
 def _build_tool_call_status_message(tool_info: dict | None) -> str:
     if tool_info:
-        return f"🔨 调用工具: {tool_info.get('name', 'unknown')}"
-    return "🔨 调用工具..."
+        return f"🔨 使用工具: {tool_info.get('name', 'unknown')}"
+    return "🔨 使用工具..."
 
 
 def _build_tool_result_status_message(
@@ -87,7 +87,7 @@ def _build_tool_result_status_message(
         tool_result = msg_chain.get_plain_text(with_other_comps_mark=True)
     tool_result = _truncate_tool_result(tool_result, 70)
 
-    status_msg = f"🔨 调用工具: {tool_name}"
+    status_msg = f"🔨 使用工具: {tool_name}"
     if tool_result:
         status_msg = f"{status_msg}\n📎 返回结果: {tool_result}"
     return status_msg
@@ -222,7 +222,7 @@ async def run_agent(
                         # 向下游平台发送 "break" 分段信号（空 MessageChain，不携带数据）。
                         # 平台适配器收到后会关闭当前流式消息，并在后续文本到来时创建新消息。
                         # 仅在 show_tool_use 为 True 时才发送：此时紧接着会通过
-                        # astr_event.send() 独立发送工具状态消息（如"🔨 调用工具: xxx"），
+                        # astr_event.send() 独立发送工具状态消息（如"🔨 使用工具: xxx"），
                         # 需要分段才能保证消息顺序正确。
                         # 若 show_tool_use 为 False，不会有独立消息插入，无需分段。
                         yield MessageChain(chain=[], type="break")

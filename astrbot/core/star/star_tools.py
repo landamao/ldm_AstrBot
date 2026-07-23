@@ -258,3 +258,7 @@ class StarTools:
             raise RuntimeError(f"Unable to create directory {data_dir}: {e!s}") from e
 
         return data_dir.resolve()
+
+    @classmethod
+    def get_font_path(cls) -> Path:
+        return Path(get_astrbot_data_path()) / "ldm.ttf"
