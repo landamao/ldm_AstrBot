@@ -1,7 +1,7 @@
 # 🚀 **[ldmbot](https://github.com/landamao/ldm_AstrBot)** · 个人魔改版 AstrBot
 
 > **高度定制 · 拒绝官方覆盖**  
-> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5–4.26.7 修复合入 · 二次修改 · 当前 ldm 版本 **v4.26.22**
+> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5–4.26.7 修复合入 · 二次修改 · 当前 ldm 版本 **v4.26.23**
 
 ---
 

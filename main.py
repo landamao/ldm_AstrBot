@@ -11,12 +11,12 @@ ldmnb = r"""
     |_______|   |_______/    |__|  |__|   |__| \___|   |_______/
 """
 ldmbot = r"""
-      __          ______      __    __    _______      ____      _________
-     |  |        |       \   |  \  /  |  |   _   \    /    \    |___   ___|
-     |  |        |  .--.  |  |   \/   |  |  |_)  |   /  __  \       |  |
-     |  |        |  |  |  |  |        |  |   _  <   |  |  |  |      |  |
-     |  `----.   |  '--'  |  |  |\/|  |  |  |_)  |   \  `'  /       |  |
-     |_______|   |_______/   |__|  |__|  |_______/    \____/        |__|
+     __          ______      __    __    _______      ____      _________
+    |  |        |       \   |  \  /  |  |   _   \    /    \    |___   ___|
+    |  |        |  .--.  |  |   \/   |  |  |_)  |   /  __  \       |  |
+    |  |        |  |  |  |  |        |  |   _  <   |  |  |  |      |  |
+    |  `----.   |  '--'  |  |  |\/|  |  |  |_)  |   \  `'  /       |  |
+    |_______|   |_______/   |__|  |__|  |_______/    \____/        |__|
 """
 
 # 基础颜色
@@ -75,8 +75,13 @@ else:
     ]
 
 
-def print_art_column_by_column(art, delay=0.03, start_row=1):
-    """从左到右逐列彩色显示，返回 (rows, cols, padded_lines)"""
+def print_art_column_by_column(art, delay=0.03, start_row=1, extra_arts=None):
+    """
+    从左到右逐列彩色显示艺术字。
+    如果提供了 extra_arts（列表，元素为 (start_row, rows, cols, padded_lines)），
+    则每一帧都会先以随机颜色重绘这些额外的艺术字，从而让它们保持动态颜色闪烁。
+    返回 (rows, cols, padded_lines)。
+    """
     lines = art.split("\n")
     if lines and lines[0] == "":
         lines = lines[1:]
@@ -91,8 +96,23 @@ def print_art_column_by_column(art, delay=0.03, start_row=1):
     sys.stdout.flush()
 
     try:
-        sys.stdout.write("\033[s")
         for c in range(cols):
+            # ---- 如果存在已完成的艺术字，先用随机颜色完整重绘它们 ----
+            if extra_arts:
+                for (sr, erows, ecols, epadded) in extra_arts:
+                    for r in range(erows):
+                        sys.stdout.write(f"\033[{sr + r};1H")
+                        for cc in range(ecols):
+                            ch = epadded[r][cc]
+                            if ch == " ":
+                                sys.stdout.write(" ")
+                            else:
+                                color = random.choice(bright_colors + dark_colors)
+                                sys.stdout.write(f"{color}{ch}")
+                        sys.stdout.write(reset)
+                sys.stdout.flush()
+
+            # ---- 绘制当前艺术字的第 0..c 列 ----
             sys.stdout.write(f"\033[{start_row};1H")
             for r in range(rows):
                 sys.stdout.write(f"\033[{start_row + r};1H")
@@ -106,7 +126,8 @@ def print_art_column_by_column(art, delay=0.03, start_row=1):
             sys.stdout.write(reset)
             sys.stdout.flush()
             time.sleep(delay)
-        sys.stdout.write("\033[u")
+
+        # 光标移到整体下方
         sys.stdout.write(f"\033[{start_row + rows};1H\n")
     finally:
         sys.stdout.write("\033[?25h")
@@ -184,13 +205,18 @@ def _run_startup_banner() -> None:
         lines_ldmnb = [line for line in ldmnb.split("\n") if line != ""]
         rows_first = len(lines_ldmnb)
 
-        # 1. 第一个艺术字
+        # 1. 第一个艺术字正常打印
         info1 = print_art_column_by_column(
             ldmnb, delay=0.03, start_row=banner_start_row
         )
-        # 2. 第二个艺术字
+
+        # 2. 第二个艺术字打印时，把第一个艺术字作为 extra_arts 传入，使其保持彩色闪烁
+        extra_art = (banner_start_row, info1[0], info1[1], info1[2])
         info2 = print_art_column_by_column(
-            ldmbot, delay=0.03, start_row=banner_start_row + rows_first + 1
+            ldmbot,
+            delay=0.03,
+            start_row=banner_start_row + rows_first + 1,
+            extra_arts=[extra_art],
         )
 
         # 3. 统一颜色、亮暗交替闪烁 3 秒
