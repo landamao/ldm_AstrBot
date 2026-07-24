@@ -199,7 +199,7 @@ _register_builtin_tool_config_rule(
 )
 
 _register_builtin_tool_config_rule(
-    ("astrbot_image_caption",),
+    ("ldmbot_image_caption",),
     BuiltinToolConfigRule(
         conditions=(
             BuiltinToolConfigCondition(

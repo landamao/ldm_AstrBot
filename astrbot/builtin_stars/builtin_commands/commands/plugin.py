@@ -15,6 +15,12 @@ class PluginCommands:
     def __init__(self, context: star.Context) -> None:
         self.context = context
 
+    @staticmethod
+    def _plugin_not_found_message(plugin_name: str) -> str:
+        """插件不存在时的统一提示。"""
+        name = (plugin_name or "").strip() or "（空）"
+        return f"插件名「{name}」不存在，使用'/plugin ls'查找插件名"
+
     def _github_proxy(self, *, action: str, target: str = "") -> str:
         """读取服务端配置的 GitHub 加速地址，并打使用日志。"""
         try:
@@ -76,7 +82,7 @@ class PluginCommands:
 
         # 启用在前、停用在后；同组内按名称排序
         def _sort_key(p) -> tuple:
-            return (0 if p.activated else 1, (p.name or "").casefold())
+            return 0 if p.activated else 1, (p.name or "").casefold()
 
         plugins_sorted = sorted(plugins, key=_sort_key)
         enabled = [p for p in plugins_sorted if p.activated]
@@ -142,11 +148,26 @@ class PluginCommands:
             return
         if not plugin_name:
             event.set_result(
-                MessageEventResult().message("/plugin off <插件名> 禁用插件。"),
+                MessageEventResult().message(
+                    "使用方法：/plugin off <插件名> 禁用插件。"
+                ),
             )
             return
-        await self.context._star_manager.turn_off_plugin(plugin_name)  # type: ignore
-        event.set_result(MessageEventResult().message(f"插件 {plugin_name} 已禁用。"))
+        if self.context.get_registered_star(plugin_name) is None:
+            event.set_result(
+                MessageEventResult().message(
+                    self._plugin_not_found_message(plugin_name)
+                ),
+            )
+            return
+        try:
+            await self.context._star_manager.turn_off_plugin(plugin_name)  # type: ignore
+            event.set_result(
+                MessageEventResult().message(f"插件 {plugin_name} 已禁用。")
+            )
+        except Exception as e:
+            logger.error(f"禁用插件失败: {e}")
+            event.set_result(MessageEventResult().message(f"禁用插件失败: {e}"))
 
     async def plugin_on(self, event: AstrMessageEvent, plugin_name: str = "") -> None:
         """启用插件"""
@@ -155,11 +176,26 @@ class PluginCommands:
             return
         if not plugin_name:
             event.set_result(
-                MessageEventResult().message("/plugin on <插件名> 启用插件。"),
+                MessageEventResult().message(
+                    "使用方法：/plugin on <插件名> 启用插件。"
+                ),
             )
             return
-        await self.context._star_manager.turn_on_plugin(plugin_name)  # type: ignore
-        event.set_result(MessageEventResult().message(f"插件 {plugin_name} 已启用。"))
+        if self.context.get_registered_star(plugin_name) is None:
+            event.set_result(
+                MessageEventResult().message(
+                    self._plugin_not_found_message(plugin_name)
+                ),
+            )
+            return
+        try:
+            await self.context._star_manager.turn_on_plugin(plugin_name)  # type: ignore
+            event.set_result(
+                MessageEventResult().message(f"插件 {plugin_name} 已启用。")
+            )
+        except Exception as e:
+            logger.error(f"启用插件失败: {e}")
+            event.set_result(MessageEventResult().message(f"启用插件失败: {e}"))
 
     async def plugin_get(self, event: AstrMessageEvent, plugin_repo: str = "") -> None:
         """安装插件"""
@@ -168,7 +204,9 @@ class PluginCommands:
             return
         if not plugin_repo:
             event.set_result(
-                MessageEventResult().message("/plugin get <插件仓库地址> 安装插件"),
+                MessageEventResult().message(
+                    "使用方法：/plugin get <插件仓库地址> 安装插件。"
+                ),
             )
             return
         logger.info(f"准备从 {plugin_repo} 安装插件。")
@@ -192,12 +230,18 @@ class PluginCommands:
             return
         if not plugin_name:
             event.set_result(
-                MessageEventResult().message("/plugin restart <插件名> 重启插件。"),
+                MessageEventResult().message(
+                    "使用方法：/plugin restart <插件名> 重启插件。"
+                ),
             )
             return
         plugin = self.context.get_registered_star(plugin_name)
         if plugin is None:
-            event.set_result(MessageEventResult().message("未找到此插件。"))
+            event.set_result(
+                MessageEventResult().message(
+                    self._plugin_not_found_message(plugin_name)
+                ),
+            )
             return
         logger.info(f"准备重启插件 {plugin_name}。")
         try:
@@ -228,12 +272,18 @@ class PluginCommands:
             return
         if not plugin_name:
             event.set_result(
-                MessageEventResult().message("/plugin update <插件名> 更新插件。"),
+                MessageEventResult().message(
+                    "使用方法：/plugin update <插件名> 更新插件。"
+                ),
             )
             return
         plugin = self.context.get_registered_star(plugin_name)
         if plugin is None:
-            event.set_result(MessageEventResult().message("未找到此插件。"))
+            event.set_result(
+                MessageEventResult().message(
+                    self._plugin_not_found_message(plugin_name)
+                ),
+            )
             return
         logger.info(f"准备更新插件 {plugin_name}。")
         try:
@@ -253,12 +303,18 @@ class PluginCommands:
         """获取插件帮助"""
         if not plugin_name:
             event.set_result(
-                MessageEventResult().message("/plugin help <插件名> 查看插件信息。"),
+                MessageEventResult().message(
+                    "使用方法：/plugin help <插件名> 查看插件信息。"
+                ),
             )
             return
         plugin = self.context.get_registered_star(plugin_name)
         if plugin is None:
-            event.set_result(MessageEventResult().message("未找到此插件。"))
+            event.set_result(
+                MessageEventResult().message(
+                    self._plugin_not_found_message(plugin_name)
+                ),
+            )
             return
         help_msg = ""
         help_msg += f"\n\n✨ 作者: {plugin.author}\n✨ 版本: {plugin.version}"
@@ -280,13 +336,16 @@ class PluginCommands:
         if len(command_handlers) > 0:
             parts = ["\n\n🔧 指令列表：\n"]
             for i in range(len(command_handlers)):
-                line = f"- {command_names[i]}"
+                cmd = (command_names[i] or "").strip()
+                if cmd and not cmd.startswith("/"):
+                    cmd = f"/{cmd}"
+                line = cmd or "/"
                 if command_handlers[i].desc:
                     line += f": {command_handlers[i].desc}"
                 parts.append(line + "\n")
-            parts.append("\nTip: 指令的触发需要添加唤醒前缀，默认为 /。")
+            parts.append("\n提示：指令的触发需要添加唤醒前缀，默认为 /。")
             help_msg += "".join(parts)
 
-        ret = f"🧩 插件 {plugin_name} 帮助信息：\n" + help_msg
-        ret += "更多帮助信息请查看插件仓库 README。"
+        ret = f"🧩 插件「{plugin_name}」帮助信息：\n" + help_msg
+        ret += "更多帮助信息请查看插件仓库说明文档。"
         event.set_result(MessageEventResult().message(ret).use_t2i(False))

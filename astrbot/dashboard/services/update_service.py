@@ -118,7 +118,11 @@ class UpdateService:
             )
         return UpdateServiceResult(data=progress)
 
-    async def check_update(self, update_type: str | None) -> UpdateServiceResult:
+    async def check_update(
+        self,
+        update_type: str | None,
+        force_refresh: bool = False,
+    ) -> UpdateServiceResult:
         try:
             dashboard_version = await self.get_dashboard_version()
             if update_type == "dashboard":
@@ -130,7 +134,10 @@ class UpdateService:
                 )
             try:
                 update_result = await self.astrbot_updator.check_update(
-                    None, None, False
+                    None,
+                    None,
+                    False,
+                    force_refresh=force_refresh,
                 )
             except Exception as exc:
                 # 限流/网络问题时不把整个检查接口打成 error，方便前端继续工作
@@ -173,9 +180,11 @@ class UpdateService:
             logger.warning(f"检查更新失败: {exc!s} (不影响除项目更新外的正常使用)")
             raise UpdateServiceError(exc.__str__()) from exc
 
-    async def get_releases(self) -> UpdateServiceResult:
+    async def get_releases(self, force_refresh: bool = False) -> UpdateServiceResult:
         try:
-            releases = await self.astrbot_updator.get_releases()
+            releases = await self.astrbot_updator.get_releases(
+                force_refresh=force_refresh,
+            )
             return UpdateServiceResult(data=releases)
         except Exception as exc:
             logger.error(f"/api/update/releases: {traceback.format_exc()}")

@@ -85,35 +85,43 @@ async def _run(operation) -> JSONResponse:
 @router.get("/updates/check")
 async def check_updates(
     update_type: str | None = Query(default=None, alias="type"),
+    force_refresh: bool = Query(default=False),
     _auth: AuthContext = Depends(require_system_scope),
     service: UpdateService = Depends(get_service),
 ):
-    return await _run(lambda: service.check_update(update_type))
+    return await _run(
+        lambda: service.check_update(update_type, force_refresh=force_refresh)
+    )
 
 
 @legacy_router.get("/check")
 async def check_dashboard_updates(
     update_type: str | None = Query(default=None, alias="type"),
+    force_refresh: bool = Query(default=False),
     _username: str = Depends(require_dashboard_user),
     service: UpdateService = Depends(get_service),
 ):
-    return await _run(lambda: service.check_update(update_type))
+    return await _run(
+        lambda: service.check_update(update_type, force_refresh=force_refresh)
+    )
 
 
 @router.get("/updates/releases")
 async def update_releases(
+    force_refresh: bool = Query(default=False),
     _auth: AuthContext = Depends(require_system_scope),
     service: UpdateService = Depends(get_service),
 ):
-    return await _run(service.get_releases)
+    return await _run(lambda: service.get_releases(force_refresh=force_refresh))
 
 
 @legacy_router.get("/releases")
 async def dashboard_update_releases(
+    force_refresh: bool = Query(default=False),
     _username: str = Depends(require_dashboard_user),
     service: UpdateService = Depends(get_service),
 ):
-    return await _run(service.get_releases)
+    return await _run(lambda: service.get_releases(force_refresh=force_refresh))
 
 
 @router.get("/updates/progress/{task_id}")

@@ -71,7 +71,7 @@ async def _compress_image_urls(
 class ImageCaptionTool(FunctionTool[AstrAgentContext]):
     """使用已配置的默认图片转述模型识别图片。"""
 
-    name: str = "astrbot_image_caption"
+    name: str = "ldmbot_image_caption"
     description: str = (
         "Recognize and describe one or more images using the configured default "
         "image caption model. Use this when you need to understand image content "

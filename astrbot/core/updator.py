@@ -347,11 +347,20 @@ class AstrBotUpdator(RepoZipUpdator):
             return []
         return self._parse_ls_remote_tags(output)
 
-    async def fetch_release_info(self, url: str, latest: bool = True) -> list:
-        """优先 GitHub API；失败则 releases.atom；再失败则 git ls-remote。"""
+    async def fetch_release_info(
+        self,
+        url: str,
+        latest: bool = True,
+        force_refresh: bool = False,
+    ) -> list:
+        """优先 GitHub API；失败则 releases.atom；再失败则 git ls-remote。
+
+        force_refresh=True 时跳过内存短缓存，强制重新拉取远端。
+        """
         now = time.time()
         if (
-            self._releases_cache is not None
+            not force_refresh
+            and self._releases_cache is not None
             and now - self._releases_cache_at < self._cache_ttl_seconds
         ):
             return list(self._releases_cache)
@@ -518,13 +527,17 @@ class AstrBotUpdator(RepoZipUpdator):
         url: str | None,
         current_version: str | None,
         consider_prerelease: bool = True,
+        force_refresh: bool = False,
     ) -> ReleaseInfo | None:
         """检查 landamao/ldm_AstrBot 是否有新 Release（仅 tag，不检查 commit）。"""
         import re
 
         current = VERSION if current_version is None else current_version
         try:
-            releases = await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
+            releases = await self.fetch_release_info(
+                self.ASTRBOT_RELEASE_API,
+                force_refresh=force_refresh,
+            )
         except Exception as exc:
             logger.warning(f"获取 Release 列表失败: {exc}")
             raise
@@ -565,11 +578,14 @@ class AstrBotUpdator(RepoZipUpdator):
             )
         return None
 
-    async def get_releases(self) -> list:
+    async def get_releases(self, force_refresh: bool = False) -> list:
         """返回可安装的 GitHub Release 列表（仅 tag，新版本在前）。"""
         releases: list = []
         try:
-            releases = await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
+            releases = await self.fetch_release_info(
+                self.ASTRBOT_RELEASE_API,
+                force_refresh=force_refresh,
+            )
         except Exception as exc:
             logger.warning(f"获取 GitHub Releases 列表失败: {exc}")
             raise

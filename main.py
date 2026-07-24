@@ -258,6 +258,8 @@ def start_startup_banner_async() -> None:
     if not _should_show_startup_banner():
         _startup_banner_thread = None
         return
+    # 横幅一启动就置位：LogManager 初始化时会读到并挂起控制台
+    os.environ["ASTRBOT_PAUSE_CONSOLE"] = "1"
     thread = threading.Thread(
         target=_run_startup_banner,
         name="startup-banner",
@@ -266,12 +268,52 @@ def start_startup_banner_async() -> None:
     thread.start()
     _startup_banner_thread = thread
 
+    # 横幅结束后必定恢复控制台（即使未走到 __main__，也不会永久挂起）
+    def _flush_after_banner() -> None:
+        try:
+            thread.join()
+        finally:
+            try:
+                from astrbot.core import LogManager  # noqa: WPS433
+
+                LogManager.resume_console()
+            except Exception:
+                # LogManager 尚未导入时，清掉环境位即可
+                os.environ.pop("ASTRBOT_PAUSE_CONSOLE", None)
+
+    threading.Thread(
+        target=_flush_after_banner,
+        name="startup-banner-flush",
+        daemon=True,
+    ).start()
+
+
+def is_startup_banner_running() -> bool:
+    """横幅后台线程是否仍在播放。"""
+    thread = _startup_banner_thread
+    return thread is not None and thread.is_alive()
+
 
 def wait_startup_banner() -> None:
-    """等待启动横幅结束，避免与后续日志抢占终端。"""
+    """兼容旧调用：仍会阻塞等待横幅结束（不推荐）。"""
     thread = _startup_banner_thread
     if thread is not None and thread.is_alive():
         thread.join()
+
+
+def arm_startup_banner_console_release() -> None:
+    """真正零阻塞：主线程不 join 横幅。
+
+    若横幅仍在播，确保控制台已挂起；结束恢复由 banner 配套 flush 线程负责。
+    文件日志 / WebUI 日志队列不受影响，业务启动继续前进。
+    """
+    from astrbot.core import LogManager  # noqa: WPS433
+
+    if is_startup_banner_running():
+        LogManager.pause_console()
+        return
+    # 横幅已结束或未启用：确保控制台打开
+    LogManager.resume_console()
 
 
 # 尽早启动横幅，后续 import / bootstrap 与动画并行
@@ -325,6 +367,10 @@ from astrbot.core.utils.io import (  # noqa: E402
     is_dashboard_version_compatible,
 )
 from astrbot.core.utils.runtime_env import is_packaged_desktop_runtime  # noqa: E402
+
+# 日志系统已就绪：若横幅还在播，立刻挂起控制台，避免 import 后续日志打穿动画
+if is_startup_banner_running():
+    LogManager.pause_console()
 
 # 将父目录添加到 sys.path
 sys.path.append(Path(__file__).parent.as_posix())
@@ -452,8 +498,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # 等横幅播完再开始打日志，避免终端光标/内容被抢占
-    wait_startup_banner()
+    # 零阻塞：不 join 横幅；挂起控制台日志，动画结束后再冲刷
+    arm_startup_banner_console_release()
 
     check_env()
 

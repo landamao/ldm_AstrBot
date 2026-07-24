@@ -780,9 +780,10 @@ class ProviderOpenAIOfficial(Provider):
             )
             yield llm_response
         except Exception as e:
+            # 不能静默吞掉：上层 fallback / agent 循环依赖异常来结束本模型并切换。
+            # 旧逻辑只打日志后 return，会导致 run_agent 认为 step 未完成而反复重请求同一模型。
             logger.error("get_final_completion error: " + str(e))
-            # 流式内容已通过 yield 发出，记录错误后正常结束即可
-            return
+            raise
 
     def _extract_reasoning_content(
         self,

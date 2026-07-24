@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+import threading
 import time
 from asyncio import Queue
 from collections import deque
@@ -15,6 +16,10 @@ from astrbot.core.config.default import VERSION
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 CACHED_SIZE = 500
+# 启动横幅期间控制台缓冲上限，防止极端情况下内存膨胀
+_CONSOLE_BUFFER_MAX = 2000
+# main 启动横幅时置位；LogManager 初始化时读取，避免 import 窗口日志打穿动画
+_CONSOLE_PAUSE_ENV = "ASTRBOT_PAUSE_CONSOLE"
 
 if TYPE_CHECKING:
     from loguru import Record
@@ -173,6 +178,10 @@ class LogManager:
     _console_sink_id: int | None = None
     _file_sink_id: int | None = None
     _trace_sink_id: int | None = None
+    # 启动横幅期间挂起控制台输出：日志仍写文件/WebUI，只暂存终端行
+    _console_lock = threading.Lock()
+    _console_paused = False
+    _console_buffer: deque[str] = deque(maxlen=_CONSOLE_BUFFER_MAX)
     _NOISY_LOGGER_LEVELS: dict[str, int] = {
         "aiosqlite": logging.WARNING,
         "filelock": logging.WARNING,
@@ -194,13 +203,57 @@ class LogManager:
         return os.path.join(get_astrbot_data_path(), configured_path)
 
     @classmethod
+    def _console_sink(cls, message) -> None:
+        """可暂停的控制台 sink：横幅动画期间缓冲，结束后一次性刷出。"""
+        text = str(message)
+        with cls._console_lock:
+            if cls._console_paused:
+                cls._console_buffer.append(text)
+                return
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
+    @classmethod
+    def pause_console(cls) -> None:
+        """挂起控制台日志输出（文件 / WebUI 队列不受影响）。"""
+        with cls._console_lock:
+            cls._console_paused = True
+        os.environ[_CONSOLE_PAUSE_ENV] = "1"
+
+    @classmethod
+    def resume_console(cls) -> None:
+        """恢复控制台输出，并冲刷挂起期间缓冲的日志。"""
+        with cls._console_lock:
+            cls._console_paused = False
+            os.environ.pop(_CONSOLE_PAUSE_ENV, None)
+            if not cls._console_buffer:
+                return
+            buffered = "".join(cls._console_buffer)
+            cls._console_buffer.clear()
+        # 锁外写，避免与横幅线程长时间互斥
+        try:
+            sys.stdout.write(buffered)
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    @classmethod
+    def is_console_paused(cls) -> bool:
+        with cls._console_lock:
+            return cls._console_paused
+
+    @classmethod
     def _setup_loguru(cls) -> None:
         if cls._configured:
             return
 
         _loguru.remove()
+        # 若 main 已因横幅置位，初始化即挂起，覆盖 import 窗口
+        if os.environ.get(_CONSOLE_PAUSE_ENV, "").strip() in ("1", "true", "True", "yes"):
+            cls._console_paused = True
+        # 用可暂停 sink 替代直接写 sys.stdout，便于启动横幅零阻塞
         cls._console_sink_id = _loguru.add(
-            sys.stdout,
+            cls._console_sink,
             level="DEBUG",
             colorize=True,
             filter=lambda record: not record["extra"].get("is_trace", False),
