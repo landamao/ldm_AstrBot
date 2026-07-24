@@ -31,6 +31,7 @@ from astrbot.core.star.star_manager import (
     PluginVersionUnsupportedError,
 )
 from astrbot.core.star.updator import PLUGIN_METADATA_FILENAMES
+from astrbot.core.utils.github_proxy import log_github_proxy_usage, resolve_github_proxy
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_temp_path
 
 import jwt
@@ -116,6 +117,25 @@ class PluginService:
             EventType.OnPluginErrorEvent: "插件报错时",
         }
         self._logo_cache: dict[str, str] = {}
+
+    def _resolve_proxy(
+        self,
+        proxy: str | None = None,
+        *,
+        action: str = "插件操作",
+        target: str = "",
+    ) -> str:
+        """请求体 proxy 优先；为空时回落服务端 github_proxy，并打使用日志。"""
+        config = getattr(self.core_lifecycle, "astrbot_config", None)
+        explicit = (proxy or "").strip()
+        resolved = resolve_github_proxy(proxy, config)
+        source = "请求参数" if explicit else ("服务端配置" if resolved else "无")
+        return log_github_proxy_usage(
+            resolved,
+            action=action,
+            target=target,
+            source=source,
+        )
 
     @staticmethod
     def _payload(data: object) -> dict[str, Any]:
@@ -1624,9 +1644,11 @@ class PluginService:
         if not repo_url:
             raise PluginServiceError("缺少插件仓库地址")
 
-        proxy: str | None = payload.get("proxy", None)
-        if proxy:
-            proxy = proxy.removesuffix("/")
+        proxy = self._resolve_proxy(
+            payload.get("proxy", None),
+            action="安装插件",
+            target=repo_url,
+        )
         # 有加速时再兜底一次：CDN 直链无法套 gh-proxy 前缀
         if proxy and download_url:
             logger.info(
@@ -1639,7 +1661,7 @@ class PluginService:
             logger.info(f"正在安装插件 {repo_url}")
             plugin_info = await self.plugin_manager.install_plugin(
                 repo_url,
-                proxy or "",
+                proxy,
                 ignore_version_check=ignore_version_check,
                 download_url=download_url,
             )
@@ -1684,7 +1706,11 @@ class PluginService:
         if not repo_url.startswith(("http://", "https://")):
             repo_url = f"https://github.com/{repo_url}"
 
-        proxy = str(payload.get("proxy") or "").strip().removesuffix("/")
+        proxy = self._resolve_proxy(
+            payload.get("proxy"),
+            action="校验插件仓库",
+            target=repo_url,
+        )
         try:
             (
                 author,
@@ -1889,7 +1915,11 @@ class PluginService:
         self._ensure_not_demo()
         payload = data if isinstance(data, dict) else {}
         dir_name = str(payload.get("dir_name") or "").strip()
-        proxy = str(payload.get("proxy") or "").strip()
+        proxy = self._resolve_proxy(
+            payload.get("proxy"),
+            action="更新失败插件",
+            target=dir_name,
+        )
         if not dir_name:
             raise PluginServiceError("缺少失败插件目录名")
 
@@ -1993,7 +2023,11 @@ class PluginService:
         self._ensure_not_demo()
         payload = data if isinstance(data, dict) else {}
         plugin_name = payload["name"]
-        proxy = str(payload.get("proxy") or "").strip().removesuffix("/")
+        proxy = self._resolve_proxy(
+            payload.get("proxy"),
+            action="更新插件",
+            target=plugin_name,
+        )
         update_info = await self.resolve_market_update_info(plugin_name)
         download_url = str(update_info.get("download_url") or "").strip()
         # 前端传了 GitHub 加速时，改走仓库下载，代理才能生效（市场 CDN 无法套 gh-proxy）
@@ -2005,7 +2039,7 @@ class PluginService:
             download_url = ""
         logger.info(f"正在更新插件 {plugin_name}")
         await self.plugin_manager.update_plugin(
-            plugin_name, proxy or "", download_url=download_url
+            plugin_name, proxy, download_url=download_url
         )
         await self.refresh_plugin_install_source_after_update(plugin_name, update_info)
         await self.plugin_manager.reload(plugin_name)
@@ -2017,7 +2051,11 @@ class PluginService:
         self._ensure_not_demo()
         payload = data if isinstance(data, dict) else {}
         plugin_names: list[str] = payload.get("names") or []
-        proxy: str = payload.get("proxy", "")
+        proxy = self._resolve_proxy(
+            payload.get("proxy", ""),
+            action="批量更新插件",
+            target=f"{len(plugin_names)}个",
+        )
 
         if not isinstance(plugin_names, list) or not plugin_names:
             raise PluginServiceError("插件列表不能为空")

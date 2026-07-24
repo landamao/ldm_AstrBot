@@ -1,7 +1,7 @@
 # 🚀 **[ldmbot](https://github.com/landamao/ldm_AstrBot)** · 个人魔改版 AstrBot
 
 > **高度定制 · 拒绝官方覆盖**  
-> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5–4.26.7 修复合入 · 二次修改 · 当前 ldm 版本 **v4.26.23**
+> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5–4.26.7 修复合入 · 二次修改 · 当前 ldm 版本 **v4.26.24**
 
 ---
 
@@ -77,6 +77,8 @@
 ### 9. 定制版WebUI界面，LOGO改为松坂砂糖头像，名字改为ldm
 ### 10. 去除了astrbot、webui更新
 ### 11. 日志颜色改为亮色，info日志改为绿色，黑色背景下观感更好，原来黑色背景加暗色字体，看日志极费眼力
+
+更多特性请看更新文档：[CHANGELOG.md](./CHANGELOG.md)
 
 ## 📄 手动安装教程
 

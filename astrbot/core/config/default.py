@@ -273,6 +273,10 @@ DEFAULT_CONFIG = {
         "image_caption_group_list": [],
         # 同一群两次自动理解图片的最小间隔（秒），0 表示不限制，用于防止表情包刷屏。
         "image_caption_min_interval": 0,
+        # 延迟图片转述：仅在真正唤醒 LLM 时，对即将注入上下文的图片做转述（省 token，略增首响延迟）。
+        "image_caption_lazy": True,
+        # 延迟/即时转述时的 VLM 并发上限（相同 MD5 会复用转述结果）。
+        "image_caption_concurrency": 2,
         "active_reply": {
             "enable": False,
             "method": "possibility_reply",
@@ -293,6 +297,7 @@ DEFAULT_CONFIG = {
     "t2i_use_file_service": False,
     "t2i_active_template": "base",
     "http_proxy": "",
+    "github_proxy": "",
     "no_proxy": ["localhost", "127.0.0.1", "::1", "10.*", "192.168.*"],
     "dashboard": {
         "enable": True,
@@ -3081,6 +3086,12 @@ CONFIG_METADATA_2 = {
                     "image_caption_min_interval": {
                         "type": "float",
                     },
+                    "image_caption_lazy": {
+                        "type": "bool",
+                    },
+                    "image_caption_concurrency": {
+                        "type": "int",
+                    },
                     "image_caption_prompt": {
                         "type": "string",
                     },
@@ -3125,6 +3136,11 @@ CONFIG_METADATA_2 = {
             },
             "http_proxy": {
                 "type": "string",
+            },
+            "github_proxy": {
+                "type": "string",
+                "description": "GitHub 加速地址",
+                "hint": "下载插件或更新 ldm 时使用的 GitHub URL 前缀镜像（如 https://gh-proxy.com）。由 WebUI 网络设置维护；聊天指令 /plugin update、/plugin get 也会读取此值。",
             },
             "no_proxy": {
                 "description": "直连地址列表",
@@ -4616,6 +4632,24 @@ CONFIG_METADATA_3 = {
                             "provider_ltm_settings.image_caption": True,
                         },
                     },
+                    "provider_ltm_settings.image_caption_lazy": {
+                        "description": "延迟图片转述",
+                        "type": "bool",
+                        "hint": "开启后，群聊图片不会在收到时立刻转述，而是在真正唤醒 LLM、注入群聊上下文时才转述。可减少未唤醒时的无效 token，但会略增首次回复等待。相同图片按 MD5 复用转述结果。",
+                        "condition": {
+                            "provider_ltm_settings.group_icl_enable": True,
+                            "provider_ltm_settings.image_caption": True,
+                        },
+                    },
+                    "provider_ltm_settings.image_caption_concurrency": {
+                        "description": "图片转述并发数",
+                        "type": "int",
+                        "hint": "唤醒 LLM 时批量转述图片的最大并发请求数。建议 1-4。相同 MD5 图片会复用，不重复请求。",
+                        "condition": {
+                            "provider_ltm_settings.group_icl_enable": True,
+                            "provider_ltm_settings.image_caption": True,
+                        },
+                    },
                 },
             },
             "active_reply": {
@@ -4817,6 +4851,12 @@ CONFIG_METADATA_3_SYSTEM = {
                         "description": "代理",
                         "type": "string",
                         "hint": "启用后，会以添加环境变量的方式设置代理。支持 http://、https://、socks5:// 格式，例如：http://127.0.0.1:7890 或 socks5://127.0.0.1:7891",
+                    },
+                    "github_proxy": {
+                        "description": "GitHub 加速地址",
+                        "type": "string",
+                        "hint": "下载插件或更新 ldm 时使用的 GitHub URL 前缀镜像。由网络页「GitHub 加速」控件维护；聊天指令也会使用。",
+                        "invisible": True,
                     },
                     "no_proxy": {
                         "description": "直连地址列表",

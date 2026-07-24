@@ -6,7 +6,50 @@
 ---
 
 <details>
-<summary><strong>[4.26.23] — 2026-07-24</strong></summary>
+<summary><strong>[4.26.24] — 2026-07-24</strong> — 群聊延迟图片转述；GitHub 加速服务端化</summary>
+
+基于 ldm v4.26.23：群聊延迟图片转述，以及 GitHub 加速改为服务端配置并贯通指令。
+
+### 新增
+
+- **群聊「延迟图片转述」**
+  - 开启「自动理解图片」后，默认不再一收到群图就调 VLM
+  - 只在真正唤醒 LLM、注入群聊上下文时，再批量转述即将用到的图片
+  - 相同图片按文件 MD5 复用结果；可配置转述并发数（默认 2）
+  - 配置路径：扩展功能 → 群聊上下文感知
+    - 延迟图片转述（默认开；关则恢复收到就转述）
+    - 图片转述并发数（默认 2）
+  - 群黑白名单、最小间隔仍在「标记待转述」时生效，用于防刷图
+
+- **GitHub 加速服务端配置**
+  - 设置 → 网络 → GitHub 加速 写入服务端 `github_proxy`，换浏览器一致
+  - `/plugin update`、`/plugin get` 自动使用服务端加速
+  - WebUI 插件安装/更新、本体更新：请求参数优先，否则回落服务端
+  - 日志标明是否使用加速及来源（请求参数 / 服务端配置 / 无）
+  - 自定义加速地址输入框加宽并单独成行
+
+### 修复
+
+- **延迟转述时 temp 图片被提前删掉**
+  - 入站图片不再在消息结束时立刻清理，避免唤醒时出现 `No such file`
+  - 磁盘占用仍由 `temp_dir_max_size` 兜底清理
+
+### 调整
+
+- **`/plugin update` 进度提示**
+  - 更新开始先回复：`正在更新「插件名」插件…`，完成后再回成功/失败
+
+### 说明
+
+- 延迟模式会增加唤醒后等待时间（取决于待转述张数与 VLM 延迟）
+- MD5 缓存为进程内 LRU，重启后清空
+- 不迁移浏览器旧 localStorage 加速项；需在 WebUI 重新选择一次加速
+- 本功能只处理「注入给模型的群聊历史里的图」；你这次真正 @ / 唤醒机器人的那条消息里的图，仍走主对话图片能力（默认转述模型 / 模型识图）
+
+</details>
+
+<details>
+<summary><strong>[4.26.23] — 2026-07-24</strong> — 撤回框架侧历史去重误判</summary>
 
 基于 ldm v4.26.22：撤回误加在框架侧的「历史上下文去重」补丁，并澄清根因归属。
 
@@ -30,7 +73,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.22] — 2026-07-23</strong></summary>
+<summary><strong>[4.26.22] — 2026-07-23</strong> — 启动横幅动画与工具文案</summary>
 
 基于 ldm v4.26.21 的启动体验与工具相关小调整。
 
@@ -52,7 +95,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.21] — 2026-07-20</strong></summary>
+<summary><strong>[4.26.21] — 2026-07-20</strong> — 修复分段发完仍写打断提示</summary>
 
 基于 ldm v4.26.20 的打断落库修复。
 
@@ -75,7 +118,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.20] — 2026-07-19</strong></summary>
+<summary><strong>[4.26.20] — 2026-07-19</strong> — 修复 QQ 误发用量 JSON；Agent 用量日志</summary>
 
 基于 ldm v4.26.19 的小修复。
 
@@ -98,7 +141,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.19] — 2026-07-19</strong></summary>
+<summary><strong>[4.26.19] — 2026-07-19</strong> — 合入官方 4.26.5–4.26.7 稳定性修复</summary>
 
 基于 ldm v4.26.18 的增量更新。合入官方 AstrBot **4.26.5→4.26.7** 一批稳定性修复，并补充本地增强。
 
@@ -191,7 +234,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.18] — 2026-07-18</strong></summary>
+<summary><strong>[4.26.18] — 2026-07-18</strong> — 统一源码与 WebUI 版本号</summary>
 
 基于 ldm v4.26.17 的增量更新。
 
@@ -220,7 +263,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.17] — 2026-07-17</strong></summary>
+<summary><strong>[4.26.17] — 2026-07-17</strong> — 提供商响应日志；/plugin 列表与帮助</summary>
 
 基于 ldm v4.26.16 的增量更新。
 
@@ -328,7 +371,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.16] — 2026-07-16</strong></summary>
+<summary><strong>[4.26.16] — 2026-07-16</strong> — 群聊自动理解图片：黑白名单与最小间隔</summary>
 
 基于 ldm v4.26.15 的增量更新。
 
@@ -376,7 +419,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.15] — 2026-07-15</strong></summary>
+<summary><strong>[4.26.15] — 2026-07-15</strong> — /stop 强制停止；提供商展示名</summary>
 
 基于 ldm v4.26.14 的增量更新。
 
@@ -410,7 +453,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.14] — 2026-07-14</strong></summary>
+<summary><strong>[4.26.14] — 2026-07-14</strong> — 始终使用默认图片转述；私聊不引用</summary>
 
 基于 ldm v4.26.13 的增量更新。
 
@@ -451,7 +494,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.13] — 2026-07-14</strong></summary>
+<summary><strong>[4.26.13] — 2026-07-14</strong> — 修复 WebUI Markdown 相对路径资源</summary>
 
 基于 ldm v4.26.12 的增量更新。
 
@@ -477,7 +520,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.12] — 2026-07-14</strong></summary>
+<summary><strong>[4.26.12] — 2026-07-14</strong> — 人格提示词本地副本双向同步</summary>
 
 基于 ldm v4.26.11 的增量更新。
 
@@ -529,7 +572,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.11] — 2026-07-13</strong></summary>
+<summary><strong>[4.26.11] — 2026-07-13</strong> — 更新后面板自动全量加载等 WebUI 体验</summary>
 
 基于 ldm v4.26.10 的增量更新。
 
@@ -564,7 +607,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.10] — 2026-07-13</strong></summary>
+<summary><strong>[4.26.10] — 2026-07-13</strong> — 备份下载不再带 JWT；OpenAI 重试修复</summary>
 
 基于 ldm v4.26.9 的增量更新。
 
@@ -603,7 +646,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.9] — 2026-07-13</strong></summary>
+<summary><strong>[4.26.9] — 2026-07-13</strong> — 改密后立刻使所有登录会话失效</summary>
 
 基于 ldm v4.26.8 的增量更新。
 
@@ -631,7 +674,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.8] — 2026-07-13</strong></summary>
+<summary><strong>[4.26.8] — 2026-07-13</strong> — 静态资源长缓存；首次登录安全提示</summary>
 
 基于 ldm v4.26.7 的增量更新。
 
@@ -664,7 +707,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.7] — 2026-07-13</strong></summary>
+<summary><strong>[4.26.7] — 2026-07-13</strong> — 仅检查正式 Release；日志体验优化</summary>
 
 基于 ldm v4.26.6 的增量更新。
 
@@ -695,7 +738,7 @@
 </details>
 
 <details>
-<summary><strong>[4.26.6] — 2026-07-12</strong></summary>
+<summary><strong>[4.26.6] — 2026-07-12</strong> — ldm 魔改首发：自更新与分段回复等</summary>
 
 基于官方 AstrBot v4.26.5 的 ldm 魔改发版。  
 更新源：`landamao/ldm_AstrBot`（可用环境变量覆盖）。

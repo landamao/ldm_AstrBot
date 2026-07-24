@@ -286,7 +286,12 @@ class RepoZipUpdator:
             proxy = proxy.rstrip("/")
             release_url = f"{proxy}/{release_url}"
             logger.info(
-                f"检查到设置了镜像站，将使用镜像站下载 {author}/{repo} 仓库源码: {release_url}",
+                f"GitHub 加速: 使用中 动作=下载仓库源码 目标={author}/{repo} "
+                f"代理={proxy} 地址={release_url}"
+            )
+        else:
+            logger.info(
+                f"GitHub 加速: 未使用 动作=下载仓库源码 目标={author}/{repo}"
             )
 
         await self._download_file(release_url, target_path + ".zip")

@@ -25,6 +25,7 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_data_path,
     get_astrbot_temp_path,
 )
+from astrbot.core.utils.github_proxy import log_github_proxy_usage, resolve_github_proxy
 from astrbot.core.utils.io import (
     download_dashboard as _download_dashboard,
 )
@@ -199,8 +200,17 @@ class UpdateService:
             latest = False
 
         proxy: str | None = payload.get("proxy", None)
-        if proxy:
-            proxy = proxy.removesuffix("/")
+        explicit = (proxy or "").strip() if proxy is not None else ""
+        proxy = resolve_github_proxy(
+            proxy,
+            getattr(self.core_lifecycle, "astrbot_config", None),
+        ) or None
+        log_github_proxy_usage(
+            proxy,
+            action="更新本体",
+            target=version or "latest",
+            source="请求参数" if explicit else ("服务端配置" if proxy else "无"),
+        )
 
         existing_task = self._update_tasks.get(progress_id)
         if existing_task and not existing_task.done():

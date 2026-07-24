@@ -1,9 +1,12 @@
 import asyncio
 import datetime
+import hashlib
 import random
+import re
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
+from pathlib import Path
 
 from astrbot import logger
 from astrbot.api import star
@@ -24,6 +27,7 @@ from astrbot.api.platform import MessageType
 from astrbot.api.provider import Provider, ProviderRequest
 from astrbot.core.agent.message import TextPart
 from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
+from astrbot.core.utils.media_utils import file_uri_to_path
 
 """
 Group chat context awareness.
@@ -39,6 +43,11 @@ GROUP_HISTORY_FOOTER = "\n--- END CONTEXT ---\n</system_reminder>"
 DEFAULT_GROUP_MESSAGE_MAX_CNT = 300
 # 黑白名单通配符，与插件 Tools.py 解析黑白名单一致
 _ACCESS_WILDCARDS = ("*", "all")
+# 延迟图片转述占位： [Image:__LAZY__:<token>]
+_LAZY_IMAGE_RE = re.compile(r"\[Image:__LAZY__:([0-9a-fA-F]+)\]")
+# MD5 转述缓存上限（按内容复用）
+_CAPTION_CACHE_MAX = 512
+DEFAULT_IMAGE_CAPTION_CONCURRENCY = 2
 
 
 class GroupChatContext:
@@ -48,8 +57,19 @@ class GroupChatContext:
         self._locks: dict[str, asyncio.Lock] = {}
         self.raw_records: dict[str, deque[str]] = defaultdict(deque)
         self._record_ids: dict[str, deque[str]] = defaultdict(deque)
-        # 各会话最近一次自动理解图片的时间戳（monotonic 秒）
+        # 各会话最近一次「标记待转述图片」的时间戳（monotonic 秒）
         self._image_caption_last_at: dict[str, float] = {}
+        # token -> 图片 URL/路径（记录阶段写入，唤醒 LLM 时解析）
+        self._pending_images: dict[str, str] = {}
+        # md5 -> 转述文本（跨会话复用相同图片）
+        self._caption_cache: OrderedDict[str, str] = OrderedDict()
+        # md5 -> 进行中的转述 Future，避免同图并发重复请求
+        self._caption_inflight: dict[str, asyncio.Future] = {}
+        # 保护 cache/inflight 注册的竞态（check-then-set）
+        self._caption_cache_lock = asyncio.Lock()
+        # 全局并发信号量（按配置上限创建）
+        self._caption_sem: asyncio.Semaphore | None = None
+        self._caption_sem_limit: int = 0
 
     def _get_lock(self, umo: str) -> asyncio.Lock:
         lock = self._locks.get(umo)
@@ -57,6 +77,13 @@ class GroupChatContext:
             lock = asyncio.Lock()
             self._locks[umo] = lock
         return lock
+
+    def _get_caption_semaphore(self, concurrency: int) -> asyncio.Semaphore:
+        limit = max(1, int(concurrency or DEFAULT_IMAGE_CAPTION_CONCURRENCY))
+        if self._caption_sem is None or self._caption_sem_limit != limit:
+            self._caption_sem = asyncio.Semaphore(limit)
+            self._caption_sem_limit = limit
+        return self._caption_sem
 
     def cfg(self, event: AstrMessageEvent):
         cfg = self.context.get_config(umo=event.unified_msg_origin)
@@ -70,6 +97,15 @@ class GroupChatContext:
         image_caption_min_interval = _non_negative_float(
             group_context_cfg.get("image_caption_min_interval", 0),
             0.0,
+        )
+        # 延迟转述：默认开启。关闭则恢复「收到消息立刻转述」旧行为。
+        image_caption_lazy = bool(group_context_cfg.get("image_caption_lazy", True))
+        image_caption_concurrency = _positive_int(
+            group_context_cfg.get(
+                "image_caption_concurrency",
+                DEFAULT_IMAGE_CAPTION_CONCURRENCY,
+            ),
+            DEFAULT_IMAGE_CAPTION_CONCURRENCY,
         )
         active_reply = group_context_cfg["active_reply"]
         enable_active_reply = active_reply.get("enable", False)
@@ -90,6 +126,8 @@ class GroupChatContext:
             "image_caption_provider_id": image_caption_provider_id,
             "image_caption_group_list": image_caption_group_list,
             "image_caption_min_interval": image_caption_min_interval,
+            "image_caption_lazy": image_caption_lazy,
+            "image_caption_concurrency": image_caption_concurrency,
             "enable_active_reply": enable_active_reply,
             "ar_method": ar_method,
             "ar_possibility": ar_possibility,
@@ -101,6 +139,7 @@ class GroupChatContext:
         """判断当前消息是否应进行自动理解图片（群黑白名单 + 最小间隔）。
 
         通过检查后立刻占用时间戳，避免并发消息都在请求 VLM 前通过间隔检查。
+        延迟模式下：占用表示「标记为待转述」，真正请求 VLM 推迟到唤醒 LLM 时。
         """
         if not cfg["image_caption"]:
             return False
@@ -132,13 +171,51 @@ class GroupChatContext:
                     f"最小间隔={min_interval:g}秒 | 剩余约={剩余:.2f}秒 | 已跳过"
                 )
                 return False
-            # 请求 VLM 前立刻占用，防止并发刷图全部放行
+            # 请求 VLM / 标记待转述前立刻占用，防止并发刷图全部放行
             self._image_caption_last_at[umo] = now
             return True
 
         # 无间隔限制时也记录最近一次，便于后续改配置后立即生效
         self._image_caption_last_at[umo] = now
         return True
+
+    def _cache_get(self, md5: str) -> str | None:
+        caption = self._caption_cache.get(md5)
+        if caption is None:
+            return None
+        # LRU：命中后移到末尾
+        self._caption_cache.move_to_end(md5)
+        return caption
+
+    def _cache_put(self, md5: str, caption: str) -> None:
+        if not md5 or not caption:
+            return
+        self._caption_cache[md5] = caption
+        self._caption_cache.move_to_end(md5)
+        while len(self._caption_cache) > _CAPTION_CACHE_MAX:
+            self._caption_cache.popitem(last=False)
+
+    async def _calc_image_md5(self, image_url: str) -> str | None:
+        """下载/读取图片字节并计算 MD5；失败返回 None。"""
+        try:
+            # 已是本地路径时直接读，避免再走 MediaResolver 产生新临时文件
+            path = image_url
+            if path.startswith("file://"):
+                path = file_uri_to_path(path)
+            if not (path and Path(path).is_file()):
+                path = await Image(file=image_url).convert_to_file_path()
+            # 分块读，避免超大图占满内存
+            h = hashlib.md5()
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception as e:
+            logger.warning(f"群聊上下文:自动理解图片:计算MD5失败 | {e}")
+            return None
 
     async def get_image_caption(
         self,
@@ -161,6 +238,218 @@ class GroupChatContext:
             persist=False,
         )
         return response.completion_text
+
+    async def _caption_with_md5_cache(
+        self,
+        image_url: str,
+        cfg: dict,
+        *,
+        concurrency: int,
+        统计: dict | None = None,
+        预计算md5: str | None = None,
+        记入md5: bool = True,
+    ) -> str:
+        """按 MD5 复用转述；相同 MD5 并发时只请求一次 VLM。
+
+        统计（可选，就地累加）字段：
+        - 缓存命中：已有缓存，直接复用
+        - 在途复用：等待同 MD5 进行中的请求
+        - 实际请求：真正调用视觉模型的次数
+        - md5列表：本批成功算出的 md5（含重复）
+        预计算md5：上游已算好时传入，避免重复读盘。
+        记入md5：在途失败递归重试时传 False，避免同一张图双计 md5。
+        """
+        md5 = 预计算md5 if 预计算md5 is not None else await self._calc_image_md5(image_url)
+        fut: asyncio.Future | None = None
+        if md5:
+            if 统计 is not None and 记入md5:
+                统计.setdefault("md5列表", []).append(md5)
+            async with self._caption_cache_lock:
+                cached = self._cache_get(md5)
+                if cached is not None:
+                    if 统计 is not None:
+                        统计["缓存命中"] = int(统计.get("缓存命中", 0)) + 1
+                    logger.info(
+                        f"群聊上下文:自动理解图片:MD5复用 | md5={md5[:12]}… | 跳过VLM"
+                    )
+                    return cached
+
+                inflight = self._caption_inflight.get(md5)
+                if inflight is not None and not inflight.done():
+                    wait_fut = inflight
+                else:
+                    wait_fut = None
+                    loop = asyncio.get_running_loop()
+                    fut = loop.create_future()
+                    self._caption_inflight[md5] = fut
+
+            if wait_fut is not None:
+                try:
+                    if 统计 is not None:
+                        统计["在途复用"] = int(统计.get("在途复用", 0)) + 1
+                    return await asyncio.shield(wait_fut)
+                except Exception:
+                    # 在途失败则本请求自行再试；md5 已记过，递归不再双计
+                    return await self._caption_with_md5_cache(
+                        image_url,
+                        cfg,
+                        concurrency=concurrency,
+                        统计=统计,
+                        预计算md5=md5,
+                        记入md5=False,
+                    )
+        else:
+            md5 = ""
+
+        sem = self._get_caption_semaphore(concurrency)
+        try:
+            async with sem:
+                if 统计 is not None:
+                    统计["实际请求"] = int(统计.get("实际请求", 0)) + 1
+                caption = await self.get_image_caption(
+                    image_url,
+                    cfg["image_caption_provider_id"],
+                    cfg["image_caption_prompt"],
+                )
+            if md5 and caption:
+                async with self._caption_cache_lock:
+                    self._cache_put(md5, caption)
+            if fut is not None and not fut.done():
+                fut.set_result(caption)
+            return caption
+        except Exception as e:
+            if fut is not None and not fut.done():
+                fut.set_exception(e)
+            raise
+        finally:
+            if md5 and fut is not None:
+                async with self._caption_cache_lock:
+                    if self._caption_inflight.get(md5) is fut:
+                        self._caption_inflight.pop(md5, None)
+
+    @staticmethod
+    def _format_caption_stats(统计: dict, 待转述: int) -> str:
+        """把转述统计整理成 info 日志片段。"""
+        md5列表: list[str] = list(统计.get("md5列表") or [])
+        实际请求 = int(统计.get("实际请求", 0))
+        不同md5 = len(set(md5列表)) if md5列表 else 0
+        return (
+            f"转述完成={待转述} | "
+            f"不同MD5={不同md5} | "
+            f"实际请求VLM={实际请求}次"
+        )
+
+    async def _resolve_lazy_captions(
+        self,
+        records: list[str],
+        cfg: dict,
+        event: AstrMessageEvent,
+    ) -> list[str]:
+        """唤醒 LLM 时：把待注入上下文里的延迟转述占位替换为真实描述。"""
+        if not records or not cfg.get("image_caption"):
+            return records
+
+        # 收集本批待解析 token（保持出现顺序，去重）
+        tokens: list[str] = []
+        seen: set[str] = set()
+        for text in records:
+            for token in _LAZY_IMAGE_RE.findall(text):
+                if token not in seen:
+                    seen.add(token)
+                    tokens.append(token)
+
+        if not tokens:
+            return records
+
+        concurrency = int(
+            cfg.get("image_caption_concurrency") or DEFAULT_IMAGE_CAPTION_CONCURRENCY
+        )
+        统计: dict = {
+            "缓存命中": 0,
+            "在途复用": 0,
+            "实际请求": 0,
+            "md5列表": [],
+        }
+
+        # 1) 先整批算 MD5（不调 VLM），用于请求前预统计
+        token_urls: dict[str, str] = {}
+        token_md5: dict[str, str | None] = {}
+        md5_jobs: list[tuple[str, str]] = []
+        for token in tokens:
+            url = self._pending_images.get(token)
+            if not url:
+                token_urls[token] = ""
+                token_md5[token] = None
+                continue
+            token_urls[token] = url
+            md5_jobs.append((token, url))
+
+        if md5_jobs:
+            md5_results = await asyncio.gather(
+                *[self._calc_image_md5(url) for _, url in md5_jobs]
+            )
+            for (token, _), md5 in zip(md5_jobs, md5_results):
+                token_md5[token] = md5
+                if md5:
+                    统计.setdefault("md5列表", []).append(md5)
+
+        md5列表 = list(统计.get("md5列表") or [])
+        不同md5 = len(set(md5列表)) if md5列表 else 0
+        # 算不出 MD5 的图无法复用，每张各自算一次预计请求
+        无md5张数 = sum(1 for t in tokens if token_urls.get(t) and not token_md5.get(t))
+        实际需请求 = 0
+        async with self._caption_cache_lock:
+            for md5 in set(md5列表):
+                if self._cache_get(md5) is None:
+                    实际需请求 += 1
+        实际需请求 += 无md5张数
+
+        logger.info(
+            f"群聊上下文:自动理解图片:延迟转述 | "
+            f"会话={event.unified_msg_origin} | "
+            f"待转述={len(tokens)} | "
+            f"不同MD5={不同md5} | "
+            f"实际需请求VLM={实际需请求}次 | "
+            f"并发={max(1, concurrency)}"
+        )
+
+        async def _one(token: str) -> tuple[str, str]:
+            url = token_urls.get(token) or ""
+            if not url:
+                return token, "[Image]"
+            try:
+                caption = await self._caption_with_md5_cache(
+                    url,
+                    cfg,
+                    concurrency=concurrency,
+                    统计=统计,
+                    预计算md5=token_md5.get(token),
+                    记入md5=False,  # md5 已在预统计阶段记入
+                )
+                if caption:
+                    return token, f"[Image: {caption}]"
+            except Exception as e:
+                logger.error(f"群聊上下文:自动理解图片:延迟转述失败 | token={token} | {e}")
+            return token, "[Image]"
+
+        results = await asyncio.gather(*[_one(t) for t in tokens])
+        replace_map = {token: text for token, text in results}
+
+        # 清理已解析 pending（成功或失败都不再保留 URL）
+        for token in tokens:
+            self._pending_images.pop(token, None)
+
+        logger.info(
+            f"群聊上下文:自动理解图片:延迟转述完成 | "
+            f"会话={event.unified_msg_origin} | "
+            f"{self._format_caption_stats(统计, len(tokens))}"
+        )
+
+        def _sub(match: re.Match) -> str:
+            token = match.group(1)
+            return replace_map.get(token, "[Image]")
+
+        return [_LAZY_IMAGE_RE.sub(_sub, text) for text in records]
 
     async def need_active_reply(self, event: AstrMessageEvent) -> bool:
         cfg = self.cfg(event)
@@ -186,7 +475,12 @@ class GroupChatContext:
         umo = event.unified_msg_origin
         lock = self._get_lock(umo)
         async with lock:
-            cnt = len(self.raw_records.get(umo, deque()))
+            records = self.raw_records.get(umo, deque())
+            # 清理本会话尚未解析的延迟转述 token
+            for text in records:
+                for token in _LAZY_IMAGE_RE.findall(text):
+                    self._pending_images.pop(token, None)
+            cnt = len(records)
             self.raw_records.pop(umo, None)
             self._record_ids.pop(umo, None)
         self._locks.pop(umo, None)
@@ -207,7 +501,13 @@ class GroupChatContext:
             record_id = uuid.uuid4().hex
             records.append(final_message)
             record_ids.append(record_id)
-            _trim_left(records, cfg["group_message_max_cnt"], record_ids)
+            # 超出上限时同步清理被挤掉记录上的 pending 图片
+            while len(records) > cfg["group_message_max_cnt"]:
+                dropped = records.popleft()
+                if record_ids:
+                    record_ids.popleft()
+                for token in _LAZY_IMAGE_RE.findall(dropped):
+                    self._pending_images.pop(token, None)
             event.set_extra("_group_context_record_id", record_id)
             event.set_extra("_group_context_raw_idx", len(records) - 1)
 
@@ -221,6 +521,8 @@ class GroupChatContext:
             not isinstance(prompt_idx, int) or prompt_idx < 0
         ):
             return
+
+        cfg = self.cfg(event)
 
         async with self._get_lock(umo):
             records = self.raw_records.get(umo)
@@ -236,6 +538,8 @@ class GroupChatContext:
                 return
 
             records_to_inject = raw_list[:prompt_idx]
+            # 当前触发消息不会注入群聊上下文（它走主 prompt），清理其上的延迟占位，避免 pending 泄漏
+            current_record = raw_list[prompt_idx] if 0 <= prompt_idx < len(raw_list) else ""
             remaining = raw_list[prompt_idx + 1 :]
             remaining_ids = id_list[prompt_idx + 1 :] if id_list else []
             records.clear()
@@ -245,17 +549,32 @@ class GroupChatContext:
                 record_ids.clear()
                 record_ids.extend(remaining_ids)
 
-        if records_to_inject:
-            req.extra_user_content_parts.append(
-                TextPart(text=_format_group_history_block(records_to_inject))
+        if current_record:
+            for token in _LAZY_IMAGE_RE.findall(current_record):
+                self._pending_images.pop(token, None)
+
+        if not records_to_inject:
+            return
+
+        # 真正唤醒 LLM 时，再对即将注入的上下文做图片转述
+        if cfg.get("image_caption") and cfg.get("image_caption_lazy", True):
+            records_to_inject = await self._resolve_lazy_captions(
+                records_to_inject,
+                cfg,
+                event,
             )
+
+        req.extra_user_content_parts.append(
+            TextPart(text=_format_group_history_block(records_to_inject))
+        )
 
     async def _format_message(self, event: AstrMessageEvent, cfg: dict) -> str:
         datetime_str = datetime.datetime.now().strftime("%H:%M:%S")
         parts = [f"[{event.message_obj.sender.nickname}/{datetime_str}]: "]
-        # 是否允许自动理解图片：通过后会立刻占用间隔时间戳（请求 VLM 之前）
+        # 是否允许自动理解图片：通过后会立刻占用间隔时间戳（请求 VLM / 标记待转述之前）
         do_caption = False
         caption_claimed = False
+        lazy = bool(cfg.get("image_caption_lazy", True))
 
         for comp in event.get_messages():
             if isinstance(comp, Plain):
@@ -270,12 +589,22 @@ class GroupChatContext:
                         url = comp.url if comp.url else comp.file
                         if not url:
                             raise Exception("图片 URL 为空")
-                        caption = await self.get_image_caption(
-                            url,
-                            cfg["image_caption_provider_id"],
-                            cfg["image_caption_prompt"],
-                        )
-                        parts.append(f" [Image: {caption}]")
+                        if lazy:
+                            # 延迟模式：只登记待转述，唤醒 LLM 时再请求 VLM
+                            token = uuid.uuid4().hex
+                            self._pending_images[token] = url
+                            parts.append(f" [Image:__LAZY__:{token}]")
+                        else:
+                            # 即时模式：收到即转述（旧行为）
+                            caption = await self._caption_with_md5_cache(
+                                url,
+                                cfg,
+                                concurrency=int(
+                                    cfg.get("image_caption_concurrency")
+                                    or DEFAULT_IMAGE_CAPTION_CONCURRENCY
+                                ),
+                            )
+                            parts.append(f" [Image: {caption}]")
                     except Exception as e:
                         logger.error(f"获取图片描述失败: {e}")
                         parts.append(" [Image]")

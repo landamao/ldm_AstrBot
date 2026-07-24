@@ -5,11 +5,29 @@ from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.star_handler import StarHandlerMetadata, star_handlers_registry
 from astrbot.core.star.star_manager import PluginManager
+from astrbot.core.utils.github_proxy import (
+    get_configured_github_proxy,
+    log_github_proxy_usage,
+)
 
 
 class PluginCommands:
     def __init__(self, context: star.Context) -> None:
         self.context = context
+
+    def _github_proxy(self, *, action: str, target: str = "") -> str:
+        """读取服务端配置的 GitHub 加速地址，并打使用日志。"""
+        try:
+            config = self.context.get_config()
+        except Exception:
+            config = None
+        proxy = get_configured_github_proxy(config)
+        return log_github_proxy_usage(
+            proxy,
+            action=action,
+            target=target,
+            source="服务端配置" if proxy else "无",
+        )
 
     @staticmethod
     def build_group_help_message() -> str:
@@ -157,7 +175,8 @@ class PluginCommands:
         if self.context._star_manager:
             star_mgr: PluginManager = self.context._star_manager
             try:
-                await star_mgr.install_plugin(plugin_repo)  # type: ignore
+                proxy = self._github_proxy(action="指令安装插件", target=plugin_repo)
+                await star_mgr.install_plugin(plugin_repo, proxy=proxy)  # type: ignore
                 event.set_result(MessageEventResult().message("安装插件成功。"))
             except Exception as e:
                 logger.error(f"安装插件失败: {e}")
@@ -218,7 +237,11 @@ class PluginCommands:
             return
         logger.info(f"准备更新插件 {plugin_name}。")
         try:
-            await self.context._star_manager.update_plugin(plugin_name)  # type: ignore
+            await event.send(
+                MessageEventResult().message(f"正在更新「{plugin_name}」插件…")
+            )
+            proxy = self._github_proxy(action="指令更新插件", target=plugin_name)
+            await self.context._star_manager.update_plugin(plugin_name, proxy=proxy)  # type: ignore
             event.set_result(
                 MessageEventResult().message(f"插件 {plugin_name} 更新成功。")
             )

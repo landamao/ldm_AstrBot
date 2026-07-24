@@ -33,11 +33,15 @@ class PreProcessStage(Stage):
 
     @staticmethod
     def _track_temp_media(event: AstrMessageEvent, media_path: str) -> None:
-        """Track a media file owned by the current event.
+        """登记「本事件结束后可立刻删除」的临时媒体（主要用于语音等短生命周期文件）。
+
+        注意：入站图片不要走这里。群聊上下文「延迟图片转述」会跨消息保留本地路径，
+        若在 pipeline finally 里删掉，唤醒 LLM 时文件已不存在。入站图片统一交给
+        ``temp_dir_max_size`` 的目录上限清理兜底。
 
         Args:
-            event: Message event whose lifecycle owns the temporary file.
-            media_path: Local media path to track when it lives under AstrBot temp.
+            event: 拥有该临时文件生命周期的消息事件。
+            media_path: 位于 AstrBot temp 目录下的本地路径。
         """
 
         try:
@@ -130,9 +134,8 @@ class PreProcessStage(Stage):
             elif isinstance(component, Image):
                 try:
                     original_path = await component.convert_to_file_path()
-                    self._track_temp_media(event, original_path)
+                    # 入站图片不 track：避免 pipeline 结束立刻删除，影响延迟图片转述
                     image_path = await ensure_jpeg(original_path)
-                    self._track_temp_media(event, image_path)
                     component.file = image_path
                     component.path = image_path
                     # Image.convert_to_file_path() prefers url, so keep it aligned.
@@ -166,9 +169,8 @@ class PreProcessStage(Stage):
                     elif isinstance(reply_comp, Image):
                         try:
                             original_path = await reply_comp.convert_to_file_path()
-                            self._track_temp_media(event, original_path)
+                            # 引用链里的图片同样不 track，交给 temp 目录上限清理
                             image_path = await ensure_jpeg(original_path)
-                            self._track_temp_media(event, image_path)
                             reply_comp.file = image_path
                             reply_comp.path = image_path
                             # Image.convert_to_file_path() prefers url, so keep it aligned.

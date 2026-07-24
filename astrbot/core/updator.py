@@ -666,7 +666,18 @@ class AstrBotUpdator(RepoZipUpdator):
         logger.info(
             f"准备从 {self.仓库所有者}/{self.仓库名} 下载更新包: {target_version}"
         )
+        raw_url = file_url
         file_url = self._拼接代理(file_url, proxy or "")
+        if proxy:
+            logger.info(
+                f"GitHub 加速: 使用中 动作=下载更新包 目标={target_version} "
+                f"代理={str(proxy).rstrip('/')} 地址={file_url}"
+            )
+        else:
+            logger.info(
+                f"GitHub 加速: 未使用 动作=下载更新包 目标={target_version} "
+                f"地址={raw_url}"
+            )
 
         zip_path = Path(path)
         ensure_dir(zip_path.parent)
