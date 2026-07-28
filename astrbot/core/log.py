@@ -203,6 +203,15 @@ class LogManager:
         return os.path.join(get_astrbot_data_path(), configured_path)
 
     @classmethod
+    def _console_stream(cls):
+        """控制台真实输出流。
+
+        优先 ``sys.__stdout__``，避免进程内 ``redirect_stdout``（例如 pip 安装
+        把 stdout 接到 logger）时，loguru sink 再写回同一流形成递归。
+        """
+        return sys.__stdout__ or sys.stdout
+
+    @classmethod
     def _console_sink(cls, message) -> None:
         """可暂停的控制台 sink：横幅动画期间缓冲，结束后一次性刷出。"""
         text = str(message)
@@ -210,8 +219,9 @@ class LogManager:
             if cls._console_paused:
                 cls._console_buffer.append(text)
                 return
-            sys.stdout.write(text)
-            sys.stdout.flush()
+            out = cls._console_stream()
+            out.write(text)
+            out.flush()
 
     @classmethod
     def pause_console(cls) -> None:
@@ -232,8 +242,9 @@ class LogManager:
             cls._console_buffer.clear()
         # 锁外写，避免与横幅线程长时间互斥
         try:
-            sys.stdout.write(buffered)
-            sys.stdout.flush()
+            out = cls._console_stream()
+            out.write(buffered)
+            out.flush()
         except Exception:
             pass
 

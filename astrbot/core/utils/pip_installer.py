@@ -200,30 +200,72 @@ def _package_specs_override_index(package_specs: list[str]) -> bool:
     return False
 
 
+# pip 输出经 logger 转发时，防止 logger sink 再写回被 redirect 的 stdout/stderr
+# 形成「write → log → write」无限递归（proot/终端场景下会直接 RecursionError）。
+_PIP_LOG_REENTRANT = threading.local()
+
+
+def _log_pip_output_line(line: str) -> None:
+    """把 pip 的一行输出记到 astrbot logger，且对 redirect 递归免疫。"""
+    if getattr(_PIP_LOG_REENTRANT, "active", False):
+        return
+    _PIP_LOG_REENTRANT.active = True
+    try:
+        # 临时恢复真实 stdio，避免 loguru/logging sink 写到 _StreamingLogWriter
+        real_out = sys.__stdout__
+        real_err = sys.__stderr__
+        if real_out is not None and real_err is not None:
+            with (
+                contextlib.redirect_stdout(real_out),
+                contextlib.redirect_stderr(real_err),
+            ):
+                logger.info("%s", line)
+        else:
+            logger.info("%s", line)
+    except Exception:
+        # 日志失败绝不能拖垮 pip 安装本身
+        pass
+    finally:
+        _PIP_LOG_REENTRANT.active = False
+
+
 class _StreamingLogWriter(io.TextIOBase):
     def __init__(self, log_func, *, max_lines: int | None = None) -> None:
         self._log_func = log_func
         self._lines = deque(maxlen=max_lines or _MAX_PIP_OUTPUT_LINES)
         self._buffer = ""
+        self._writing = False
 
     def write(self, text: str) -> int:
         if not text:
             return 0
-
-        self._buffer += text.replace("\r\n", "\n").replace("\r", "\n")
-        while "\n" in self._buffer:
-            raw_line, self._buffer = self._buffer.split("\n", 1)
-            line = raw_line.rstrip("\r\n")
-            self._log_func(line)
-            self._lines.append(line)
-        return len(text)
+        # 重入直接吞掉，切断 loguru error interceptor → stderr → 本 write 的环
+        if self._writing:
+            return len(text)
+        self._writing = True
+        try:
+            self._buffer += text.replace("\r\n", "\n").replace("\r", "\n")
+            while "\n" in self._buffer:
+                raw_line, self._buffer = self._buffer.split("\n", 1)
+                line = raw_line.rstrip("\r\n")
+                self._lines.append(line)
+                self._log_func(line)
+            return len(text)
+        finally:
+            self._writing = False
 
     def flush(self) -> None:
-        line = self._buffer.rstrip("\r\n")
-        if line:
-            self._log_func(line)
-            self._lines.append(line)
-        self._buffer = ""
+        if self._writing:
+            return
+        self._writing = True
+        try:
+            line = self._buffer.rstrip("\r\n")
+            if line:
+                self._lines.append(line)
+                self._log_func(line)
+            self._buffer = ""
+        finally:
+            self._writing = False
 
     @property
     def lines(self) -> list[str]:
@@ -231,7 +273,7 @@ class _StreamingLogWriter(io.TextIOBase):
 
 
 def _run_pip_main_streaming(pip_main, args: list[str]) -> tuple[int, list[str]]:
-    stream = _StreamingLogWriter(logger.info, max_lines=_MAX_PIP_OUTPUT_LINES)
+    stream = _StreamingLogWriter(_log_pip_output_line, max_lines=_MAX_PIP_OUTPUT_LINES)
     with (
         contextlib.redirect_stdout(stream),
         contextlib.redirect_stderr(stream),
