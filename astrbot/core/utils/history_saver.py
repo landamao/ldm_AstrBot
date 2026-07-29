@@ -28,4 +28,5 @@ async def persist_agent_history(
         event.unified_msg_origin,
         req.conversation.cid,
         history=history,
+        event=event,
     )

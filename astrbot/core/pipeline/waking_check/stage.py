@@ -206,9 +206,11 @@ class WakingCheckStage(Stage):
                     else:
                         plugin_name = star_map[handler.handler_module_path].name
                         await event.send(
-                            MessageEventResult().message(
+                            MessageEventResult()
+                            .message(
                                 f"插件 {plugin_name}: {err_text}",
-                            ),
+                            )
+                            .use_markdown(False),
                         )
                     event.stop_event()
                     passed = False

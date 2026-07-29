@@ -18,6 +18,10 @@ from astrbot.core.db import BaseDatabase
 from astrbot.core.knowledge_base.kb_mgr import KnowledgeBaseManager
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.persona_mgr import PersonaManager
+
+if TYPE_CHECKING:
+    from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
+
 from astrbot.core.platform import Platform
 from astrbot.core.platform.astr_message_event import AstrMessageEvent, MessageSesion
 from astrbot.core.platform_message_history_mgr import PlatformMessageHistoryManager
@@ -166,6 +170,7 @@ class Context:
         self.cron_manager = cron_manager
         """Cron job manager, initialized by core lifecycle."""
         self.subagent_orchestrator = subagent_orchestrator
+        self._core_lifecycle: AstrBotCoreLifecycle | None = None
 
     async def llm_generate(
         self,

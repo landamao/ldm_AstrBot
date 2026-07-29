@@ -65,23 +65,53 @@ class AstrBotCoreLifecycle:
         self._default_chat_provider_warning_emitted = False
 
         # 设置代理
-        proxy_config = self.astrbot_config.get("http_proxy", "")
-        if proxy_config != "":
+        # 规则：
+        # 1) AstrBot 配置了 http_proxy → 写入环境变量，并应用 no_proxy 列表
+        # 2) 未配置时，默认保留系统/启动环境里的 http(s)_proxy（方便用户先 export 再启动）
+        # 3) 仅当 clear_system_proxy_when_unset=True 时，才清空系统代理，避免本地 API 被系统代理劫持
+        proxy_config = (self.astrbot_config.get("http_proxy", "") or "").strip()
+        clear_system_proxy = bool(
+            self.astrbot_config.get("clear_system_proxy_when_unset", False)
+        )
+        if proxy_config:
             os.environ["https_proxy"] = proxy_config
             os.environ["http_proxy"] = proxy_config
             logger.debug(f"使用代理: {proxy_config}")
-            # 设置 no_proxy
             no_proxy_list = self.astrbot_config.get("no_proxy", [])
             os.environ["no_proxy"] = ",".join(no_proxy_list)
-        else:
-            # 清空代理环境变量
+        elif clear_system_proxy:
+            has_system_proxy = "https_proxy" in os.environ or "http_proxy" in os.environ
+            if has_system_proxy:
+                logger.warning(
+                    "检测到系统 http_proxy/https_proxy，但 ldm 未配置代理，"
+                    "且已开启「未配置代理时清除系统代理」。"
+                    "将清除代理变量，并设置 no_proxy=localhost,127.0.0.1,::1，"
+                    "避免本地 API 请求被系统代理拦截。"
+                    "若需要代理，请在系统设置 → 网络中填写 HTTP 代理，"
+                    "或关闭该开关以保留启动环境中的系统代理。"
+                )
             if "https_proxy" in os.environ:
                 del os.environ["https_proxy"]
             if "http_proxy" in os.environ:
                 del os.environ["http_proxy"]
             if "no_proxy" in os.environ:
                 del os.environ["no_proxy"]
-            logger.debug("已清除 HTTP 代理")
+            # 本地回环始终直连，避免本机 API 走代理
+            os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
+            logger.debug("已清除 HTTP 代理，并设置 no_proxy 为 localhost")
+        else:
+            # 保留系统/进程环境中的代理，方便「先设代理再启动」
+            sys_http = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
+            sys_https = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
+            if sys_http or sys_https:
+                logger.info(
+                    "ldm 未配置 HTTP 代理，保留系统代理环境变量"
+                    f"（http_proxy={sys_http or '-'}, https_proxy={sys_https or '-'}）。"
+                    "若本地 API 被代理劫持，可在系统设置 → 网络开启"
+                    "「未配置代理时清除系统代理」，或在 ldm 中填写 HTTP 代理。"
+                )
+            else:
+                logger.debug("未配置 HTTP 代理，且系统环境也无代理变量")
 
     async def _init_or_reload_subagent_orchestrator(self) -> None:
         """Create (if needed) and reload the subagent orchestrator from config.
@@ -238,6 +268,7 @@ class AstrBotCoreLifecycle:
             self.cron_manager,
             self.subagent_orchestrator,
         )
+        self.star_context._core_lifecycle = self
 
         # 初始化插件管理器
         self.plugin_manager = PluginManager(self.star_context, self.astrbot_config)

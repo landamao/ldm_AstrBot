@@ -52,6 +52,44 @@ class StarTools:
         return await cls._context.send_message(session, message_chain)
 
     @classmethod
+    async def send_message_by_id(
+        cls,
+        type: str,
+        id: str,
+        message_chain: MessageChain,
+        platform: str = "aiocqhttp",
+    ) -> bool:
+        """Sends a message to a group or private chat by type and ID.
+
+        Args:
+            type: "GroupMessage" for group chat, "PrivateMessage" for private chat.
+            id: Group ID or user ID.
+            message_chain: Message chain to send.
+            platform: Platform adapter name or instance ID.
+
+        Returns:
+            Whether a matching platform was found.
+        """
+        if cls._context is None:
+            raise ValueError("StarTools not initialized")
+        # 按平台实例 ID 匹配；找不到再按适配器名称匹配
+        platforms = cls._context.platform_manager.get_insts()
+        platform_id = None
+        for p in platforms:
+            if p.meta().id == platform:
+                platform_id = p.meta().id
+                break
+        if platform_id is None:
+            for p in platforms:
+                if p.meta().name == platform:
+                    platform_id = p.meta().id
+                    break
+        if platform_id is None:
+            raise ValueError(f"找不到平台: {platform}")
+        session_str = f"{platform_id}:{type}:{id}"
+        return await cls._context.send_message(session_str, message_chain)
+
+    @classmethod
     async def create_message(
         cls,
         type: str,

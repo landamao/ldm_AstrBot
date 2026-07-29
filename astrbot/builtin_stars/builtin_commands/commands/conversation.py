@@ -1,11 +1,15 @@
 import datetime
 
+from sqlalchemy import case, func, select
+from sqlmodel import col
+
 from astrbot.api import sp, star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core.agent.runners.deerflow.constants import (
     DEERFLOW_PROVIDER_TYPE,
     DEERFLOW_THREAD_ID_KEY,
 )
+from astrbot.core.db.po import ProviderStat
 from astrbot.core.platform.astr_message_event import MessageSession
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.utils.active_event_registry import active_event_registry
@@ -280,6 +284,7 @@ class ConversationCommands:
 
         ret += f"\n第 {page} 页 | 共 {total_pages} 页"
         ret += "\n*输入 /ls 2 跳转到第 2 页"
+        ret += "\n*输入 /switch <序号> 切换对话"
 
         message.set_result(MessageEventResult().message(ret).use_t2i(False))
         return
@@ -347,7 +352,9 @@ class ConversationCommands:
         """通过 /ls 前面的序号切换对话"""
         if not isinstance(index, int):
             message.set_result(
-                MessageEventResult().message("类型错误，请输入数字对话序号。"),
+                MessageEventResult().message(
+                    "类型错误，请输入数字对话序号。使用 /ls 查看对话列表。"
+                ),
             )
             return
 
@@ -363,7 +370,7 @@ class ConversationCommands:
         )
         if index > len(conversations) or index < 1:
             message.set_result(
-                MessageEventResult().message("对话序号错误，请使用 /ls 查看"),
+                MessageEventResult().message("对话序号错误，请使用 /ls 查看对话列表。"),
             )
         else:
             conversation = conversations[index - 1]
@@ -435,4 +442,81 @@ class ConversationCommands:
 
         ret = "删除当前对话成功。不再处于对话状态，使用 /switch 序号 切换到其他对话或 /new 创建。"
         message.set_extra("_clean_ltm_session", True)
+        message.set_result(MessageEventResult().message(ret))
+
+    async def status(self, message: AstrMessageEvent) -> None:
+        """查看当前对话状态及 Token 用量统计"""
+        umo = message.unified_msg_origin
+
+        # 运行状态
+        active_count = active_event_registry.count(umo, exclude=message)
+        try:
+            from astrbot.core.pipeline.process_stage.follow_up import (
+                has_active_runner,
+            )
+
+            runner_active = has_active_runner(umo)
+        except Exception:
+            runner_active = False
+
+        if active_count > 0 or runner_active:
+            run_line = f"Agent 状态: 是（{active_count} 个活跃任务）"
+        else:
+            run_line = "Agent 状态: 否"
+
+        cid = await self.context.conversation_manager.get_curr_conversation_id(umo)
+
+        if not cid:
+            message.set_result(
+                MessageEventResult().message(
+                    f"{run_line}\n当前没有进行中的对话，使用 /new 创建。"
+                ),
+            )
+            return
+
+        db = self.context.get_db()
+        async with db.get_db() as session:
+            result = await session.execute(
+                select(
+                    func.count(case((col(ProviderStat.id).is_not(None), 1))).label(
+                        "record_count",
+                    ),
+                    func.coalesce(func.sum(ProviderStat.token_input_other), 0).label(
+                        "total_input_other",
+                    ),
+                    func.coalesce(func.sum(ProviderStat.token_input_cached), 0).label(
+                        "total_input_cached",
+                    ),
+                    func.coalesce(func.sum(ProviderStat.token_output), 0).label(
+                        "total_output",
+                    ),
+                ).where(
+                    col(ProviderStat.agent_type) == "internal",
+                    col(ProviderStat.conversation_id) == cid,
+                )
+            )
+            stats = result.one()
+
+        total_input_other = stats.total_input_other
+        total_input_cached = stats.total_input_cached
+        total_output = stats.total_output
+        total_tokens = total_input_other + total_input_cached + total_output
+
+        if stats.record_count == 0:
+            ret = (
+                f"对话 ID: {cid[:8]}...\n"
+                f"{run_line}\n"
+                f"Token 用量: 暂无统计"
+            )
+        else:
+            ret = (
+                f"对话 ID: {cid[:8]}...\n"
+                f"{run_line}\n"
+                f"Token 用量:\n"
+                f"  总计:          {total_tokens:,}\n"
+                f"  输入（缓存）: {total_input_cached:,}\n"
+                f"  输入（其他）: {total_input_other:,}\n"
+                f"  输出:         {total_output:,}"
+            )
+
         message.set_result(MessageEventResult().message(ret))

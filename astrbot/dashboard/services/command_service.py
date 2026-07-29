@@ -65,11 +65,14 @@ class CommandService:
             raise CommandServiceError("handler_full_name 与 new_name 均为必填。")
 
         try:
-            await rename_command(handler_full_name, new_name, aliases=aliases)
+            descriptor = await rename_command(handler_full_name, new_name, aliases=aliases)
         except ValueError as exc:
             raise CommandServiceError(str(exc)) from exc
 
-        return await self._get_command_payload(handler_full_name)
+        payload = await self._get_command_payload(handler_full_name)
+        if descriptor.rename_conflicts:
+            payload["rename_conflicts"] = descriptor.rename_conflicts
+        return payload
 
     async def update_permission(
         self,

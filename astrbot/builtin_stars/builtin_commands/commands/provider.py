@@ -671,7 +671,7 @@ class ProviderCommands:
                 parts.append(f"\n{i}. {model}")
 
             curr_model = prov.get_model() or "无"
-            parts.append(f"\n当前模型: [{curr_model}]")
+            parts.append(f"\n当前模型: 「{curr_model}」")
             parts.append(
                 "\nTips: 使用 /model <模型名/编号> 切换模型。输入模型名时可自动跨提供商查找并切换；跨提供商也可使用 /provider 切换。"
             )

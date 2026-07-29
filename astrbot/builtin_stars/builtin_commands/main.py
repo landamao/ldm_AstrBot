@@ -1,5 +1,6 @@
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.core.star.filter.command import GreedyStr
 
 from .commands import (
     AdminCommands,
@@ -7,6 +8,7 @@ from .commands import (
     ConversationCommands,
     HelpCommand,
     LLMCommands,
+    NameCommand,
     PersonaCommands,
     PluginCommands,
     ProviderCommands,
@@ -31,6 +33,7 @@ class Main(star.Star):
         self.persona_c = PersonaCommands(self.context)
         self.alter_cmd_c = AlterCmdCommands(self.context)
         self.setunset_c = SetUnsetCommands(self.context)
+        self.name_c = NameCommand(self.context)
         self.t2i_c = T2ICommand(self.context)
         self.tts_c = TTSCommand(self.context)
         self.sid_c = SIDCommand(self.context)
@@ -113,8 +116,14 @@ class Main(star.Star):
 
     @filter.command("sid")
     async def sid(self, event: AstrMessageEvent) -> None:
-        """获取会话 ID 和 管理员 ID"""
+        """获取会话 ID 信息"""
         await self.sid_c.sid(event)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("name")
+    async def name(self, event: AstrMessageEvent, alias: GreedyStr) -> None:
+        """设置当前会话的显示名称。传入 unset 清除"""
+        await self.name_c.name(event, alias)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("op")
@@ -148,12 +157,12 @@ class Main(star.Star):
         idx: str | int | None = None,
         idx2: int | None = None,
     ) -> None:
-        """查看或者切换 LLM Provider"""
+        """查看或者切换 LLM 提供商"""
         await self.provider_c.provider(event, idx, idx2)
 
     @filter.command("reset")
     async def reset(self, message: AstrMessageEvent) -> None:
-        """重置 LLM 会话"""
+        """清除当前对话上下文"""
         await self.conversation_c.reset(message)
 
     @filter.command("stop")
@@ -178,13 +187,18 @@ class Main(star.Star):
 
     @filter.command("ls")
     async def convs(self, message: AstrMessageEvent, page: int = 1) -> None:
-        """查看对话列表"""
+        """查看对话列表，可用 /switch <序号> 切换"""
         await self.conversation_c.convs(message, page)
 
     @filter.command("new")
     async def new_conv(self, message: AstrMessageEvent) -> None:
         """创建新对话"""
         await self.conversation_c.new_conv(message)
+
+    @filter.command("status")
+    async def status(self, message: AstrMessageEvent) -> None:
+        """查看当前对话 Agent 状态及 Token 用量"""
+        await self.conversation_c.status(message)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("groupnew")
@@ -218,21 +232,29 @@ class Main(star.Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("persona")
     async def persona(self, message: AstrMessageEvent) -> None:
-        """查看或者切换 Persona"""
+        """查看或者切换人格情景"""
         await self.persona_c.persona(message)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("restart")
+    async def restart(self, event: AstrMessageEvent) -> None:
+        """重启 ldm 框架"""
+        await self.admin_c.restart(event)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("dashboard_update")
     async def update_dashboard(self, event: AstrMessageEvent) -> None:
-        """更新管理面板"""
+        """更新 WebUI 面板"""
         await self.admin_c.update_dashboard(event)
 
     @filter.command("set")
     async def set_variable(self, event: AstrMessageEvent, key: str, value: str) -> None:
+        """设置会话变量（供 Agent 使用）"""
         await self.setunset_c.set_variable(event, key, value)
 
     @filter.command("unset")
     async def unset_variable(self, event: AstrMessageEvent, key: str) -> None:
+        """移除会话变量"""
         await self.setunset_c.unset_variable(event, key)
 
     @filter.permission_type(filter.PermissionType.ADMIN)

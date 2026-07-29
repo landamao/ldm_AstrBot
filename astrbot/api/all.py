@@ -1,6 +1,6 @@
 # ruff: noqa: F401, F403, F811, I001
 from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot import logger
+from astrbot.api import logger
 from astrbot.core import html_renderer
 from astrbot.core.star.register import register_llm_tool as llm_tool
 
@@ -53,3 +53,9 @@ from astrbot.core.platform import (
 from astrbot.core.platform.register import register_platform_adapter
 
 from .message_components import *
+
+# message_components 通过 `from astrbot.core.message.components import *` 间接导出了全局 logger，
+# 覆盖了上面 `from astrbot.api import logger` 设置的 _PluginContextLogger。
+# 在这里重新从 astrbot.api 导入，确保插件 `from astrbot.api.all import logger` 拿到的是
+# 能按插件名路由的 _PluginContextLogger，而非全局 logger。
+from astrbot.api import logger  # noqa: F811

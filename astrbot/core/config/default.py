@@ -199,7 +199,6 @@ DEFAULT_CONFIG = {
         "dashscope_agent_runner_provider_id": "",
         "deerflow_agent_runner_provider_id": "",
         "unsupported_streaming_strategy": "realtime_segmenting",
-        "reachability_check": False,
         "max_agent_step": 30,
         "tool_call_timeout": 120,
         "tool_schema_mode": "full",
@@ -297,6 +296,7 @@ DEFAULT_CONFIG = {
     "t2i_use_file_service": False,
     "t2i_active_template": "base",
     "http_proxy": "",
+    "clear_system_proxy_when_unset": False,
     "github_proxy": "",
     "no_proxy": ["localhost", "127.0.0.1", "::1", "10.*", "192.168.*"],
     "dashboard": {
@@ -1728,7 +1728,7 @@ CONFIG_METADATA_2 = {
                         "enable": False,
                         "api_key": "",
                         "api_base": "https://api.xiaomimimo.com/v1",
-                        "model": "mimo-v2-tts",
+                        "model": "mimo-v2.5-tts",
                         "mimo-tts-voice": "mimo_default",
                         "mimo-tts-format": "wav",
                         "mimo-tts-style-prompt": "",
@@ -1817,6 +1817,7 @@ CONFIG_METADATA_2 = {
                         "enable": False,
                         "api_key": "",
                         "api_base": "https://api.fish.audio/v1",
+                        "model": "s2-pro",
                         "fishaudio-tts-character": "可莉",
                         "fishaudio-tts-reference-id": "",
                         "timeout": "20",
@@ -1973,6 +1974,20 @@ CONFIG_METADATA_2 = {
                         "embedding_api_base": "http://localhost:11434",
                         "embedding_model": "nomic-embed-text",
                         "embedding_dimensions": 768,
+                        "timeout": 60,
+                        "proxy": "",
+                    },
+                    "DashScope Embedding": {
+                        "id": "dashscope_embedding",
+                        "type": "dashscope_embedding",
+                        "provider": "dashscope",
+                        "provider_type": "embedding",
+                        "hint": "provider_group.provider.dashscope_embedding.hint",
+                        "enable": True,
+                        "embedding_api_key": "",
+                        "embedding_api_base": "https://dashscope.aliyuncs.com/api/v1",
+                        "embedding_model": "text-embedding-v4",
+                        "embedding_dimensions": 1024,
                         "timeout": 60,
                         "proxy": "",
                     },
@@ -3137,6 +3152,11 @@ CONFIG_METADATA_2 = {
             "http_proxy": {
                 "type": "string",
             },
+            "clear_system_proxy_when_unset": {
+                "description": "未配置代理时清除系统代理",
+                "type": "bool",
+                "hint": "关闭（默认）：ldm 未填写 HTTP 代理时，保留启动环境中的 http_proxy/https_proxy，方便先 export 再启动。开启：未填写时清除系统代理，并让 localhost 直连，避免本地 API 被系统代理劫持。",
+            },
             "github_proxy": {
                 "type": "string",
                 "description": "GitHub 加速地址",
@@ -3955,12 +3975,6 @@ CONFIG_METADATA_3 = {
                     "provider_tts_settings.dual_output": {
                         "description": "开启 TTS 时同时输出语音和文字内容",
                         "type": "bool",
-                        "collapsed": True,
-                    },
-                    "provider_settings.reachability_check": {
-                        "description": "提供商可达性检测",
-                        "type": "bool",
-                        "hint": "/provider 命令列出模型时是否并发检测连通性。开启后会主动调用模型测试连通性，可能产生额外 token 消耗。",
                         "collapsed": True,
                     },
                     "provider_settings.max_quoted_fallback_images": {
@@ -4852,6 +4866,11 @@ CONFIG_METADATA_3_SYSTEM = {
                         "type": "string",
                         "hint": "启用后，会以添加环境变量的方式设置代理。支持 http://、https://、socks5:// 格式，例如：http://127.0.0.1:7890 或 socks5://127.0.0.1:7891",
                     },
+                    "clear_system_proxy_when_unset": {
+                        "description": "未配置代理时清除系统代理",
+                        "type": "bool",
+                        "hint": "关闭（默认）：未填写上方 HTTP 代理时，保留系统/启动环境里的代理变量。开启：未填写时清除系统代理，并设置 localhost 直连，避免本机 API 被劫持。修改后需重启生效。",
+                    },
                     "github_proxy": {
                         "description": "GitHub 加速地址",
                         "type": "string",
@@ -4880,4 +4899,5 @@ DEFAULT_VALUE_MAP = {
     "file": [],
     "object": {},
     "template_list": [],
+    "dict": {},
 }

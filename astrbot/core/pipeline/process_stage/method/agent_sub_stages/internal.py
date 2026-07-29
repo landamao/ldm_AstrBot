@@ -789,17 +789,41 @@ class InternalAgentSubStage(Stage):
                 )
                 interrupted = False
 
-        if not llm_response and not interrupted:
+        def _collect_messages_to_save() -> list[Message]:
+            messages: list[Message] = []
+            skipped_initial_system = False
+            for message in all_messages:
+                if message.role == "system" and not skipped_initial_system:
+                    skipped_initial_system = True
+                    continue
+                if message.role in ["assistant", "user"] and message._no_save:
+                    continue
+                messages.append(message)
+            return messages
+
+        # LLM 失败（无响应 / 非 assistant）时仍尽量保留 checkpoint，便于续写（#9358）
+        if not interrupted and (
+            llm_response is None or llm_response.role != "assistant"
+        ):
+            messages_to_save = _collect_messages_to_save()
+            checkpoint_id = event.get_extra("llm_checkpoint_id")
+            message_to_save = dump_messages_with_checkpoints(messages_to_save)
+            if isinstance(checkpoint_id, str) and checkpoint_id:
+                message_to_save.append(
+                    CheckpointMessageSegment(
+                        content=CheckpointData(id=checkpoint_id),
+                    ).model_dump()
+                )
+                await self.conv_manager.update_conversation(
+                    event.unified_msg_origin,
+                    req.conversation.cid,
+                    history=message_to_save,
+                    token_usage=None,
+                    event=event,
+                )
             return
 
-        if llm_response and llm_response.role != "assistant":
-            if not interrupted:
-                return
-            llm_response = LLMResponse(
-                role="assistant",
-                completion_text=llm_response.completion_text or "",
-            )
-        elif llm_response is None:
+        if llm_response is None:
             llm_response = LLMResponse(role="assistant", completion_text="")
 
         if (
@@ -810,15 +834,7 @@ class InternalAgentSubStage(Stage):
             logger.debug("LLM 响应为空，不保存记录。")
             return
 
-        messages_to_save: list[Message] = []
-        skipped_initial_system = False
-        for message in all_messages:
-            if message.role == "system" and not skipped_initial_system:
-                skipped_initial_system = True
-                continue
-            if message.role in ["assistant", "user"] and message._no_save:
-                continue
-            messages_to_save.append(message)
+        messages_to_save = _collect_messages_to_save()
 
         if interrupted:
             messages_to_save = self._apply_interrupt_to_messages(
@@ -851,6 +867,7 @@ class InternalAgentSubStage(Stage):
             req.conversation.cid,
             history=message_to_save,
             token_usage=token_usage,
+            event=event,
         )
 
 

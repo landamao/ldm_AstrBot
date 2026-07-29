@@ -205,7 +205,9 @@ class StatService:
 
             stat_dict = stat.__dict__
 
-            cpu_percent = psutil.cpu_percent(interval=0.5)
+            # 进程 CPU 放到线程里采，避免 interval 阻塞事件循环
+            process_cpu = await asyncio.to_thread(psutil.Process().cpu_percent, 0.5)
+            cpu_percent = process_cpu / (psutil.cpu_count() or 1)
             thread_count = threading.active_count()
 
             plugins = self.core_lifecycle.star_context.get_all_stars()

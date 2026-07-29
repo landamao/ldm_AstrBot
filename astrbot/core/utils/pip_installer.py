@@ -661,10 +661,33 @@ def _is_module_loaded_from_site_packages(
         return False
 
 
+def _has_loaded_c_extension(module_name: str) -> bool:
+    """检查 sys.modules 中目标模块子树是否已包含 C 扩展（.pyd/.so）。
+
+    已加载 C 扩展时再强制 prefer 容易导致进程崩溃，应跳过。
+    """
+    for key in list(sys.modules.keys()):
+        if not (key == module_name or key.startswith(f"{module_name}.")):
+            continue
+        mod = sys.modules.get(key)
+        if mod is None:
+            continue
+        mod_file = getattr(mod, "__file__", "") or ""
+        if os.path.splitext(mod_file)[1].lower() in (".pyd", ".so"):
+            return True
+    return False
+
+
 def _prefer_module_from_site_packages(
     module_name: str, site_packages_path: str
 ) -> bool:
     with _SITE_PACKAGES_IMPORT_LOCK:
+        if _has_loaded_c_extension(module_name):
+            logger.debug(
+                "跳过 prefer %s：子模块中已检测到 C 扩展",
+                module_name,
+            )
+            return False
         base_path = os.path.join(site_packages_path, *module_name.split("."))
         package_init = os.path.join(base_path, "__init__.py")
         module_file = f"{base_path}.py"
@@ -688,6 +711,7 @@ def _prefer_module_from_site_packages(
         if spec is None or spec.loader is None:
             return False
 
+        # C 扩展已在 _has_loaded_c_extension 扫描；此处 matched_keys 仅用于 pop / 异常恢复
         matched_keys = [
             key
             for key in list(sys.modules.keys())

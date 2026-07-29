@@ -580,6 +580,11 @@ class PluginConfigPayload(OpenModel):
     config: dict[str, Any] | None = None
 
 
+class PluginLogLevelPayload(OpenModel):
+    level: str | None = None
+    """日志级别名（DEBUG/INFO/WARNING/ERROR/CRITICAL），None 表示跟随全局级别。"""
+
+
 class PluginSourceRequest(OpenModel):
     id: str | None = None
     name: str | None = None

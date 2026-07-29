@@ -157,9 +157,13 @@ class BaseDatabase(abc.ABC):
         page_size: int = 20,
         platform_ids: list[str] | None = None,
         search_query: str = "",
+        include_history: bool = True,
         **kwargs,
     ) -> tuple[list[ConversationV2], int]:
-        """Get conversations filtered by platform IDs and search query."""
+        """按平台与搜索过滤对话。
+
+        include_history=False 时后端可不加载完整 content，供列表摘要用。
+        """
         ...
 
     @abc.abstractmethod

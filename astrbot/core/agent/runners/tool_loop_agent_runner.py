@@ -463,7 +463,11 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
     async def _iter_llm_responses(
         self, *, include_model: bool = True
     ) -> T.AsyncGenerator[LLMResponse, None]:
-        """Yields chunks *and* a final LLMResponse."""
+        """Yields chunks *and* a final LLMResponse.
+
+        当 _abort_signal 被 set 时，流式/非流式都会被立即打断——不再等下一个 chunk
+        或完整响应，从而 /stop 可以做到「真正的立即停止」。
+        """
         payload = {
             "contexts": self._sanitize_contexts_for_provider(self.run_context.messages),
             "func_tool": self._func_tool_for_provider(),
@@ -476,11 +480,75 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             # For primary provider we keep explicit model selection if provided.
             payload["model"] = self.req.model
         if self.streaming:
-            stream = self.provider.text_chat_stream(**payload)
-            async for resp in stream:  # type: ignore
+            stream = self.provider.text_chat_stream(**payload)  # type: ignore
+            # 将流式迭代与 abort_signal 竞速：一旦收到停止信号，立即停止消费流
+            async for resp in self._race_stream_against_abort(stream):  # type: ignore
                 yield resp
         else:
-            yield await self.provider.text_chat(**payload)
+            resp = await self._race_call_against_abort(
+                lambda: self.provider.text_chat(**payload)
+            )
+            if resp is not None:
+                yield resp
+
+    async def _race_stream_against_abort(
+        self, stream: T.AsyncGenerator[LLMResponse, None]
+    ) -> T.AsyncGenerator[LLMResponse, None]:
+        """流式响应与 abort_signal 竞速；收到停止信号后立即停止消费流。"""
+        stream_aiter = stream.__aiter__()
+        while True:
+            if self._is_stop_requested():
+                # 停止信号已到，不再消费任何剩余 chunk
+                with suppress(StopAsyncIteration, RuntimeError):
+                    await stream_aiter.aclose()
+                return
+            next_chunk_task = asyncio.ensure_future(stream_aiter.__anext__())
+            abort_task = asyncio.ensure_future(self._abort_signal.wait())
+            try:
+                done, _pending = await asyncio.wait(
+                    {next_chunk_task, abort_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if abort_task in done:
+                    # 停止信号赢得竞速：取消正在等待的 chunk 读取
+                    next_chunk_task.cancel()
+                    with suppress(asyncio.CancelledError, StopAsyncIteration, RuntimeError):
+                        await next_chunk_task
+                    with suppress(StopAsyncIteration, RuntimeError):
+                        await stream_aiter.aclose()
+                    return
+                # chunk 先到（abort_task 仍未完成），yield 给上层
+                try:
+                    yield next_chunk_task.result()
+                except StopAsyncIteration:
+                    return
+            finally:
+                if not abort_task.done():
+                    abort_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await abort_task
+
+    async def _race_call_against_abort(self, coro_fn: T.Callable[[], T.Awaitable[LLMResponse]]) -> LLMResponse | None:
+        """非流式调用与 abort_signal 竞速；收到停止信号后取消请求并返回 None。"""
+        call_task = asyncio.ensure_future(coro_fn())
+        abort_task = asyncio.ensure_future(self._abort_signal.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {call_task, abort_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if abort_task in done:
+                # 停止信号赢得竞速：取消正在进行的 LLM 请求
+                call_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await call_task
+                return None
+            return call_task.result()
+        finally:
+            if not abort_task.done():
+                abort_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await abort_task
 
     async def _iter_llm_responses_with_fallback(
         self,
@@ -541,6 +609,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                                 yield resp
                                 return
 
+                            # /stop 强制停止：不再尝试 fallback，立即返回
+                            if self._is_stop_requested():
+                                return
+
                             if has_stream_output:
                                 return
                         except EmptyModelOutputError:
@@ -565,6 +637,9 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     exc,
                     exc_info=True,
                 )
+                # /stop 强制停止：不再尝试 fallback，立即返回
+                if self._is_stop_requested():
+                    return
                 continue
 
         if last_err_response:

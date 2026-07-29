@@ -7,10 +7,12 @@
 import json
 from collections.abc import Awaitable, Callable
 
+from astrbot.core import logger as astrbot_logger
 from astrbot.core import sp
 from astrbot.core.agent.message import AssistantMessageSegment, UserMessageSegment
 from astrbot.core.db import BaseDatabase
 from astrbot.core.db.po import Conversation, ConversationV2
+from astrbot.core.umo_alias import get_event_auto_name, normalize_umo_name
 from astrbot.core.utils.datetime_utils import to_utc_timestamp
 
 
@@ -57,8 +59,15 @@ class ConversationManager:
                     f"会话删除回调执行失败 (session: {unified_msg_origin}): {e}",
                 )
 
-    def _convert_conv_from_v2_to_v1(self, conv_v2: ConversationV2) -> Conversation:
-        """将 ConversationV2 对象转换为 Conversation 对象"""
+    def _convert_conv_from_v2_to_v1(
+        self,
+        conv_v2: ConversationV2,
+        include_history: bool = True,
+    ) -> Conversation:
+        """将 ConversationV2 转换为旧版 Conversation。
+
+        include_history=False 时不序列化完整历史，列表摘要查询用，history 固定为 "[]"。
+        """
         created_ts = to_utc_timestamp(conv_v2.created_at)
         updated_ts = to_utc_timestamp(conv_v2.updated_at)
         created_at = int(created_ts) if created_ts is not None else 0
@@ -67,7 +76,7 @@ class ConversationManager:
             platform_id=conv_v2.platform_id,
             user_id=conv_v2.user_id,
             cid=conv_v2.conversation_id,
-            history=json.dumps(conv_v2.content or []),
+            history=json.dumps(conv_v2.content or []) if include_history else "[]",
             title=conv_v2.title,
             persona_id=conv_v2.persona_id,
             created_at=created_at,
@@ -229,6 +238,7 @@ class ConversationManager:
         page_size: int = 20,
         platform_ids: list[str] | None = None,
         search_query: str = "",
+        include_history: bool = True,
         **kwargs,
     ) -> tuple[list[Conversation], int]:
         """获取过滤后的对话列表.
@@ -238,20 +248,26 @@ class ConversationManager:
             page_size (int): 每页大小, 默认为 20
             platform_ids (list[str]): 平台 ID 列表, 可选
             search_query (str): 搜索查询字符串, 可选
+            include_history (bool): 是否加载完整对话历史
         Returns:
             conversations (list[Conversation]): 对话对象列表
 
         """
-        convs, cnt = await self.db.get_filtered_conversations(
-            page=page,
-            page_size=page_size,
-            platform_ids=platform_ids,
-            search_query=search_query,
+        query_kwargs = {
+            "page": page,
+            "page_size": page_size,
+            "platform_ids": platform_ids,
+            "search_query": search_query,
+            "include_history": include_history,
             **kwargs,
-        )
+        }
+        convs, cnt = await self.db.get_filtered_conversations(**query_kwargs)
         convs_res = []
         for conv in convs:
-            conv_res = self._convert_conv_from_v2_to_v1(conv)
+            conv_res = self._convert_conv_from_v2_to_v1(
+                conv,
+                include_history=include_history,
+            )
             convs_res.append(conv_res)
         return convs_res, cnt
 
@@ -263,6 +279,8 @@ class ConversationManager:
         title: str | None = None,
         persona_id: str | None = None,
         token_usage: int | None = None,
+        *,
+        event: object | None = None,
     ) -> None:
         """更新会话的对话.
 
@@ -271,6 +289,7 @@ class ConversationManager:
             conversation_id (str): 对话 ID, 是 uuid 格式的字符串
             history (List[Dict]): 对话历史记录, 是一个字典列表, 每个字典包含 role 和 content 字段
             token_usage (int | None): token 使用量。None 表示不更新
+            event: 可选，传入后自动刷新 umo_aliases 的 auto_name（如群名）
 
         """
         if not conversation_id:
@@ -284,6 +303,29 @@ class ConversationManager:
                 content=history,
                 token_usage=token_usage,
             )
+
+        # 自动刷新 auto_name（不覆盖用户手动设置的 user_alias）
+        if event is not None:
+            try:
+                auto_name = get_event_auto_name(event)
+                if auto_name:
+                    saved = await self.db.get_umo_alias(unified_msg_origin)
+                    old_auto = normalize_umo_name(saved.auto_name if saved else "")
+                    if old_auto != auto_name:
+                        await self.db.upsert_umo_alias(
+                            umo=unified_msg_origin,
+                            creator_sender_id=str(
+                                getattr(event, "get_sender_id", lambda: "")() or ""
+                            ),
+                            auto_name=auto_name,
+                            user_alias=saved.user_alias if saved else None,
+                        )
+            except Exception:
+                astrbot_logger.debug(
+                    "自动刷新 umo auto_name 失败: umo=%s",
+                    unified_msg_origin,
+                    exc_info=True,
+                )
 
     async def update_conversation_title(
         self,

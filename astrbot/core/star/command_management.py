@@ -43,6 +43,7 @@ class CommandDescriptor:
     config: CommandConfig | None = None
     has_conflict: bool = False
     sub_commands: list[CommandDescriptor] = field(default_factory=list)
+    rename_conflicts: list[str] = field(default_factory=list)
 
 
 async def sync_command_configs() -> None:
@@ -101,12 +102,12 @@ async def rename_command(
     if not new_fragment:
         raise ValueError("指令名不能为空。")
 
-    # 校验主指令名
+    # 冲突校验：仅收集冲突信息，不拦截保存
+    conflicts: list[str] = []
     candidate_full = _compose_command(descriptor.parent_signature, new_fragment)
     if _is_command_in_use(handler_full_name, candidate_full):
-        raise ValueError(f"指令名 '{candidate_full}' 已被其他指令占用。")
+        conflicts.append(f"指令名 '{candidate_full}' 与其他指令存在冲突")
 
-    # 校验别名
     if aliases:
         for alias in aliases:
             alias = alias.strip()
@@ -114,7 +115,7 @@ async def rename_command(
                 continue
             alias_full = _compose_command(descriptor.parent_signature, alias)
             if _is_command_in_use(handler_full_name, alias_full):
-                raise ValueError(f"别名 '{alias_full}' 已被其他指令占用。")
+                conflicts.append(f"别名 '{alias_full}' 与其他指令存在冲突")
 
     existing_cfg = await db_helper.get_command_config(handler_full_name)
     merged_extra = dict(existing_cfg.extra_data or {}) if existing_cfg else {}
@@ -135,6 +136,7 @@ async def rename_command(
         auto_managed=False,
     )
     _bind_descriptor_with_config(descriptor, config)
+    descriptor.rename_conflicts = conflicts
 
     await sync_command_configs()
     return descriptor
@@ -251,10 +253,13 @@ async def list_command_conflicts() -> list[dict[str, Any]]:
 
 
 def _collect_descriptors(include_sub_commands: bool) -> list[CommandDescriptor]:
-    """收集指令，按需包含子指令。"""
+    """收集指令，按需包含子指令。跳过已禁用插件的指令。"""
     descriptors: list[CommandDescriptor] = []
     for handler in star_handlers_registry:
         try:
+            # 跳过已禁用插件的指令
+            if not _is_plugin_activated(handler):
+                continue
             desc = _build_descriptor(handler)
             if not desc:
                 continue
@@ -462,10 +467,29 @@ def _bind_configs_to_descriptors(
 def _group_conflicts(
     descriptors: list[CommandDescriptor],
 ) -> dict[str, list[CommandDescriptor]]:
+    """检测指令名和别名的冲突。
+
+    冲突判定范围（仅限已启用的指令）：
+    - 主指令名 vs 主指令名
+    - 主指令名 vs 别名
+    - 别名 vs 别名
+
+    返回的 dict key 是冲突的完整指令名（主指令名或别名），
+    value 是所有「命中该名称」的 descriptor 列表。
+    """
     conflicts: dict[str, list[CommandDescriptor]] = defaultdict(list)
     for desc in descriptors:
-        if desc.effective_command and desc.enabled:
-            conflicts[desc.effective_command].append(desc)
+        if not desc.enabled:
+            continue
+        # 主指令名
+        if desc.effective_command:
+            conflicts[desc.effective_command.strip()].append(desc)
+        # 别名（用完整形式，和主指令名同等对待）
+        parent = (desc.parent_signature or "").strip()
+        for alias in desc.aliases:
+            alias_full = _compose_command(parent, alias).strip()
+            if alias_full:
+                conflicts[alias_full].append(desc)
     return {k: v for k, v in conflicts.items() if len(v) > 1}
 
 
@@ -496,6 +520,14 @@ def _set_filter_aliases(
         filter_ref._cmpl_cmd_names = None
 
 
+def _is_plugin_activated(handler: StarHandlerMetadata) -> bool:
+    """判断 handler 所属插件是否已启用。"""
+    plugin_meta = star_map.get(handler.handler_module_path)
+    if not plugin_meta:
+        return True  # 找不到插件信息时默认启用
+    return plugin_meta.activated
+
+
 def _is_command_in_use(
     target_handler_full_name: str,
     candidate_full_command: str,
@@ -503,6 +535,9 @@ def _is_command_in_use(
     candidate = candidate_full_command.strip()
     for handler in star_handlers_registry:
         if handler.handler_full_name == target_handler_full_name:
+            continue
+        # 跳过已禁用插件的指令
+        if not _is_plugin_activated(handler):
             continue
         filter_ref = _locate_primary_filter(handler)
         if not filter_ref:

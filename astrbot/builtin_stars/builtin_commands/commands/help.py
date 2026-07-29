@@ -32,7 +32,7 @@ class HelpCommand:
             return []
 
         lines: list[str] = []
-        hidden_commands = {"set", "unset", "websearch"}
+        hidden_commands = {"websearch"}
 
         def walk(items: list[dict], indent: int = 0) -> None:
             for item in items:

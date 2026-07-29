@@ -32,6 +32,13 @@ from astrbot.core.utils.media_utils import (
 )
 
 SSE_HEARTBEAT = ": heartbeat\n\n"
+WEBCHAT_IMAGE_MIME_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
 
 
 def sanitize_upload_filename(filename: str | None) -> str:
@@ -504,7 +511,6 @@ class ChatService:
         self.webchat_img_dir = os.path.join(get_astrbot_data_path(), "webchat", "imgs")
         os.makedirs(self.attachments_dir, exist_ok=True)
 
-        self.supported_imgs = ["jpg", "jpeg", "png", "gif", "webp"]
         self.conv_mgr = core_lifecycle.conversation_manager
         self.platform_history_mgr = core_lifecycle.platform_message_history_manager
         self.umop_config_router = core_lifecycle.umop_config_router
@@ -555,8 +561,8 @@ class ChatService:
         filename_ext = file_path.suffix.lower()
         if filename_ext == ".wav":
             return str(file_path), "audio/wav"
-        if filename_ext[1:] in self.supported_imgs:
-            return str(file_path), "image/jpeg"
+        if filename_ext in WEBCHAT_IMAGE_MIME_TYPES:
+            return str(file_path), WEBCHAT_IMAGE_MIME_TYPES[filename_ext]
         return str(file_path), None
 
     async def resolve_webchat_file_from_dashboard_query(
@@ -683,8 +689,68 @@ class ChatService:
             page=1,
             page_size=100000,
         )
-        history_list.sort(key=lambda item: (item.created_at, item.id))
-        return history_list
+        return self.sort_history_by_turn(history_list)
+
+    @staticmethod
+    def sort_history_by_turn(history_list: list) -> list:
+        """按对话轮次排序 platform_message_history 记录。
+
+        用户连发多条消息时，用户消息立即写入（created_at 早），
+        而 AI 回复要等 LLM 处理完才写入（created_at 晚），
+        导致按 created_at 排序时用户消息和 AI 回复被拆散。
+
+        利用 llm_checkpoint_id 将用户消息和 AI 回复配对为同一轮次，
+        按轮次中最早记录的 created_at 排序，确保刷新后顺序与发送时一致。
+        """
+        if not history_list:
+            return history_list
+
+        # 按 llm_checkpoint_id 分组
+        groups: dict[str, list] = {}
+        standalone: list = []
+        for item in history_list:
+            ckpt = getattr(item, "llm_checkpoint_id", None)
+            if ckpt:
+                groups.setdefault(ckpt, []).append(item)
+            else:
+                standalone.append(item)
+
+        def _group_key(items):
+            m = min(items, key=lambda x: (x.created_at, x.id or 0))
+            return (m.created_at, m.id or 0)
+
+        # 统一排序：有 checkpoint 的组 + 无 checkpoint 的独立项
+        entries: list[tuple[tuple, list]] = []
+        for ckpt, items in groups.items():
+            entries.append((_group_key(items), items))
+        for item in standalone:
+            entries.append(((item.created_at, item.id or 0), [item]))
+        entries.sort(key=lambda e: e[0])
+
+        result: list = []
+        for _, items in entries:
+            user_items = sorted(
+                [i for i in items if isinstance(i.content, dict) and i.content.get("type") == "user"],
+                key=lambda x: (x.created_at, x.id or 0),
+            )
+            bot_items = sorted(
+                [i for i in items if isinstance(i.content, dict) and i.content.get("type") == "bot"],
+                key=lambda x: (x.created_at, x.id or 0),
+            )
+            other_items = sorted(
+                [
+                    i
+                    for i in items
+                    if not isinstance(i.content, dict)
+                    or i.content.get("type") not in ("user", "bot")
+                ],
+                key=lambda x: (x.created_at, x.id or 0),
+            )
+            result.extend(user_items)
+            result.extend(bot_items)
+            result.extend(other_items)
+
+        return result
 
     async def delete_platform_history_after(
         self, session, message_id: int
@@ -1240,6 +1306,7 @@ class ChatService:
             page=1,
             page_size=1000,
         )
+        history_ls = self.sort_history_by_turn(history_ls)
         threads = await self.db.get_webchat_threads_by_parent_session(
             parent_session_id=session_id,
             creator=username,

@@ -13,12 +13,13 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from astrbot.api.web import PluginRequest, bind_request_context
 from astrbot.core import logger
+from astrbot.core.log import LogManager
 from astrbot.dashboard.asgi_runtime import (
     DashboardRequestState,
     call_request_view,
 )
 from astrbot.dashboard.async_utils import run_maybe_async
-from astrbot.dashboard.responses import ok
+from astrbot.dashboard.responses import ok, error
 from astrbot.dashboard.schemas import (
     EnabledPatch,
     PluginByIdRequest,
@@ -27,6 +28,7 @@ from astrbot.dashboard.schemas import (
     PluginConfigUpdateRequest,
     PluginEnabledRequest,
     PluginInstallRequest,
+    PluginLogLevelPayload,
     PluginSourceBindRequest,
     PluginSourceRequest,
     PluginUninstallRequest,
@@ -753,7 +755,7 @@ async def get_plugin_config_by_id(
     _auth: AuthContext = Depends(require_plugin_scope),
     service: ConfigDisplayService = Depends(get_config_display_service),
 ):
-    return ok({"plugin_name": plugin_id, **await service.get_configs(plugin_id)})
+    return ok({"plugin_name": plugin_id, "log_level": LogManager.get_plugin_log_level(plugin_id), **await service.get_configs(plugin_id)})
 
 
 @router.put("/plugins/config")
@@ -781,6 +783,23 @@ async def get_plugin_config_schema_by_id(
     service: ConfigDisplayService = Depends(get_config_display_service),
 ):
     return ok({"plugin_name": plugin_id, **await service.get_configs(plugin_id)})
+
+
+@router.put("/plugins/{plugin_id}/log-level")
+async def update_plugin_log_level(
+    plugin_id: str,
+    payload: PluginLogLevelPayload,
+    _auth: AuthContext = Depends(require_plugin_scope),
+):
+    try:
+        LogManager.set_plugin_log_level(plugin_id, payload.level)
+    except ValueError as e:
+        return error(str(e))
+    level_desc = payload.level.upper() if payload.level else "跟随全局"
+    return ok(
+        message=f"插件 {plugin_id} 的日志级别已设为 {level_desc}。",
+        data={"log_level": LogManager.get_plugin_log_level(plugin_id)},
+    )
 
 
 @router.get("/plugins/config-files")

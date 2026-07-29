@@ -1,5 +1,10 @@
-from astrbot.api import star
+import json
+import os
+from datetime import datetime
+
+from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 
 class AdminCommands:
@@ -67,6 +72,49 @@ class AdminCommands:
             event.set_result(MessageEventResult().message("删除白名单成功。"))
         except ValueError:
             event.set_result(MessageEventResult().message("此 SID 不在白名单内。"))
+
+    async def restart(self, event: AstrMessageEvent) -> None:
+        """重启 ldm 框架"""
+        from astrbot.core.desktop_runtime import (
+            DESKTOP_MANAGED_RESTART_MESSAGE,
+            is_desktop_managed_backend,
+        )
+
+        if is_desktop_managed_backend():
+            event.set_result(
+                MessageEventResult().message(DESKTOP_MANAGED_RESTART_MESSAGE),
+            )
+            return
+
+        core_lifecycle = self.context._core_lifecycle
+
+        # 写入重启记录，供启动报告插件读取
+        record = {
+            "restart_time": datetime.now().isoformat(),
+            "umo": event.unified_msg_origin,
+        }
+        group_id = event.get_group_id()
+        if group_id:
+            record["group_id"] = int(group_id)
+        try:
+            record_dir = os.path.join(
+                get_astrbot_data_path(), "plugin_data", "startup-report",
+            )
+            os.makedirs(record_dir, exist_ok=True)
+            record_path = os.path.join(record_dir, "restart_record.json")
+            with open(record_path, "w", encoding="utf-8") as f:
+                json.dump(record, f, ensure_ascii=False)
+            logger.info(f"已写入重启记录: {record_path}")
+        except Exception as e:
+            logger.warning(f"写入重启记录失败: {e}")
+
+        await event.send(
+            MessageChain().message("正在重启 ldm 框架，请稍候...")
+        )
+
+        # 调用 core_lifecycle.restart()：先终止各管理器并通知 WebUI 关闭，
+        # 再由 _reboot() 起新进程。与 WebUI 重启按钮走同一条链路。
+        await core_lifecycle.restart()
 
     async def update_dashboard(self, event: AstrMessageEvent) -> None:
         """从 landamao/ldm_AstrBot 同步管理面板到 data/dist。"""
