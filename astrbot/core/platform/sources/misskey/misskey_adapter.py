@@ -219,7 +219,7 @@ class MisskeyPlatformAdapter(Platform):
             message.raw_message["poll"] = poll
             message.__setattr__("poll", poll)
         except Exception:
-            pass
+            logger.debug("[Misskey] 设置消息 poll 属性失败", exc_info=True)
 
         poll_text = format_poll(poll)
         if poll_text:
@@ -494,7 +494,7 @@ class MisskeyPlatformAdapter(Platform):
                                 if url:
                                     return {"fallback_url": url}
                             except Exception:
-                                pass
+                                logger.debug("[Misskey] register_to_file_service 回退失败", exc_info=True)
 
                         return None
 
@@ -509,7 +509,7 @@ class MisskeyPlatformAdapter(Platform):
                                 os.remove(local_path)
                                 logger.debug(f"[Misskey] 已清理临时文件: {local_path}")
                             except Exception:
-                                pass
+                                logger.debug(f"[Misskey] 清理临时文件失败: {local_path}", exc_info=True)
 
             # 收集所有可能包含文件/URL信息的组件：支持异步接口或同步字段
             file_components = []
@@ -553,7 +553,7 @@ class MisskeyPlatformAdapter(Platform):
                             if fid_str:
                                 file_ids.append(fid_str)
                         except Exception:
-                            pass
+                            logger.debug("[Misskey] 转换文件 ID 失败", exc_info=True)
             except Exception:
                 logger.debug("[Misskey] 并发上传过程中出现异常，继续发送文本")
 

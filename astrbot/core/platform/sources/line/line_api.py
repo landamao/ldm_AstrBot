@@ -198,6 +198,6 @@ class LineAPIClient:
                     if status == "failed":
                         return False
             except Exception:
-                pass
+                logger.debug("[Line API] 轮询消息状态失败", exc_info=True)
             await asyncio.sleep(interval_seconds)
         return False

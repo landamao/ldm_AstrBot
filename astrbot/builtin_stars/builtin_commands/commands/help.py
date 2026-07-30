@@ -1,5 +1,6 @@
 import aiohttp
 
+from astrbot import logger
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core.config.default import VERSION
@@ -67,8 +68,8 @@ class HelpCommand:
         notice = ""
         try:
             notice = await self._query_astrbot_notice()
-        except BaseException:
-            pass
+        except Exception:
+            logger.debug("获取公告失败", exc_info=True)
 
         dashboard_version = await get_dashboard_version()
         command_lines = await self._build_reserved_command_lines()

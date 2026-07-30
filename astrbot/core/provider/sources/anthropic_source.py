@@ -518,7 +518,7 @@ class ProviderAnthropic(Provider):
 
         try:
             completion = await retry_provider_request(
-                "Anthropic",
+                f"Anthropic/{self.display_provider_id()}/{payloads.get('model', self.get_model())}",
                 lambda: self.client.messages.create(
                     **payloads, stream=False, extra_body=extra_body
                 ),
@@ -626,7 +626,7 @@ class ProviderAnthropic(Provider):
         self._sanitize_assistant_messages(payloads)
 
         async with retry_provider_request_context(
-            "Anthropic",
+            f"Anthropic/{self.display_provider_id()}/{payloads.get('model', self.get_model())}",
             lambda: self.client.messages.stream(**payloads, extra_body=extra_body),
             max_attempts=request_max_retries,
         ) as stream:
@@ -1020,7 +1020,7 @@ class ProviderAnthropic(Provider):
     async def get_models(self) -> list[str]:
         models_str = []
         models = await retry_provider_request(
-            "Anthropic",
+            f"Anthropic/{self.display_provider_id()}",
             lambda: self.client.models.list(),
         )
         models = sorted(models.data, key=lambda x: x.id)

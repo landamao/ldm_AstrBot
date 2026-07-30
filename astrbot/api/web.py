@@ -12,6 +12,8 @@ from starlette.datastructures import Headers
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.responses import StreamingResponse
 
+from astrbot import logger
+
 ValueT = TypeVar("ValueT")
 DefaultT = TypeVar("DefaultT")
 ConvertedT = TypeVar("ConvertedT")
@@ -119,7 +121,7 @@ class PluginUploadFile:
         try:
             await self._upload_file.seek(0)
         except Exception:
-            pass
+            logger.debug("上传文件 seek(0) 失败，可能已到达末尾", exc_info=True)
         with path.open("wb") as output:
             while True:
                 chunk = await self._upload_file.read(1024 * 1024)

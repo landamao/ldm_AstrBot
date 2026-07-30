@@ -65,7 +65,7 @@ class PreProcessStage(Stage):
                 self_id = event.get_self_id()
                 sender_id = event.get_sender_id()
             except Exception:
-                pass
+                logger.debug("获取 self_id 或 sender_id 失败", exc_info=True)
             if not (self_id is not None and sender_id is not None and str(sender_id) == str(self_id)):
                 msg_id = getattr(getattr(event, "message_obj", None), "message_id", None)
                 get_segmented_reply_session_tracker().remember_incoming(

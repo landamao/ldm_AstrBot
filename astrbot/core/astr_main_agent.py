@@ -641,7 +641,7 @@ async def _ensure_persona_and_skills(
             persona_toolset=persona_toolset.names(),
         )
     except Exception:
-        pass
+        logger.debug("记录人格选择 trace 失败", exc_info=True)
 
 
 async def _request_img_caption(
@@ -1313,7 +1313,7 @@ def _get_compress_provider(
         try:
             return plugin_context.get_using_provider(umo=event.unified_msg_origin)
         except ValueError:
-            pass
+            logger.debug("从 plugin_context 获取 provider 失败（ValueError）")
     return None
 
 

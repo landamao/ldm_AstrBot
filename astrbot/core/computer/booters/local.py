@@ -143,11 +143,11 @@ class LocalShellComponent(ShellComponent):
                     try:
                         proc.kill()
                     except Exception:
-                        pass
+                        logger.debug("proc.kill() 失败", exc_info=True)
                 try:
                     proc.wait(timeout=5)
                 except Exception:
-                    pass
+                    logger.debug("proc.wait(timeout=5) 失败", exc_info=True)
                 raise
             return {
                 "stdout": _decode_shell_output(stdout),

@@ -311,7 +311,7 @@ class DiscordPlatformEvent(AstrMessageEvent):
                     cast(discord.Interaction, self.message_obj.raw_message).data,
                 ).get("custom_id", "")
             except Exception:
-                pass
+                logger.debug("[Discord] 获取交互组件 custom_id 失败", exc_info=True)
         return ""
 
     def is_mentioned(self) -> bool:

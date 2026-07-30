@@ -445,7 +445,7 @@ class ProviderOpenAIOfficial(Provider):
         try:
             models_str = []
             models = await retry_provider_request(
-                "OpenAI",
+                f"OpenAI/{self.display_provider_id()}",
                 lambda: self.client.models.list(),
             )
             models = sorted(models.data, key=lambda x: x.id)
@@ -585,7 +585,7 @@ class ProviderOpenAIOfficial(Provider):
 
         async def _create(stream: bool):
             return await retry_provider_request(
-                "OpenAI",
+                f"OpenAI/{self.display_provider_id()}/{payloads.get('model', self.get_model())}",
                 lambda: self.client.chat.completions.create(
                     **payloads,
                     stream=stream,
@@ -705,7 +705,7 @@ class ProviderOpenAIOfficial(Provider):
         self._sanitize_assistant_messages(payloads)
 
         stream = await retry_provider_request(
-            "OpenAI",
+            f"OpenAI/{self.display_provider_id()}/{payloads.get('model', self.get_model())}",
             lambda: self.client.chat.completions.create(
                 **payloads,
                 stream=True,

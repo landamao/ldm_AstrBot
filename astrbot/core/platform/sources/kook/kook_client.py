@@ -147,7 +147,7 @@ class KookClient:
             try:
                 await self.ws.close()
             except Exception:
-                pass
+                logger.debug("[KOOK] 关闭旧 WebSocket 连接失败", exc_info=True)
             self.ws = None
         self._stop_event.clear()
         try:
@@ -179,7 +179,7 @@ class KookClient:
                 try:
                     await self.ws.close()
                 except Exception:
-                    pass
+                    logger.debug("[KOOK] 连接失败后关闭 WebSocket 失败", exc_info=True)
                 self.ws = None
             return False
 

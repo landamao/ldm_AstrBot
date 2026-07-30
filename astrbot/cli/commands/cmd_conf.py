@@ -1,4 +1,5 @@
 import json
+import logging
 import zoneinfo
 from collections.abc import Callable
 from typing import Any
@@ -6,6 +7,8 @@ from typing import Any
 import click
 
 from ..utils import check_astrbot_root, get_astrbot_root
+
+logger = logging.getLogger("astrbot")
 
 
 def _validate_log_level(value: str) -> str:
@@ -237,4 +240,4 @@ def get_config(key: str | None = None) -> None:
                 )
                 click.echo(f"  {key}: {value}")
             except (KeyError, TypeError):
-                pass
+                logger.debug(f"配置项不存在或类型错误: {key}")

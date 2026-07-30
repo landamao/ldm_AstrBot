@@ -613,7 +613,7 @@ class ProviderGoogleGenAI(Provider):
                     temperature,
                 )
                 result = await retry_provider_request(
-                    "Gemini",
+                    f"Gemini/{self.display_provider_id()}/{model}",
                     lambda: self.client.models.generate_content(
                         model=model,
                         contents=cast(types.ContentListUnion, conversation),
@@ -712,7 +712,7 @@ class ProviderGoogleGenAI(Provider):
                     system_instruction,
                 )
                 result = await retry_provider_request(
-                    "Gemini",
+                    f"Gemini/{self.display_provider_id()}/{model}",
                     lambda: self.client.models.generate_content_stream(
                         model=model,
                         contents=cast(types.ContentListUnion, conversation),
@@ -980,7 +980,7 @@ class ProviderGoogleGenAI(Provider):
     async def get_models(self):
         try:
             models = await retry_provider_request(
-                "Gemini",
+                f"Gemini/{self.display_provider_id()}",
                 lambda: self.client.models.list(),
             )
             return [

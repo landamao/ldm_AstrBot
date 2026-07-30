@@ -90,6 +90,8 @@ class LLMCommands:
             帮助 = (
                 "LLM 管理命令：\n"
                 "/llm              → 切换当前会话的 LLM 开关（群聊/私聊）\n"
+                "/llm on           → 开启当前会话的 LLM\n"
+                "/llm off          → 关闭当前会话的 LLM\n"
                 "/llm <id> -q      → 切换指定群组的 LLM 开关\n"
                 "/llm <id> -s      → 切换指定私聊用户的 LLM 开关\n"
                 "/llm list         → 查看已关闭 LLM 的群组\n"
@@ -105,9 +107,9 @@ class LLMCommands:
         if sid and sid.lower() == "all":
             op = 操作.strip().lower()
             if op in ("on", "开", "启用"):
-                self.全局关闭 = True
-            elif op in ("off", "关", "停用"):
                 self.全局关闭 = False
+            elif op in ("off", "关", "停用"):
+                self.全局关闭 = True
             else:
                 self.全局关闭 = not self.全局关闭
 
@@ -117,6 +119,32 @@ class LLMCommands:
 
             state = "已关闭" if self.全局关闭 else "已开启"
             await event.send(MessageChain().message(f"全局 LLM 功能{state}"))
+            return
+
+        # -------- 当前会话开关 ----------
+        if sid.lower() in ("on", "off", "开", "关", "启用", "停用"):
+            群号 = event.get_group_id()
+            if 群号:
+                操作的列表 = self.config["关闭的群组"]
+                类型 = "群"
+                target = 群号
+            else:
+                操作的列表 = self.config["关闭的私聊"]
+                类型 = "私聊"
+                target = event.get_sender_id()
+
+            if sid.lower() in ("on", "开", "启用"):
+                if target in 操作的列表:
+                    操作的列表.remove(target)
+                状态 = "已开启"
+            else:
+                if target not in 操作的列表:
+                    操作的列表.append(target)
+                状态 = "已关闭"
+
+            self.config.save_config()
+            self._init_config()
+            await event.send(MessageChain().message(f"{状态} {类型} {target} 的 LLM 功能"))
             return
 
         # -------- list 查看 ----------

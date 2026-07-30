@@ -340,7 +340,7 @@ def describe_media_ref(media_ref: object | None) -> str:
     try:
         media_path_exists = Path(media_ref).exists()
     except OSError:
-        pass
+        logger.debug("检查媒体路径是否存在时出错: %s", media_ref)
     if not media_path_exists:
         compact = "".join(media_ref.split())
         if compact:
@@ -351,7 +351,7 @@ def describe_media_ref(media_ref: object | None) -> str:
                     validate=True,
                 )
             except ValueError:
-                pass
+                logger.debug("媒体引用不是有效的 base64 载荷")
             else:
                 return f"bare base64 media payload_len={len(compact)}"
 
@@ -538,7 +538,7 @@ async def _materialize_media_ref(
     try:
         path_exists = path.exists()
     except OSError:
-        pass
+        logger.debug("检查媒体路径是否存在时出错: %s", media_ref)
     if path_exists:
         return _LocalMediaFile(path=path, mime_type=_guess_mime_type(path))
 
@@ -551,7 +551,7 @@ async def _materialize_media_ref(
                 validate=True,
             )
         except ValueError:
-            pass
+            logger.debug("媒体引用不是有效的 base64 载荷")
         else:
             mime_type = None
             target_suffix = suffix

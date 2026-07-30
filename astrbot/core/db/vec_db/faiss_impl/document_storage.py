@@ -88,8 +88,8 @@ class DocumentStorage:
                         "CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id)",
                     ),
                 )
-            except BaseException:
-                pass
+            except Exception:
+                logger.warning("创建 documents(user_id) 索引失败", exc_info=True)
 
             await conn.execute(
                 text(

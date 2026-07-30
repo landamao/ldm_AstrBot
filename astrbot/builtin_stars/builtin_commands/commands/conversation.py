@@ -3,6 +3,7 @@ import datetime
 from sqlalchemy import case, func, select
 from sqlmodel import col
 
+from astrbot import logger
 from astrbot.api import sp, star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core.agent.runners.deerflow.constants import (
@@ -141,7 +142,7 @@ class ConversationCommands:
                 if active_runner is not None:
                     active_runner.request_stop()
             except Exception:
-                pass
+                logger.warning("获取或停止活跃 runner 失败", exc_info=True)
 
         if stopped_count > 0:
             message.set_result(

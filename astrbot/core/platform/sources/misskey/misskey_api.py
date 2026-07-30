@@ -82,7 +82,7 @@ class StreamingClient:
                                 f"[Misskey WebSocket] 重新订阅 {channel_type} 失败: {e}",
                             )
                 except Exception:
-                    pass
+                    logger.debug("[Misskey WebSocket] 重新订阅频道后清理失败", exc_info=True)
             return True
 
         except Exception as e:
@@ -162,7 +162,7 @@ class StreamingClient:
             try:
                 await self.disconnect()
             except Exception:
-                pass
+                logger.debug("[Misskey WebSocket] ConnectionClosedError 后 disconnect 失败", exc_info=True)
         except websockets.exceptions.ConnectionClosed as e:
             logger.warning(
                 f"[Misskey WebSocket] 连接已关闭 (代码: {e.code}, 原因: {e.reason})",
@@ -171,21 +171,21 @@ class StreamingClient:
             try:
                 await self.disconnect()
             except Exception:
-                pass
+                logger.debug("[Misskey WebSocket] ConnectionClosed 后 disconnect 失败", exc_info=True)
         except websockets.exceptions.InvalidHandshake as e:
             logger.error(f"[Misskey WebSocket] 握手失败: {e}")
             self.is_connected = False
             try:
                 await self.disconnect()
             except Exception:
-                pass
+                logger.debug("[Misskey WebSocket] InvalidHandshake 后 disconnect 失败", exc_info=True)
         except Exception as e:
             logger.error(f"[Misskey WebSocket] 监听消息失败: {e}")
             self.is_connected = False
             try:
                 await self.disconnect()
             except Exception:
-                pass
+                logger.debug("[Misskey WebSocket] 未知异常后 disconnect 失败", exc_info=True)
 
     async def _handle_message(self, data: dict[str, Any]) -> None:
         message_type = data.get("type")
@@ -723,7 +723,7 @@ class MisskeyAPI:
                         ssl_verify=False,
                     ) or await self._download_with_temp_session(url, ssl_verify=False)
                 except Exception:
-                    pass
+                    logger.debug("[Misskey API] 下载文件失败（回退到直接上传）", exc_info=True)
 
             if tmp_bytes:
                 with tempfile.NamedTemporaryFile(delete=False) as tmpf:
@@ -738,7 +738,7 @@ class MisskeyAPI:
                     try:
                         os.unlink(tmp_path)
                     except Exception:
-                        pass
+                        logger.debug(f"[Misskey API] 清理临时文件失败: {tmp_path}", exc_info=True)
         except Exception as e:
             logger.error(f"[Misskey API] 本地上传失败: {e}")
 

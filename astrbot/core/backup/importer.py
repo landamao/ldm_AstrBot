@@ -975,6 +975,6 @@ class AstrBotImporter:
                             # 解析 ISO 格式的日期时间字符串
                             result[column.name] = datetime.fromisoformat(value)
         except Exception:
-            pass
+            logger.debug("解析 DateTime 字段失败，跳过转换", exc_info=True)
 
         return result
