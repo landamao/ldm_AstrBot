@@ -159,7 +159,7 @@ class MainAgentBuildConfig:
     a timeout error as a tool result will be returned.
     """
     tool_schema_mode: str = "full"
-    """The tool schema mode, can be 'full' or 'skills-like'."""
+    """The tool schema mode, can be 'full' or 'skills_like'."""
     provider_wake_prefix: str = ""
     """The wake prefix for the provider. If the user message does not start with this prefix,
     the main agent will not be triggered."""
@@ -257,13 +257,15 @@ async def _get_session_conv(
 ) -> Conversation:
     conv_mgr = plugin_context.conversation_manager
     umo = event.unified_msg_origin
-    cid = await conv_mgr.get_curr_conversation_id(umo)
-    if not cid:
-        cid = await conv_mgr.new_conversation(umo, event.get_platform_id())
-    conversation = await conv_mgr.get_conversation(umo, cid)
-    if not conversation:
-        cid = await conv_mgr.new_conversation(umo, event.get_platform_id())
+    lock = conv_mgr._session_locks.setdefault(umo, asyncio.Lock())
+    async with lock:
+        cid = await conv_mgr.get_curr_conversation_id(umo)
+        if not cid:
+            cid = await conv_mgr.new_conversation(umo, event.get_platform_id())
         conversation = await conv_mgr.get_conversation(umo, cid)
+        if not conversation:
+            cid = await conv_mgr.new_conversation(umo, event.get_platform_id())
+            conversation = await conv_mgr.get_conversation(umo, cid)
     if not conversation:
         raise RuntimeError("无法创建新的对话。")
     return conversation

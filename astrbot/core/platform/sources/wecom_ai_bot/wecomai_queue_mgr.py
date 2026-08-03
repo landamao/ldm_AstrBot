@@ -215,7 +215,12 @@ class WecomAIQueueMgr:
             name=f"wecomai_listener_{session_id}",
         )
         self._listener_tasks[session_id] = task
-        task.add_done_callback(lambda _: self._listener_tasks.pop(session_id, None))
+
+        def _remove_listener(done_task: asyncio.Task) -> None:
+            if self._listener_tasks.get(session_id) is done_task:
+                self._listener_tasks.pop(session_id, None)
+
+        task.add_done_callback(_remove_listener)
         logger.debug(f"[WecomAI] 为会话启动监听器: {session_id}")
 
     async def _listen_to_queue(

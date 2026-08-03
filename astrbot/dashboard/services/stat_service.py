@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import ipaddress
 import re
+import socket
 import threading
 import time
 import traceback
@@ -442,12 +444,34 @@ class StatService:
             logger.error(traceback.format_exc())
             raise StatServiceError(f"Error: {exc!s}") from exc
 
+    @staticmethod
+    async def _validate_public_http_url(url: str) -> None:
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise StatServiceError("仅支持有效的 HTTP/HTTPS 代理地址")
+        try:
+            infos = await asyncio.to_thread(
+                socket.getaddrinfo,
+                parsed.hostname,
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+                type=socket.SOCK_STREAM,
+            )
+        except OSError as exc:
+            raise StatServiceError(f"代理地址解析失败: {exc}") from exc
+        for info in infos:
+            address = ipaddress.ip_address(info[4][0])
+            if not address.is_global:
+                raise StatServiceError("代理地址不能指向本机、内网或保留网络")
+
     async def test_ghproxy_connection(self, proxy_url: str | None) -> dict:
         try:
             if not proxy_url:
                 raise StatServiceError("proxy_url is required")
 
             proxy_url = proxy_url.rstrip("/")
+            await self._validate_public_http_url(proxy_url)
             test_url = f"{proxy_url}/https://github.com/AstrBotDevs/AstrBot/raw/refs/heads/master/.python-version"
             start_time = time.time()
 
@@ -456,6 +480,7 @@ class StatService:
                 session.get(
                     test_url,
                     timeout=aiohttp.ClientTimeout(total=10),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if response.status == 200:

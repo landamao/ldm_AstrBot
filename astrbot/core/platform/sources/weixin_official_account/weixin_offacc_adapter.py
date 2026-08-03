@@ -357,13 +357,16 @@ class WeixinOfficialAccountPlatformAdapter(Platform):
         self.wexin_event_workers: dict[str, asyncio.Future] = {}
 
         async def callback(msg: BaseMessage):
+            msg_id = str(cast(str | int, msg.id))
+            future: asyncio.Future | None = None
+            owns_future = False
             try:
                 if self.active_send_mode:
                     await self.convert_message(msg, None)
                     return None
 
-                msg_id = str(cast(str | int, msg.id))
                 future = self.wexin_event_workers.get(msg_id)
+                owns_future = future is None
                 if future:
                     logger.debug(f"duplicate message id checked: {msg.id}")
                 else:
@@ -375,6 +378,11 @@ class WeixinOfficialAccountPlatformAdapter(Platform):
                         asyncio.shield(future),
                         180,
                     )  # wait for 180s
+                if not owns_future:
+                    result = await asyncio.wait_for(
+                        asyncio.shield(future),
+                        180,
+                    )
                 logger.debug(f"Got future result: {result}")
                 return result
             except asyncio.TimeoutError:
@@ -383,7 +391,8 @@ class WeixinOfficialAccountPlatformAdapter(Platform):
             except Exception as e:
                 logger.error(f"转换消息时出现异常: {e}")
             finally:
-                self.wexin_event_workers.pop(str(cast(str | int, msg.id)), None)
+                if owns_future and self.wexin_event_workers.get(msg_id) is future:
+                    self.wexin_event_workers.pop(msg_id, None)
 
         self.server.callback = callback
         self.server.active_send_mode = self.active_send_mode

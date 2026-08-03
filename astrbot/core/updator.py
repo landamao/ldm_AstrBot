@@ -431,6 +431,11 @@ class AstrBotUpdator(RepoZipUpdator):
                     child.kill()
         except psutil.NoSuchProcess:
             pass
+        except (RuntimeError, OSError) as exc:
+            # Android proot 下 /proc/stat 可能不可读或缺少 btime，psutil 在
+            # Process.children() 内计算 create_time 时会直接抛错。清理子进程只是
+            # 重启前的尽力操作，不能因此阻断后续 os.execv 重启。
+            logger.warning(f"无法读取进程信息，跳过子进程清理: {exc}")
 
     @staticmethod
     def _is_option_arg(arg: str) -> bool:

@@ -1,24 +1,30 @@
-# 🚀 **ldm** · 个人魔改版 AstrBot
+# 🚀 **[ldmbot](https://github.com/landamao/ldm_AstrBot)** · 个人魔改版 AstrBot
 
 > **高度定制 · 拒绝官方覆盖**  
-> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5–4.26.7 修复合入 · 二次修改 · 当前 ldm 版本 **v4.26.26**
+> 基于官方 [AstrBot](https://github.com/AstrBotDevs/AstrBot) v4.26.5–4.26.7 修复合入 · 二次修改 · 当前 ldm 版本 **v4.26.29**
 
 ---
 
 ## 📥 一键安装（推荐）
 
 在终端执行以下命令，自动下载并运行安装脚本：
-### 方式1：一键下载并执行
-```bash
-curl -fsSL -o ldmbot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh && ./ldmbot_install.sh
-```
+### 方式1：一键下载并执行安装
+  - 方式1（直连github）
+    ```bash
+    curl -fsSL -o ldmbot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh && ./ldmbot_install.sh -y
+    ```
+  - 方式2（使用公共代理）
+    ```bash
+    curl -fsSL -o ldmbot_install.sh https://gh-proxy.org/https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh && ./ldmbot_install.sh -y
+    ```
+  - **提示：删掉命令后面的`-y`，可进入交互菜单模式**
 ### 方式2：先下载再执行
   - 第一步：下载脚本
     - 方式1
     ```bash
     curl -fsSL -o ldmbot_install.sh https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh
     ```
-    - 方式2（代理加速）
+    - 方式2（使用公共代理）
     ```bash
     curl -fsSL -o ldmbot_install.sh https://gh-proxy.org/https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot_install.sh && chmod +x ldmbot_install.sh
     ```
@@ -76,7 +82,7 @@ curl -fsSL -o ldmbot_install.sh https://github.com/landamao/ldm_AstrBot/releases
 
 ## 📄 手动安装教程
 
-> 以下步骤基于 `ldmbot_install.sh` 脚本的逻辑，适合希望完全掌控每个环节的用户。
+适合希望完全掌控每个环节的用户。
 
 ### 1. 下载安装脚本
 ```bash
@@ -90,9 +96,9 @@ curl -LO https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot
 chmod +x ldmbot_install.sh
 ```
 
-### 3. 运行脚本（自动解压 + 环境配置）
+### 3. 运行脚本（自动下载 + 环境配置）
 ```bash
-./ldmbot_install.sh
+./ldmbot_install.sh -y
 ```
 
 常用参数：
@@ -112,11 +118,9 @@ chmod +x ldmbot_install.sh
 - 若 `uv` 失败，回退到 `pip`：自动创建 Python 3.12 虚拟环境，安装 `requirements.txt` 并启动（`-ns` 同样跳过 pip 安装）
 
 ### 4. （可选）手动解压部署与启动
-若只想解压不自动启动，可直接下载源码包后解压：
+- 克隆仓库并打开目录
 ```bash
-curl -fsSL -o ldmbot.zip https://github.com/landamao/ldm_AstrBot/releases/latest/download/ldmbot.zip
-unzip ldmbot.zip -d .
-cd ldmbot
+git clone https://github.com/landamao/ldm_AstrBot ldmbot && cd ldmbot
 ```
 - **部署**
 使用uv（推荐）
@@ -135,12 +139,12 @@ cd ldmbot
   ```
 
 ### 5. 后续维护
-- 再次执行同一安装脚本，会检测到已存在 `ldmbot` 目录，提供 **直接启动** / **删除重建** / **重命名重建** / **更新** / **覆盖解压** 选项。
-- **推荐更新方式**：`./ldmbot_install.sh -up -ns`  
+- **启动**：`./ldmbot_install.sh -y`
+- **更新**：`./ldmbot_install.sh -up -ns` 或通过WebUI 
 
 ### 6. 反馈交流
-- qq群 1103659691 [点击跳转](https://qm.qq.com/q/c7Nc3Tl1Je) (https://qm.qq.com/q/c7Nc3Tl1Je)
-- telegram [@landamaogroup](https://t.me/landamaogroup) (https://t.me/landamaogroup)
+- qq群：1103659691 [点击跳转](https://qm.qq.com/q/c7Nc3Tl1Je) (https://qm.qq.com/q/c7Nc3Tl1Je)
+- telegram：@landamaogroup [点击跳转](https://t.me/landamaogroup) (https://t.me/landamaogroup)
 ---
 
 ## 📜 许可 & 文档维护

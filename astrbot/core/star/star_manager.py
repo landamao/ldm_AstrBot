@@ -207,8 +207,20 @@ class PluginManager:
         """加载失败插件的信息，用于后续可能的热重载"""
 
         self.failed_plugin_info = ""
+        self._watcher_task: asyncio.Task | None = None
         if os.getenv("ASTRBOT_RELOAD", "0") == "1":
-            asyncio.create_task(self._watch_plugins_changes())
+            self._watcher_task = asyncio.create_task(
+                self._watch_plugins_changes(),
+                name="plugin_file_watcher",
+            )
+
+    async def shutdown(self) -> None:
+        """停止插件文件监视器。"""
+        task = self._watcher_task
+        self._watcher_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def _watch_plugins_changes(self) -> None:
         """监视插件文件变化"""

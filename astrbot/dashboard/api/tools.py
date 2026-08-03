@@ -34,7 +34,8 @@ async def require_tool_scope(request: Request) -> AuthContext:
 
 
 async def require_mcp_scope(request: Request) -> AuthContext:
-    return await require_scope(request, "mcp")
+    """MCP 配置可启动本地进程，仅允许系统管理员访问。"""
+    return await require_scope(request, "system")
 
 
 async def _json_or_empty(request: Request) -> dict[str, Any]:
@@ -84,7 +85,10 @@ def _test_config_body(
     if isinstance(config, dict):
         return dict(config)
 
-    stored_config = service.get_mcp_server_config(server_name)
+    stored_config = service.get_mcp_server_config(
+        server_name,
+        reveal_sensitive=True,
+    )
     if stored_config is not None:
         return stored_config
 

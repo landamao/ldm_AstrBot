@@ -105,6 +105,8 @@ class CronJobManager:
         self._started = False
         # 调度器可能被 _schedule_job 提前 start；DB 同步单独标记
         self._db_synced = False
+        self._background_tasks: set[asyncio.Task] = set()
+        self._job_locks: dict[str, asyncio.Lock] = {}
 
     async def start(self, ctx: "Context") -> None:
         self.ctx: Context = ctx  # star context
@@ -125,6 +127,13 @@ class CronJobManager:
             await asyncio.sleep(0)
             self._started = False
             self._db_synced = False
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
 
     async def sync_from_db(self) -> None:
         jobs = await self.db.list_cron_jobs()
@@ -271,11 +280,15 @@ class CronJobManager:
                 replace_existing=True,
                 misfire_grace_time=30,
             )
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self.db.update_cron_job(
-                    job.job_id, next_run_time=self._get_next_run_time(job.job_id)
-                )
+                    job.job_id,
+                    next_run_time=self._get_next_run_time(job.job_id),
+                ),
+                name=f"cron_next_run_{job.job_id}",
             )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
         except (ValueError, TypeError) as e:
             logger.exception("Failed to schedule cron job %s", job.job_id)
             raise CronJobSchedulingError(str(e)) from e
@@ -295,6 +308,24 @@ class CronJobManager:
         *,
         ignore_enabled: bool = False,
         delete_run_once: bool = True,
+    ) -> None:
+        lock = self._job_locks.setdefault(job_id, asyncio.Lock())
+        if lock.locked():
+            logger.warning("定时任务 %s 已在运行，跳过本次重复触发。", job_id)
+            return
+        async with lock:
+            await self._run_job_locked(
+                job_id,
+                ignore_enabled=ignore_enabled,
+                delete_run_once=delete_run_once,
+            )
+
+    async def _run_job_locked(
+        self,
+        job_id: str,
+        *,
+        ignore_enabled: bool,
+        delete_run_once: bool,
     ) -> None:
         job = await self.db.get_cron_job(job_id)
         if not job or (not job.enabled and not ignore_enabled):

@@ -1329,6 +1329,12 @@ class ProviderConfigService:
         if not next_source_id:
             raise ValueError("Provider source config must have an 'id' field")
         config["id"] = next_source_id
+        # 自动清理 api_base 前后空字符
+        if isinstance(config.get("api_base"), str):
+            config["api_base"] = config["api_base"].strip()
+        # 自动清理 key 列表中每个密钥的前后空字符
+        if isinstance(config.get("key"), list):
+            config["key"] = [k.strip() for k in config["key"] if isinstance(k, str) and k.strip()]
         sources = self.config.setdefault("provider_sources", [])
 
         for source in sources:

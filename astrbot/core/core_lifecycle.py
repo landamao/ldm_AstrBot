@@ -400,12 +400,18 @@ class AstrBotCoreLifecycle:
         if self.temp_dir_cleaner:
             await self.temp_dir_cleaner.stop()
 
+        # 先停止并等待已取出的消息，避免数据库/平台终止后仍有 Pipeline 访问旧资源。
+        if self.event_bus:
+            await self.event_bus.shutdown()
+
         # 请求停止所有正在运行的异步任务
         for task in self.curr_tasks:
             task.cancel()
 
         if self.cron_manager:
             await self.cron_manager.shutdown()
+
+        await self.plugin_manager.shutdown()
 
         for plugin in self.plugin_manager.context.get_all_stars():
             try:
@@ -438,6 +444,9 @@ class AstrBotCoreLifecycle:
 
     async def restart(self) -> None:
         """重启 AstrBot 核心生命周期管理类, 终止各个管理器并重新加载平台实例"""
+        if self.event_bus:
+            await self.event_bus.shutdown()
+        await self.plugin_manager.shutdown()
         await self.provider_manager.terminate()
         await self.platform_manager.terminate()
         await self.kb_manager.terminate()

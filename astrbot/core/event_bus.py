@@ -35,10 +35,13 @@ class EventBus:
         self.astrbot_config_mgr = astrbot_config_mgr
         # 持有正在执行的 pipeline 任务的强引用, 防止 task 在 pending 状态被 GC 回收
         self._pending_tasks: set[asyncio.Task] = set()
+        self._stopping = asyncio.Event()
 
     async def dispatch(self) -> None:
         while True:
             event: AstrMessageEvent = await self.event_queue.get()
+            if self._stopping.is_set():
+                continue
             conf_info = self.astrbot_config_mgr.get_conf_info(event.unified_msg_origin)
             conf_id = conf_info["id"]
             conf_name = conf_info.get("name") or conf_id
@@ -52,6 +55,17 @@ class EventBus:
             task = asyncio.create_task(scheduler.execute(event))
             self._pending_tasks.add(task)
             task.add_done_callback(self._on_task_done)
+
+    async def shutdown(self) -> None:
+        """停止接收并收敛所有已经创建的 Pipeline 任务。"""
+        self._stopping.set()
+        tasks = list(self._pending_tasks)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._pending_tasks.clear()
 
     def _on_task_done(self, task: asyncio.Task) -> None:
         """pipeline 任务结束回调: 移除强引用并暴露未捕获的异常"""

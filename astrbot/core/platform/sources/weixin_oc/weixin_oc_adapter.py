@@ -404,11 +404,10 @@ class WeixinOCAdapter(Platform):
             )
         finally:
             state = self._typing_states.get(user_id)
-            if state is None:
-                return
-            async with state.lock:
-                if state.cancel_task is current_task:
-                    state.cancel_task = None
+            if state is not None:
+                async with state.lock:
+                    if state.cancel_task is current_task:
+                        state.cancel_task = None
 
     async def start_typing(self, user_id: str, owner_id: str) -> None:
         state = self._get_typing_state(user_id)

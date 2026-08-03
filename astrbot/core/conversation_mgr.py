@@ -4,6 +4,7 @@
 在一个会话中可以建立多个对话, 并且支持对话的切换和删除
 """
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 
@@ -22,6 +23,8 @@ class ConversationManager:
     def __init__(self, db_helper: BaseDatabase) -> None:
         self.session_conversations: dict[str, str] = {}
         self.db = db_helper
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._conversation_locks: dict[str, asyncio.Lock] = {}
         self.save_interval = 60  # 每 60 秒保存一次
 
         # 会话删除回调函数列表（用于级联清理，如知识库配置）
@@ -387,24 +390,23 @@ class ConversationManager:
         Raises:
             Exception: If the conversation with the given ID is not found
         """
-        conv = await self.db.get_conversation_by_id(cid=cid)
-        if not conv:
-            raise Exception(f"Conversation with id {cid} not found")
-        history = conv.content or []
-        if isinstance(user_message, UserMessageSegment):
-            user_msg_dict = user_message.model_dump()
-        else:
-            user_msg_dict = user_message
-        if isinstance(assistant_message, AssistantMessageSegment):
-            assistant_msg_dict = assistant_message.model_dump()
-        else:
-            assistant_msg_dict = assistant_message
-        history.append(user_msg_dict)
-        history.append(assistant_msg_dict)
-        await self.db.update_conversation(
-            cid=cid,
-            content=history,
-        )
+        lock = self._conversation_locks.setdefault(cid, asyncio.Lock())
+        async with lock:
+            conv = await self.db.get_conversation_by_id(cid=cid)
+            if not conv:
+                raise Exception(f"Conversation with id {cid} not found")
+            history = list(conv.content or [])
+            if isinstance(user_message, UserMessageSegment):
+                user_msg_dict = user_message.model_dump()
+            else:
+                user_msg_dict = user_message
+            if isinstance(assistant_message, AssistantMessageSegment):
+                assistant_msg_dict = assistant_message.model_dump()
+            else:
+                assistant_msg_dict = assistant_message
+            history.append(user_msg_dict)
+            history.append(assistant_msg_dict)
+            await self.db.update_conversation(cid=cid, content=history)
 
     async def get_human_readable_context(
         self,

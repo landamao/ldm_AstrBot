@@ -26,11 +26,17 @@ class SessionController:
         """上次保持(keep)开始时的时间"""
         self.timeout: float | int | None = None
         """上次保持(keep)开始时的超时时间"""
+        self.holding_task: asyncio.Task | None = None
 
         self.history_chains: list[list[Comp.BaseMessageComponent]] = []
 
     def stop(self, error: Exception | None = None) -> None:
         """立即结束这个会话"""
+        if self.current_event and not self.current_event.is_set():
+            self.current_event.set()
+        if self.holding_task and not self.holding_task.done():
+            self.holding_task.cancel()
+        self.holding_task = None
         if not self.future.done():
             if error:
                 self.future.set_exception(error)
@@ -69,7 +75,10 @@ class SessionController:
         self.current_event = new_event
         self.timeout = timeout
 
-        asyncio.create_task(self._holding(new_event, timeout))  # 开始新的 keep
+        self.holding_task = asyncio.create_task(
+            self._holding(new_event, timeout),
+            name="session_waiter_holding",
+        )
 
     async def _holding(self, event: asyncio.Event, timeout: float) -> None:
         """等待事件结束或超时"""

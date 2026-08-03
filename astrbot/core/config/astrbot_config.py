@@ -109,8 +109,6 @@ class AstrBotConfig(dict):
         if has_new:
             self.save_config()
 
-        self.update(conf)
-
     def _reset_generated_dashboard_password(self, conf: dict) -> None:
         generated_password = self._resolve_initial_dashboard_password()
         conf["dashboard"]["pbkdf2_password"] = hash_dashboard_password(

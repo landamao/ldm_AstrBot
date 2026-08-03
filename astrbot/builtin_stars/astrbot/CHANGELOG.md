@@ -6,6 +6,235 @@
 ---
 
 <details>
+<summary><strong>[4.26.29] — 2026-08-02</strong> — 核心稳定性与安全边界全面加固</summary>
+
+基于 ldm v4.26.28 的全面审查修复版本。本次集中修复模型请求、消息去重、任务生命周期、并发写入、定时任务和管理接口安全边界；WebUI 默认账号密码、免强制改密及 `0.0.0.0` 监听策略保持不变。
+
+### 修复
+
+- **Gemini 模型恢复可用**
+  - 修复 Gemini 流式与非流式请求在发起前因计时模块缺失而直接失败的问题。
+
+- **微信与企业微信消息处理更可靠**
+  - 微信公众号重复回调会复用并等待原任务结果，不再因未初始化结果或提前清理去重状态导致重复处理、丢响应。
+  - 微信输入状态取消不再被清理代码覆盖。
+  - 企业微信智能机器人快速重建监听器时，旧任务不再误删新任务引用。
+
+- **停止、重启和热重载任务完整收敛**
+  - 停止或重启前会取消并等待已创建的消息 Pipeline，避免平台、模型或数据库关闭后仍有旧任务继续运行。
+  - 插件热重载 watcher 纳入生命周期管理，关闭后不再继续监听或重载插件。
+  - WebChat 流式请求保留任务取消语义，不再把取消当普通异常吞掉。
+
+- **对话并发写入不再互相覆盖**
+  - 同一会话首次并发消息只会创建一份当前对话。
+  - 同一对话的消息历史按顺序写入，避免并发读改写造成静默丢消息。
+
+- **定时任务避免重复执行和残留写入**
+  - 同一任务的定时触发与手动立即执行互斥，避免重复唤醒、重复回复和状态覆盖。
+  - 后台状态更新任务在关闭时统一取消并等待。
+  - 会话等待超时任务可被及时取消，不再残留到原超时时间。
+
+### 安全
+
+- **MCP 管理权限与敏感配置收紧**
+  - MCP 配置可启动本地进程，管理接口现仅允许系统级权限访问。
+  - MCP 列表和详情会自动隐藏 Authorization、Token、Secret、密码及 API Key 等敏感值，内部连接测试仍使用真实配置。
+
+- **GitHub 代理连通性测试增加 SSRF 防护**
+  - 仅允许有效的 HTTP/HTTPS 公网地址，拒绝本机、内网和保留网络，并禁止测试请求跟随重定向。
+
+### 优化
+
+- 版本更新时会显式同步根目录文档到内置插件目录，插件导入本身不再产生文件写入副作用。
+- 统一工具调用模式配置值为 `skills_like`，并清理重复配置初始化。
+- 新增审查回归测试，锁定上述修复及既有 WebUI 默认策略。
+
+### 说明
+
+- WebUI 默认用户名 `ldm`、默认密码 `ldm`、不强制改密及监听 `0.0.0.0` 的行为保持不变。
+- 更新后请手动同步源码并重启服务。
+
+</details>
+
+<details>
+<summary><strong>[4.26.28] — 2026-07-31</strong> — 代码质量大扫除：静默异常全面修复、/llm on/off 指令、重试日志增强可读性</summary>
+
+基于 ldm v4.26.27 的代码质量优化版本。本次对全代码库进行了系统性审查，修复了 25 处静默吞异常（except: pass）、新增 /llm on/off 指令、改进了 LLM 重试日志的可读性，共 3 项改动。
+
+### 体验优化
+
+- **静默异常全面修复**
+  - 对全代码库 15 个文件中的 25 处 `except: pass` 进行了系统性修复
+  - 根据异常上下文分别添加了合适的日志级别：
+    - `warning`：可能影响功能的异常（如停止活跃 runner 失败、数据库索引创建失败）
+    - `debug`：探测性/清理性/预期失败的异常（如文件清理竞态、WebSocket 断连后清理、媒体格式检测等）
+  - 将 2 处 `except BaseException` 收窄为 `except Exception`，避免吞掉 `KeyboardInterrupt` 等严重信号
+  - 保留了 5 处正确的 `except: pass`（asyncio.CancelledError 清理、FileNotFoundError 临时文件竞态、TimeoutError 预期超时）
+
+- **LLM 重试日志增强可读性**
+  - 重试日志现在包含供应商 ID 和模型名，一眼定位问题来源
+  - 改前：`[OpenAI] Request failed with retryable error; retrying (2/5): Error code: 429 - ...`
+  - 改后：`[OpenAI/provider_id/model_name] Request failed with retryable error; retrying (2/5): Error code: 429 - ...`
+  - 覆盖全部三个 provider 适配器（OpenAI 兼容、Gemini、Anthropic）
+
+### 新增
+
+- **/llm on/off 指令**
+  - 新增 `/llm on` 和 `/llm off` 指令，直接开关当前会话的 LLM 功能
+  - 自动判断群聊/私聊，操作当前会话对应的列表
+  - 支持中文别名：`/llm 开` `/llm 关` `/llm 启用` `/llm 停用`
+  - 帮助文案已同步更新
+
+### 修复
+
+- **/llm all on/off 语义反转**
+  - `/llm all on` 原来设置「全局关闭 = True」（关闭 LLM），与「on = 开启」的直觉完全相反
+  - 现已修正：on → 全局关闭 = False（开启 LLM），off → 全局关闭 = True（关闭 LLM）
+
+### 说明
+
+- 更新后请**手动重启**一次服务
+- 若面板显示异常，可用顶栏「强制刷新面板」或浏览器 Ctrl+F5
+- 建议验证：发送 `/llm on` 和 `/llm off` 确认指令生效；查看日志中重试信息是否包含供应商和模型名
+
+</details>
+
+<details>
+<summary><strong>[4.26.27] — 2026-07-30</strong> — 大更新：/stop 立即停止、新增 /name /status 指令、指令管理全面强化、Chat 消息顺序修复</summary>
+
+基于 ldm v4.26.26 的大版本更新。本次涵盖强制停止机制重构、内置指令扩充、WebUI 指令管理全面强化、对话管理与消息排序修复，共 10 项改动。
+
+### 跟随官方更新
+
+本次合入官方 AstrBot v4.26.7 → v4.26.8 的新增改动。
+
+- **插件独立日志级别控制**
+  - 每个插件现在有自己专属的日志记录器，日志会自动标明来自哪个插件，方便排查问题
+  - 插件配置弹窗顶部新增「日志级别」下拉框，可以为单个插件单独设置日志级别（DEBUG / INFO / WARNING / ERROR / CRITICAL），选「跟随全局」则恢复默认
+  - 设置后立即生效，不需要重启
+  - 同时修了一个官方也有的 bug：`api/all.py` 里 `from .message_components import *` 会把全局 logger 带进来，覆盖掉插件专属 logger，导致日志级别设置不生效
+
+- **ChatUI 工作区文件浏览器后端**
+  - 合入了 WebUI 聊天页面工作区文件浏览功能的后端接口，为后续前端接线做准备
+
+- **限流并发竞态修复**
+  - 多个用户同时触发限流检查时，获取当前时间的那一行代码在锁外面，可能读到旧时间导致判断不准
+  - 现已把获取时间的代码移到锁内，消除竞态
+
+- **WebChat 请求标志统一**
+  - 之前 WebChat（网页聊天）里散落着各种 `enable_streaming`（是否流式输出）的判断，写得很乱
+  - 现在统一收拢到一个 `resolve_webchat_request_flags` 函数里，同时处理 MIME 类型识别和转发条数限制
+  - 代码更清晰，后续维护更方便
+
+### 新增
+
+- **内置指令 `/name`：设置会话显示名称**
+  - 管理员权限，格式：`/name <名称>`
+  - 将当前会话（UMO）的自定义显示名称写入 `umo_aliases` 表
+  - 不带参数时显示当前会话 ID、自动名称、自定义名称
+  - 新增 `/name unset` 清除自定义名称，恢复自动获取的名称（如群名）
+  - 注册位置：`main.py`，`/sid` 之后
+
+- **会话来源自动名称（auto_name）自动刷新**
+  - 每次写入对话历史时自动从 event 提取群名/发送者名称，更新 `umo_aliases` 表的 `auto_name`
+  - 仅在 auto_name 发生变化时写入，不覆盖用户手动设置的 `user_alias`
+
+- **内置指令 `/status`：查看对话运行状态及 Token 用量**
+  - 原 `stats` 改名为 `status`，文案中文化
+  - 运行状态：用 `active_event_registry.count()` + `has_active_runner()` 检测，显示「正在运行（N 个活跃任务）」或「空闲」
+  - Token 用量：总计、输入（缓存）、输入（其他）、输出
+  - 即使没有对话也显示运行状态
+  - 注册位置：`main.py`，`/new` 之后
+
+- **内置指令 `/restart`：重启框架**
+  - 管理员权限，发送后回复提示并执行重启
+  - 与 WebUI 重启按钮走同一条链路（`core_lifecycle.restart()`），先终止各管理器并通知 WebUI 释放端口，再重新启动进程
+  - 重启前写入记录文件（时间、会话来源 UMO、群 ID），重启后可自动发送报告
+  - 推荐配合插件 `启动报告`(https://github.com/landamao/ldmpl_startup_report) 使用：重启后自动发送启动报告到原会话，含重启耗时，支持群聊和私聊
+
+### 体验优化
+
+- **`/stop` 强制停止——真正的立即停止**
+  - 之前 `/stop` 设置 `_abort_signal`（asyncio.Event）后，只能等下一个流式 chunk 到达或非流式完整响应返回后才能中断
+  - 新增 `_race_stream_against_abort()`：流式迭代与 abort 信号竞速，abort 一到立即 cancel chunk 读取、close 流、return
+  - 新增 `_race_call_against_abort()`：非流式调用与 abort 信号竞速，abort 一到立即 cancel 请求、返回 None
+  - `_iter_llm_responses_with_fallback` 中两处加 abort 检查，收到停止信号不再尝试 fallback
+  - 效果：`/stop` 后不再等待 LLM 响应，真正的立即停止
+
+- **`/set` 和 `/unset` 在 `/help` 中显示**
+  - 从 `hidden_commands` 移除 `set` 和 `unset`
+  - `/help` 现在会显示 `/set` 和 `/unset`
+  - 描述补全：`/set` 标注「供 Agent 使用」，`/unset` 标注「移除会话变量」
+
+- **内置指令描述文案修正**
+  - `/dashboard_update`：「更新管理面板」→「更新 WebUI 面板」
+  - `/reset`：「重置 LLM 会话」→「清除当前对话上下文」
+  - `/sid`：「获取会话 ID 和 管理员 ID」→「获取会话 ID 信息」
+  - `/persona`：Persona → 人格情景
+  - `/provider`：Provider → 提供商
+  - `/status`：「查看当前对话状态及 Token 用量统计」→「查看当前对话 Agent 状态及 Token 用量」
+  - `/ls` 描述补充「可用 /switch <序号> 切换」
+  - `/name` 描述补充「传入 unset 清除」
+
+- **内置指令输出文案修正**
+  - `/ls` 输出末尾追加 `/switch <序号> 切换对话` 提示
+  - `/switch` 类型错误、序号越界提示补充 `/ls 查看对话列表` 引导
+  - `/model` 当前模型显示 `[xxx]` → `「xxx」`
+  - `/status` 运行状态「正在运行/空闲」→ Agent 状态「是（N 个活跃任务）/否」
+
+- **指令表格新增「别名」列**
+  - 插件→管理行为的指令表格原来没有别名显示，只有点开详情对话框才能看到
+  - CommandTable 表头在「指令」列后新增 `aliases` 列，用小 chip 标签展示每个别名；无别名显示「-」
+  - 三语言 i18n 新增 `table.headers.aliases`（中文「别名」/ 英文「Aliases」/ 俄文「Алиасы」）
+
+- **删除「提供商可达性检测」配置项**
+  - 配置文件→AI 配置里的「提供商可达性检测」是死代码——`provider.py` 里的可达性检测走 `/provider test` 命令参数，从未读取此配置值
+  - 删除 `default.py` 中 `reachability_check` 默认值和配置 schema 定义
+  - 删除三语言 `config-metadata.json` 中 `reachability_check` 条目
+  - `/provider test` 命令功能不受影响
+
+- **对话管理页恢复 WebUI Chat 对话显示**
+  - `ConversationPage.vue` 之前排除 webchat 平台（`exclude_platforms = 'webchat'`），导致 WebUI Chat 对话在对话管理页看不见
+  - 删除该排除条件，webchat 平台的对话现在正常出现在对话列表中
+
+- **「重命名」文案统一改为「编辑」**
+  - 铅笔按钮 tooltip 原显示「重命名指令」，但实际功能是编辑（改指令名+管别名）
+  - 统一改为「编辑指令」；冲突提示、成功/失败提示同步修改
+  - 三语言（中文/英文/俄文）同步修改
+
+- **指令冲突检测全面改进**
+  - **别名冲突检测**：`_group_conflicts` 不仅检测主指令名，也检测所有别名（用 `_compose_command` 拼接完整形式），覆盖主指令名 vs 主指令名、主指令名 vs 别名、别名 vs 别名
+  - **禁用插件不参与冲突检测**：新增 `_is_plugin_activated(handler)` 辅助函数，`_collect_descriptors` 和 `_is_command_in_use` 跳过已禁用插件的指令；禁用插件的指令不再出现在指令列表、不参与冲突检测
+  - **重命名冲突不再拦截**：冲突校验从 `raise ValueError`（导致 400 错误）改为收集 `conflicts: list[str]` 列表，正常保存；冲突信息挂到 `descriptor.rename_conflicts` 字段上，随返回数据传给前端
+  - **前端黄色警告**：`useCommandActions.ts` 的 `confirmRename` 保存成功后检查 `rename_conflicts`，有冲突→黄色 warning toast 显示冲突详情，无冲突→绿色 success toast 显示「编辑指令成功」
+
+### 修复
+
+- **WebUI Chat 刷新后消息顺序错乱**
+  - 问题：用户短时间内连发多条消息时，发送时显示顺序正确（user1→思考中→user2→思考中→…），但刷新页面后消息顺序变成「用户连续 N 条 + AI 连续 N 条」，与数据库对话历史中 user/bot 交替的顺序不符
+  - 根因：用户消息发送瞬间即写入 `platform_message_history`（`created_at` = 发送时间），AI 回复要等 LLM 处理完才写入（`created_at` = 回复完成时间，远晚于用户消息）。`get_session` 按数据库默认 `desc(created_at)` 排序再 reverse，连发场景下用户消息的 `created_at` 全部早于 AI 回复，排序后两类消息被拆散
+  - 修复：新增静态方法 `sort_history_by_turn`，利用 `llm_checkpoint_id`（用户消息和对应 AI 回复共享同一个）将记录配对为同一轮次，按轮次中最早记录的 `created_at` 排序，轮次内部 user 在前 bot 在后
+  - `get_sorted_platform_history` 和 `get_session` 均改为调用 `sort_history_by_turn`
+  - 刷新后顺序：user1, bot1, user2, bot2, user3, bot3，与发送时一致
+
+### 说明
+
+- 更新后请**手动重启**一次服务
+- 若面板显示异常，可用顶栏「强制刷新面板」或浏览器 Ctrl+F5
+- 建议验证：
+  - `/stop` 能否立即中断正在生成的 LLM 回复（不应再等待下一个 chunk）
+  - `/name 测试名称` 设置后 `/name` 查看是否生效
+  - `/status` 是否显示运行状态和 Token 用量
+  - `/help` 是否显示 `/set` 和 `/unset`
+  - 插件→管理行为指令表格是否显示别名列
+  - 配置文件→AI 配置里「提供商可达性检测」是否已消失
+  - 对话管理页是否能看到 WebUI Chat 对话
+  - 连发消息后刷新页面，消息顺序是否正确（user/bot 交替）
+  - 编辑指令后如有冲突是否显示黄色警告而非 400 错误
+
+</details>
+
+<details>
 <summary><strong>[4.26.26] — 2026-07-28</strong> — 插件依赖安装不再递归刷屏</summary>
 
 基于 ldm v4.26.25：修复插件按 requirements 自动装依赖时，日志与 pip 输出互相重入导致的无限递归。

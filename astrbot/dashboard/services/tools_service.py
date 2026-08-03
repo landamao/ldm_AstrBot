@@ -14,6 +14,21 @@ class ToolsServiceError(Exception):
     pass
 
 
+_敏感配置键 = ("authorization", "token", "secret", "password", "api_key", "apikey")
+
+
+def _脱敏_mcp配置(value: Any, key: str = "") -> Any:
+    """返回适合 API 展示的 MCP 配置副本。"""
+    normalized_key = key.lower().replace("-", "_")
+    if any(marker in normalized_key for marker in _敏感配置键):
+        return "******" if value not in (None, "") else value
+    if isinstance(value, dict):
+        return {item_key: _脱敏_mcp配置(item_value, str(item_key)) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [_脱敏_mcp配置(item) for item in value]
+    return value
+
+
 class EmptyMcpServersError(ValueError):
     pass
 
@@ -74,7 +89,7 @@ class ToolsService:
                 }
                 for key, value in server_config.items():
                     if key != "active":
-                        server_info[key] = value
+                        server_info[key] = _脱敏_mcp配置(value, key)
 
                 for name_key, runtime in self.tool_mgr.mcp_server_runtime_view.items():
                     if name_key == name:
@@ -92,7 +107,12 @@ class ToolsService:
             logger.error(traceback.format_exc())
             raise ToolsServiceError(f"Failed to get MCP server list: {exc!s}") from exc
 
-    def get_mcp_server_config(self, name: str) -> dict | None:
+    def get_mcp_server_config(
+        self,
+        name: str,
+        *,
+        reveal_sensitive: bool = False,
+    ) -> dict | None:
         config = self.tool_mgr.load_mcp_config()
         mcp_servers = config.get("mcpServers", {})
         if not isinstance(mcp_servers, dict):
@@ -101,7 +121,9 @@ class ToolsService:
         server_config = mcp_servers.get(name)
         if not isinstance(server_config, dict):
             return None
-        return dict(server_config)
+        if reveal_sensitive:
+            return dict(server_config)
+        return _脱敏_mcp配置(server_config)
 
     async def add_mcp_server(self, server_data: Any) -> str:
         try:
