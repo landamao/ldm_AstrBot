@@ -630,7 +630,7 @@ class ProviderCommands:
             self._apply_model(target_prov, matched_target_model_name, umo=umo)
             message.set_result(
                 MessageEventResult().message(
-                    f"检测到模型 [{matched_target_model_name}] 属于提供商 [{target_id}]，已自动切换提供商并设置模型。",
+                    f"检测到模型 [{matched_target_model_name}] 属于提供商 [{target_prov.display_provider_id()}]，已自动切换提供商并设置模型。",
                 ),
             )
         except asyncio.CancelledError:

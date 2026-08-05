@@ -66,8 +66,8 @@ class PluginCommands:
                 "",
                 "示例：",
                 "/plugin ls",
-                "/plugin help 指令拦截",
-                "/plugin on astrbot_plugin_stealer",
+                "/plugin help ldm",
+                "/plugin on ldm",
             ]
         )
 

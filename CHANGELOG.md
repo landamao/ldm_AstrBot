@@ -6,6 +6,36 @@
 ---
 
 <details>
+<summary><strong>[4.26.30] — 2026-08-05</strong> — 跨提供商切换显示名修复、WebChat 重试可配置化、models.dev 镜像加速</summary>
+
+基于 ldm v4.26.29 的体验优化与修复版本。本次修复跨提供商自动切换时提供商名展示带模型名的问题，将 WebChat 标题生成的重试次数提升为可配置项，并将 models.dev 元数据源切换至国内镜像加速访问。
+
+### 修复
+
+- **跨提供商自动切换提示中的提供商名不再带模型名**
+  - 问题：使用 `/model 模型名` 触发跨提供商自动切换时，提示文案「检测到模型 [xxx] 属于提供商 [ldmapi/xin/mimo-v2.5-pro]」把完整实例 id（含模型/路由后缀）当作提供商名展示。
+  - 根因：`provider.py` 第 633 行用了 `target_prov.meta().id`（完整 id），而其他所有给用户看的提示（第 213、448、537、556、572 行）都用 `display_provider_id()`（取第一个 `/` 前的前缀）。
+  - 修复：展示文案改用 `target_prov.display_provider_id()`，与 `/provider`、`/model` 等指令的其余位置一致。`set_provider()` 调用仍用完整 id 不变。
+
+### 体验优化
+
+- **WebChat 标题生成重试次数可配置化**
+  - 将 `astr_main_agent.py` 中 `_handle_webchat` 的重试次数从硬编码改为通过 `config.provider_settings.get("request_max_retries", 5)` 传入，与主对话请求的重试策略保持一致，用户可在配置中统一调整。
+
+- **models.dev 元数据源切换至国内镜像**
+  - 将 `llm_metadata.py` 的元数据获取地址从 `https://models.dev/api.json` 改为 `http://39.106.102.162:9200/api/model_info.json`（公网服务器镜像），方便国内用户访问，速度更快。
+
+- **/plugin 指令帮助示例文案调整**
+  - 将 `plugin.py` 帮助示例中的 `/plugin help 指令拦截` + `/plugin on astrbot_plugin_stealer` 调整为更简洁的 `/plugin help ldm` + `/plugin on ldm`。
+
+### 说明
+
+- 更新后请手动同步源码并重启服务。
+- 若面板显示异常，可用顶栏「强制刷新面板」或浏览器 Ctrl+F5。
+
+</details>
+
+<details>
 <summary><strong>[4.26.29] — 2026-08-02</strong> — 核心稳定性与安全边界全面加固</summary>
 
 基于 ldm v4.26.28 的全面审查修复版本。本次集中修复模型请求、消息去重、任务生命周期、并发写入、定时任务和管理接口安全边界；WebUI 默认账号密码、免强制改密及 `0.0.0.0` 监听策略保持不变。

@@ -31,7 +31,7 @@ LLM_METADATAS: dict[str, LLMMetadata] = {}
 
 
 async def update_llm_metadata() -> None:
-    url = "https://models.dev/api.json"
+    url = "http://39.106.102.162:9200/api/model_info.json"
     try:
         async with aiohttp.ClientSession(
             trust_env=True, connector=build_tls_connector()
