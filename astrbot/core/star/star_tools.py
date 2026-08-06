@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import inspect
 import os
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from astrbot.api.platform import AstrBotMessage, MessageMember, MessageType
 from astrbot.core.message.components import BaseMessageComponent
@@ -13,6 +15,9 @@ from astrbot.core.star.context import Context
 from astrbot.core.star.star import star_map
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.io import ensure_dir
+
+if TYPE_CHECKING:
+    from PIL import ImageFont
 
 
 class StarTools:
@@ -299,4 +304,26 @@ class StarTools:
 
     @classmethod
     def get_font_path(cls) -> Path:
-        return Path(get_astrbot_data_path()) / "ldm.ttf"
+        return Path(get_astrbot_data_path()) / "font.ttf"
+
+    @classmethod
+    def get_font(
+        cls, size: int = 14
+    ) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        """获取共享字体实例。
+
+        按 size 缓存，跨插件复用同一个字体对象，避免每个插件各自
+        加载字体实例导致内存浪费。
+
+        字体查找顺序：data/font.ttf（自定义）→ 系统字体（跨平台
+        CJK 回退链）→ PIL 默认字体。
+
+        Args:
+            size: 字体大小（像素），默认 14。
+
+        Returns:
+            PIL 字体实例（FreeTypeFont 或 ImageFont）。
+        """
+        from astrbot.core.utils.t2i.local_strategy import FontManager
+
+        return FontManager.get_font(size)

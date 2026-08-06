@@ -6,6 +6,32 @@
 ---
 
 <details>
+<summary><strong>[4.26.31] — 2026-08-06</strong> — StarTools 新增共享字体实例接口、统一字体文件名</summary>
+
+基于 ldm v4.26.30 的体验优化版本。本次为 StarTools 新增共享字体实例接口，插件可跨插件复用同一字体对象，避免各自加载字体实例导致的内存浪费；同时统一字体文件名为 `font.ttf`。
+
+### 新增
+
+- **StarTools.get_font(size) 共享字体实例接口**
+  - 新增 `StarTools.get_font(size=14)` 类方法，委托 `t2i/local_strategy.py` 的 `FontManager.get_font()`，按 size 缓存字体对象，跨插件复用同一个实例。
+  - 字体查找顺序：`data/font.ttf`（自定义）→ 系统字体（跨平台 CJK 回退链：微软雅黑 / 思源黑体 / 苹方 / Arial / DejaVu）→ PIL 默认字体。
+  - 插件侧从各自 `ImageFont.truetype(...)` 改为 `StarTools.get_font(24)` 即可，同 size 全局共享同一对象，减少内存占用。
+  - 使用 `from __future__ import annotations` + `TYPE_CHECKING` 延迟 PIL 导入，避免运行时注解求值 NameError。
+
+### 体验优化
+
+- **统一字体文件名为 font.ttf**
+  - `StarTools.get_font_path()` 原返回 `data/ldm.ttf`，与 `FontManager` 使用的 `data/font.ttf` 及配置提示文案不一致，现统一为 `font.ttf`。
+
+### 说明
+
+- 更新后请**手动重启**一次服务
+- 若插件中曾自行 `ImageFont.truetype` 加载字体，建议迁移到 `StarTools.get_font(size)` 以复用共享实例
+- 若曾使用 `StarTools.get_font_path()` 获取字体路径，请将字体文件从 `ldm.ttf` 重命名为 `font.ttf`
+
+</details>
+
+<details>
 <summary><strong>[4.26.30] — 2026-08-05</strong> — 跨提供商切换显示名修复、WebChat 重试可配置化、models.dev 镜像加速</summary>
 
 基于 ldm v4.26.29 的体验优化与修复版本。本次修复跨提供商自动切换时提供商名展示带模型名的问题，将 WebChat 标题生成的重试次数提升为可配置项，并将 models.dev 元数据源切换至国内镜像加速访问。
