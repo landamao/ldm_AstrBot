@@ -106,7 +106,10 @@ class SatoriPlatformAdapter(Platform):
 
     async def run(self) -> None:
         self.running = True
-        self.session = ClientSession(timeout=ClientTimeout(total=30))
+        proxy = self.get_proxy()
+        self.session = ClientSession(timeout=ClientTimeout(total=30), proxy=proxy)
+        if proxy:
+            logger.info(f"Satori 适配器使用独立代理: {proxy}")
 
         retry_count = 0
         max_retries = 10
@@ -151,6 +154,7 @@ class SatoriPlatformAdapter(Platform):
                 self.endpoint,
                 additional_headers={},
                 max_size=10 * 1024 * 1024,  # 10MB
+                proxy=self.get_proxy(),
             )
 
             self.ws = websocket

@@ -131,10 +131,12 @@ class SlackSocketClient:
         web_client: AsyncWebClient,
         app_token: str,
         event_handler: Callable | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.web_client = web_client
         self.app_token = app_token
         self.event_handler = event_handler
+        self.proxy = proxy or None
         self.socket_client = None
 
     async def _handle_events(
@@ -162,6 +164,7 @@ class SlackSocketClient:
             app_token=self.app_token,
             logger=logger,
             web_client=self.web_client,
+            proxy=self.proxy,
         )
 
         # 注册事件处理器

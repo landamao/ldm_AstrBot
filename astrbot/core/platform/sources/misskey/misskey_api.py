@@ -43,9 +43,15 @@ class WebSocketError(APIError):
 
 
 class StreamingClient:
-    def __init__(self, instance_url: str, access_token: str) -> None:
+    def __init__(
+        self,
+        instance_url: str,
+        access_token: str,
+        proxy: str | None = None,
+    ) -> None:
         self.instance_url = instance_url.rstrip("/")
         self.access_token = access_token
+        self.proxy = proxy or None
         self.websocket: Any | None = None
         self.is_connected = False
         self.message_handlers: dict[str, Callable] = {}
@@ -66,6 +72,7 @@ class StreamingClient:
                 ws_url,
                 ping_interval=30,
                 ping_timeout=10,
+                proxy=self.proxy,
             )
             self.is_connected = True
             self._running = True
@@ -334,11 +341,13 @@ class MisskeyAPI:
         download_timeout: int = 15,
         chunk_size: int = 64 * 1024,
         max_download_bytes: int | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.instance_url = instance_url.rstrip("/")
         self.access_token = access_token
         self._session: aiohttp.ClientSession | None = None
         self.streaming: StreamingClient | None = None
+        self.proxy = proxy or None
         # download options
         self.allow_insecure_downloads = allow_insecure_downloads
         self.download_timeout = download_timeout
@@ -365,14 +374,18 @@ class MisskeyAPI:
 
     def get_streaming_client(self) -> StreamingClient:
         if not self.streaming:
-            self.streaming = StreamingClient(self.instance_url, self.access_token)
+            self.streaming = StreamingClient(
+                self.instance_url,
+                self.access_token,
+                proxy=self.proxy,
+            )
         return self.streaming
 
     @property
     def session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             headers = {"Authorization": f"Bearer {self.access_token}"}
-            self._session = aiohttp.ClientSession(headers=headers)
+            self._session = aiohttp.ClientSession(headers=headers, proxy=self.proxy)
         return self._session
 
     def _handle_response_status(self, status: int, endpoint: str) -> NoReturn:

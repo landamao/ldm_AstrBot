@@ -49,7 +49,11 @@ class MattermostPlatformAdapter(Platform):
         if not self.bot_token:
             raise ValueError("Mattermost bot token 是必需的")
 
-        self.client = MattermostClient(self.base_url, self.bot_token)
+        self.client = MattermostClient(
+            self.base_url,
+            self.bot_token,
+            proxy=self.get_proxy(),
+        )
         self.metadata = PlatformMetadata(
             name="mattermost",
             description="Mattermost 平台适配器",

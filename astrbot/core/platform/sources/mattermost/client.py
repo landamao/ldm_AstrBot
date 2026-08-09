@@ -14,15 +14,22 @@ from astrbot.core.utils.media_utils import MediaResolver, detect_image_mime_type
 
 
 class MattermostClient:
-    def __init__(self, base_url: str, token: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        proxy: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
+        self.proxy = proxy or None
         self._session: aiohttp.ClientSession | None = None
 
     async def ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30),
+                proxy=self.proxy,
             )
         return self._session
 
@@ -143,7 +150,7 @@ class MattermostClient:
             "http://", "ws://", 1
         )
         ws_url = f"{ws_url}/api/v4/websocket"
-        return await session.ws_connect(ws_url, heartbeat=30.0)
+        return await session.ws_connect(ws_url, heartbeat=30.0, proxy=self.proxy)
 
     async def send_message_chain(
         self,

@@ -26,18 +26,20 @@ from .kook_types import (
 
 
 class KookClient:
-    def __init__(self, config: KookConfig, event_callback):
+    def __init__(self, config: KookConfig, event_callback, proxy: str | None = None):
         # 数据字段
         self.config = config
         self._bot_id = ""
         self._bot_username = ""
         self._bot_nickname = ""
+        self.proxy = proxy or None
 
         # 资源字段
         self._http_client = aiohttp.ClientSession(
             headers={
                 "Authorization": f"Bot {self.config.token}",
-            }
+            },
+            proxy=self.proxy,
         )
         self.event_callback = event_callback  # 回调函数，用于处理接收到的事件
         self.ws = None
@@ -160,7 +162,7 @@ class KookClient:
                 return False
 
             # 连接WebSocket
-            self.ws = await websockets.connect(gateway_url)
+            self.ws = await websockets.connect(gateway_url, proxy=self.proxy)
             self.running = True
             logger.info("[KOOK] WebSocket 连接成功")
 

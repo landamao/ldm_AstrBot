@@ -1,5 +1,6 @@
 import abc
 import asyncio
+import os
 import uuid
 from asyncio import Queue
 from collections.abc import Coroutine
@@ -88,6 +89,28 @@ class Platform(abc.ABC):
             self.config.get("unified_webhook_mode", False)
             and self.config.get("webhook_uuid")
         )
+
+    def get_proxy(self) -> str | None:
+        """解析该平台实际使用的代理地址。
+
+        优先级（从高到低）：
+        1. 平台独立配置的 ``proxy`` 字段（覆盖一切）；
+        2. 平台开启 ``use_global_proxy`` 开关时，使用全局 HTTP 代理
+           （即当前环境变量中的 https_proxy / http_proxy）；
+        3. 均未配置时返回 ``None``，表示**直连**——不会自动使用全局
+           或系统代理（适配器应显式将 None 传给网络客户端以禁用代理）。
+        """
+        proxy = (self.config.get("proxy") or "").strip()
+        if proxy:
+            return proxy
+        if self.config.get("use_global_proxy", False):
+            global_proxy = (
+                os.environ.get("https_proxy")
+                or os.environ.get("http_proxy")
+                or ""
+            ).strip()
+            return global_proxy or None
+        return None
 
     def get_stats(self) -> dict:
         """获取平台统计信息"""

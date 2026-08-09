@@ -369,7 +369,7 @@ DEFAULT_CONFIG = {
 
 
 """
-AstrBot v3 时代的配置元数据，目前仅承担以下功能：
+ldmbot v3 时代的配置元数据，目前仅承担以下功能：
 
 1. 保存配置时，配置项的类型验证
 2. WebUI 展示提供商和平台适配器模版
@@ -500,8 +500,10 @@ CONFIG_METADATA_2 = {
                         "id": "telegram",
                         "type": "telegram",
                         "enable": True,
+                        "use_global_proxy": False,
+                        "proxy": "",
                         "telegram_token": "your_bot_token",
-                        "start_message": "Hello, I'm AstrBot!",
+                        "start_message": "Hello, I'm ldmbot!",
                         "telegram_api_base_url": "https://api.telegram.org/bot",
                         "telegram_file_base_url": "https://api.telegram.org/file/bot",
                         "telegram_command_register": True,
@@ -513,8 +515,9 @@ CONFIG_METADATA_2 = {
                         "id": "discord",
                         "type": "discord",
                         "enable": True,
+                        "use_global_proxy": False,
+                        "proxy": "",
                         "discord_token": "",
-                        "discord_proxy": "",
                         "discord_command_register": True,
                         "discord_activity_name": "",
                         "discord_allow_bot_messages": False,
@@ -523,6 +526,8 @@ CONFIG_METADATA_2 = {
                         "id": "misskey",
                         "type": "misskey",
                         "enable": True,
+                        "use_global_proxy": False,
+                        "proxy": "",
                         "misskey_instance_url": "https://misskey.example",
                         "misskey_token": "",
                         "misskey_default_visibility": "public",
@@ -541,6 +546,8 @@ CONFIG_METADATA_2 = {
                         "id": "slack",
                         "type": "slack",
                         "enable": True,
+                        "use_global_proxy": False,
+                        "proxy": "",
                         "bot_token": "",
                         "app_token": "",
                         "signing_secret": "",
@@ -555,6 +562,8 @@ CONFIG_METADATA_2 = {
                         "id": "line",
                         "type": "line",
                         "enable": True,
+                        "use_global_proxy": False,
+                        "proxy": "",
                         "channel_access_token": "",
                         "channel_secret": "",
                         "unified_webhook_mode": True,
@@ -564,6 +573,8 @@ CONFIG_METADATA_2 = {
                         "id": "satori",
                         "type": "satori",
                         "enable": True,
+                        "use_global_proxy": False,
+                        "proxy": "",
                         "satori_api_base_url": "http://localhost:5140/satori/v1",
                         "satori_endpoint": "ws://localhost:5140/satori/v1/events",
                         "satori_token": "",
@@ -575,6 +586,8 @@ CONFIG_METADATA_2 = {
                         "id": "kook",
                         "type": "kook",
                         "enable": True,
+                        "use_global_proxy": False,
+                        "proxy": "",
                         "kook_bot_token": "",
                         "kook_reconnect_delay": 1,
                         "kook_max_reconnect_delay": 60,
@@ -588,6 +601,8 @@ CONFIG_METADATA_2 = {
                         "id": "mattermost",
                         "type": "mattermost",
                         "enable": True,
+                        "use_global_proxy": False,
+                        "proxy": "",
                         "mattermost_url": "https://chat.example.com",
                         "mattermost_bot_token": "",
                         "mattermost_reconnect_delay": 5.0,
@@ -709,7 +724,7 @@ CONFIG_METADATA_2 = {
                     "wpp_active_message_poll": {
                         "description": "是否启用主动消息轮询",
                         "type": "bool",
-                        "hint": "只有当你发现微信消息没有按时同步到 AstrBot 时，才需要启用这个功能，默认不启用。",
+                        "hint": "只有当你发现微信消息没有按时同步到 ldmbot 时，才需要启用这个功能，默认不启用。",
                     },
                     "wpp_active_message_poll_interval": {
                         "description": "主动消息轮询间隔",
@@ -724,7 +739,7 @@ CONFIG_METADATA_2 = {
                     "telegram_token": {
                         "description": "Bot Token",
                         "type": "string",
-                        "hint": "如果你的网络环境为中国大陆，请在 `其他配置` 处设置代理或更改 api_base。",
+                        "hint": "如果你的网络无法直接访问 Telegram，请在下方代理设置中配置「独立代理地址」或开启「使用全局代理」。",
                     },
                     "mattermost_url": {
                         "description": "Mattermost URL",
@@ -810,12 +825,12 @@ CONFIG_METADATA_2 = {
                     "telegram_command_register": {
                         "description": "Telegram 命令注册",
                         "type": "bool",
-                        "hint": "启用后，AstrBot 将会自动注册 Telegram 命令。",
+                        "hint": "启用后，ldmbot 将会自动注册 Telegram 命令。",
                     },
                     "telegram_command_auto_refresh": {
                         "description": "Telegram 命令自动刷新",
                         "type": "bool",
-                        "hint": "启用后，AstrBot 将会在运行时自动刷新 Telegram 命令。(单独设置此项无效)",
+                        "hint": "启用后，ldmbot 将会在运行时自动刷新 Telegram 命令。(单独设置此项无效)",
                     },
                     "telegram_command_register_interval": {
                         "description": "Telegram 命令自动刷新间隔",
@@ -865,7 +880,7 @@ CONFIG_METADATA_2 = {
                     "ws_reverse_host": {
                         "description": "反向 Websocket 主机",
                         "type": "string",
-                        "hint": "AstrBot 将作为服务器端。",
+                        "hint": "ldmbot 将作为服务器端。",
                     },
                     "ws_reverse_port": {
                         "description": "反向 Websocket 端口",
@@ -963,10 +978,18 @@ CONFIG_METADATA_2 = {
                         "type": "string",
                         "hint": "在此处填入你的Discord Bot Token",
                     },
-                    "discord_proxy": {
-                        "description": "Discord 代理地址",
+                    "use_global_proxy": {
+                        "description": "使用全局代理",
+                        "type": "bool",
+                        "hint": "开启后，该平台使用系统设置 → 网络中的全局 HTTP 代理。关闭且未填独立代理地址时，该平台直连，不受任何代理影响。",
+                    },
+                    "proxy": {
+                        "description": "独立代理地址",
                         "type": "string",
-                        "hint": "可选的代理地址：http://ip:port",
+                        "hint": "仅该平台使用的 HTTP/HTTPS 代理地址，如 http://127.0.0.1:7890（一个地址同时覆盖 http 与 https 流量）。留空则不使用独立代理；若需使用全局代理，请开启「使用全局代理」开关。",
+                        "condition": {
+                            "use_global_proxy": False,
+                        },
                     },
                     "discord_command_register": {
                         "description": "注册 Discord 指令",
@@ -981,7 +1004,7 @@ CONFIG_METADATA_2 = {
                     "discord_allow_bot_messages": {
                         "description": "允许接收机器人消息",
                         "type": "bool",
-                        "hint": "启用后，AstrBot 将接收来自其他 Discord 机器人的消息。适用于机器人间通信场景（如消息转发）。默认关闭。",
+                        "hint": "启用后，ldmbot 将接收来自其他 Discord 机器人的消息。适用于机器人间通信场景（如消息转发）。默认关闭。",
                     },
                     "port": {
                         "description": "回调服务器端口",
@@ -1002,7 +1025,7 @@ CONFIG_METADATA_2 = {
                     "unified_webhook_mode": {
                         "description": "统一 Webhook 模式",
                         "type": "bool",
-                        "hint": "Webhook 模式下使用 AstrBot 统一 Webhook 入口，无需单独开启端口。回调地址为 /api/platform/webhook/{webhook_uuid}。",
+                        "hint": "Webhook 模式下使用 ldmbot 统一 Webhook 入口，无需单独开启端口。回调地址为 /api/platform/webhook/{webhook_uuid}。",
                     },
                     **PERSONAL_WECHAT_CONFIG_METADATA,
                     "webhook_uuid": {
@@ -1200,7 +1223,7 @@ CONFIG_METADATA_2 = {
                     "path_mapping": {
                         "type": "list",
                         "items": {"type": "string"},
-                        "hint": "此功能解决由于文件系统不一致导致路径不存在的问题。格式为 <原路径>:<映射路径>。如 `/app/.config/QQ:/var/lib/docker/volumes/xxxx/_data`。这样，当消息平台下发的事件中图片和语音路径以 `/app/.config/QQ` 开头时，开头被替换为 `/var/lib/docker/volumes/xxxx/_data`。这在 AstrBot 或者平台协议端使用 Docker 部署时特别有用。",
+                        "hint": "此功能解决由于文件系统不一致导致路径不存在的问题。格式为 <原路径>:<映射路径>。如 `/app/.config/QQ:/var/lib/docker/volumes/xxxx/_data`。这样，当消息平台下发的事件中图片和语音路径以 `/app/.config/QQ` 开头时，开头被替换为 `/var/lib/docker/volumes/xxxx/_data`。这在 ldmbot 或者平台协议端使用 Docker 部署时特别有用。",
                     },
                 },
             },
@@ -2932,7 +2955,7 @@ CONFIG_METADATA_2 = {
                     "auto_save_history": {
                         "description": "由 Coze 管理对话记录",
                         "type": "bool",
-                        "hint": "启用后，将由 Coze 进行对话历史记录管理, 此时 AstrBot 本地保存的上下文不会生效(仅供浏览), 对 AstrBot 的上下文进行的操作也不会生效。如果为禁用, 则使用 AstrBot 管理上下文。",
+                        "hint": "启用后，将由 Coze 进行对话历史记录管理, 此时 ldmbot 本地保存的上下文不会生效(仅供浏览), 对 ldmbot 的上下文进行的操作也不会生效。如果为禁用, 则使用 ldmbot 管理上下文。",
                     },
                 },
             },
@@ -3155,12 +3178,12 @@ CONFIG_METADATA_2 = {
             "clear_system_proxy_when_unset": {
                 "description": "未配置代理时清除系统代理",
                 "type": "bool",
-                "hint": "关闭（默认）：ldm 未填写 HTTP 代理时，保留启动环境中的 http_proxy/https_proxy，方便先 export 再启动。开启：未填写时清除系统代理，并让 localhost 直连，避免本地 API 被系统代理劫持。",
+                "hint": "关闭（默认）：ldmbot 未填写 HTTP 代理时，保留启动环境中的 http_proxy/https_proxy，方便先 export 再启动。开启：未填写时清除系统代理，并让 localhost 直连，避免本地 API 被系统代理劫持。",
             },
             "github_proxy": {
                 "type": "string",
                 "description": "GitHub 加速地址",
-                "hint": "下载插件或更新 ldm 时使用的 GitHub URL 前缀镜像（如 https://gh-proxy.com）。由 WebUI 网络设置维护；聊天指令 /plugin update、/plugin get 也会读取此值。",
+                "hint": "下载插件或更新 ldmbot 时使用的 GitHub URL 前缀镜像（如 https://gh-proxy.com）。由 WebUI 网络设置维护；聊天指令 /plugin update、/plugin get 也会读取此值。",
             },
             "no_proxy": {
                 "description": "直连地址列表",
@@ -3177,7 +3200,7 @@ CONFIG_METADATA_2 = {
             "disable_metrics": {
                 "description": "禁用匿名使用统计",
                 "type": "bool",
-                "hint": "禁用后，AstrBot 将不再上传匿名使用统计数据。",
+                "hint": "禁用后，ldmbot 将不再上传匿名使用统计数据。",
             },
             "log_level": {
                 "type": "string",
@@ -3256,7 +3279,7 @@ CONFIG_METADATA_3 = {
         "metadata": {
             "agent_runner": {
                 "description": "Agent 执行方式",
-                "hint": "选择 AI 对话的执行器，默认为 AstrBot 内置 Agent 执行器，可使用 AstrBot 内的知识库、人格、工具调用功能。如果不打算接入 Dify、Coze、DeerFlow 等第三方 Agent 执行器，不需要修改此节。",
+                "hint": "选择 AI 对话的执行器，默认为 ldmbot 内置 Agent 执行器，可使用 ldmbot 内的知识库、人格、工具调用功能。如果不打算接入 Dify、Coze、DeerFlow 等第三方 Agent 执行器，不需要修改此节。",
                 "type": "object",
                 "items": {
                     "provider_settings.enable": {
@@ -3554,9 +3577,9 @@ CONFIG_METADATA_3 = {
                         "hint": "选择 Computer Use 运行环境。",
                     },
                     "provider_settings.computer_use_require_admin": {
-                        "description": "需要 AstrBot 管理员权限",
+                        "description": "需要 ldmbot 管理员权限",
                         "type": "bool",
-                        "hint": "开启后，需要 AstrBot 管理员权限才能调用使用电脑能力。在平台配置->管理员中可添加管理员。使用 /sid 指令查看管理员 ID。",
+                        "hint": "开启后，需要 ldmbot 管理员权限才能调用使用电脑能力。在平台配置->管理员中可添加管理员。使用 /sid 指令查看管理员 ID。",
                     },
                     "provider_settings.sandbox.booter": {
                         "description": "沙箱环境驱动器",
@@ -3626,7 +3649,7 @@ CONFIG_METADATA_3 = {
                     "provider_settings.sandbox.cua_idle_timeout": {
                         "description": "CUA Idle Timeout",
                         "type": "int",
-                        "hint": "Idle timeout for CUA sandbox sessions in seconds. When greater than 0, AstrBot proactively shuts down an idle CUA sandbox after that amount of inactivity; 0 disables it.",
+                        "hint": "Idle timeout for CUA sandbox sessions in seconds. When greater than 0, ldmbot proactively shuts down an idle CUA sandbox after that amount of inactivity; 0 disables it.",
                         "condition": {
                             "provider_settings.computer_use_runtime": "sandbox",
                             "provider_settings.sandbox.booter": "cua",
@@ -3742,7 +3765,7 @@ CONFIG_METADATA_3 = {
                     "provider_settings.proactive_capability.add_cron_tools": {
                         "description": "启用",
                         "type": "bool",
-                        "hint": "启用后，将会传递给 Agent 相关工具来实现主动型 Agent。你可以告诉 AstrBot 未来某个时间要做的事情，它将被定时触发然后执行任务。",
+                        "hint": "启用后，将会传递给 Agent 相关工具来实现主动型 Agent。你可以告诉 ldmbot 未来某个时间要做的事情，它将被定时触发然后执行任务。",
                     },
                 },
                 "condition": {
@@ -4078,7 +4101,7 @@ CONFIG_METADATA_3 = {
                     "disable_builtin_commands": {
                         "description": "禁用自带指令",
                         "type": "bool",
-                        "hint": "禁用所有 AstrBot 的自带指令，如 help, sid, new 等。",
+                        "hint": "禁用所有 ldmbot 的自带指令，如 help, sid, new 等。",
                     },
                 },
             },
@@ -4724,7 +4747,7 @@ CONFIG_METADATA_3_SYSTEM = {
                     "t2i_endpoint": {
                         "description": "文本转图像服务 API 地址",
                         "type": "string",
-                        "hint": "为空时使用 AstrBot API 服务",
+                        "hint": "为空时使用 ldmbot API 服务",
                         "condition": {
                             "t2i_strategy": "remote",
                         },
@@ -4854,7 +4877,7 @@ CONFIG_METADATA_3_SYSTEM = {
                     "callback_api_base": {
                         "description": "对外可达的回调接口地址",
                         "type": "string",
-                        "hint": "外部服务可能会通过 AstrBot 生成的回调链接（如文件下载链接）访问 AstrBot 后端。由于 AstrBot 无法自动判断部署环境中对外可达的主机地址（host），因此需要通过此配置项显式指定 “外部服务如何访问 AstrBot” 的地址。如 http://localhost:6185，https://example.com 等。",
+                        "hint": "外部服务可能会通过 ldmbot 生成的回调链接（如文件下载链接）访问 ldmbot 后端。由于 ldmbot 无法自动判断部署环境中对外可达的主机地址（host），因此需要通过此配置项显式指定 “外部服务如何访问 ldmbot” 的地址。如 http://localhost:6185，https://example.com 等。",
                     },
                     "timezone": {
                         "description": "时区",
@@ -4874,7 +4897,7 @@ CONFIG_METADATA_3_SYSTEM = {
                     "github_proxy": {
                         "description": "GitHub 加速地址",
                         "type": "string",
-                        "hint": "下载插件或更新 ldm 时使用的 GitHub URL 前缀镜像。由网络页「GitHub 加速」控件维护；聊天指令也会使用。",
+                        "hint": "下载插件或更新 ldmbot 时使用的 GitHub URL 前缀镜像。由网络页「GitHub 加速」控件维护；聊天指令也会使用。",
                         "invisible": True,
                     },
                     "no_proxy": {

@@ -150,6 +150,7 @@ class MisskeyPlatformAdapter(Platform):
             download_timeout=self.download_timeout,
             chunk_size=self.download_chunk_size,
             max_download_bytes=self.max_download_bytes,
+            proxy=self.get_proxy(),
         )
         self._running = True
 

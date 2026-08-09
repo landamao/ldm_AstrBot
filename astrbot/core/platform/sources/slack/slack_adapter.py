@@ -71,7 +71,11 @@ class SlackAdapter(Platform):
         )
 
         # 初始化 Slack Web Client
-        self.web_client = AsyncWebClient(token=self.bot_token, logger=logger)
+        self.web_client = AsyncWebClient(
+            token=self.bot_token,
+            logger=logger,
+            proxy=self.get_proxy(),
+        )
         self.socket_client = None
         self.webhook_client = None
 
@@ -338,6 +342,7 @@ class SlackAdapter(Platform):
                 self.web_client,
                 self.app_token,
                 self._handle_socket_event,
+                proxy=self.get_proxy(),
             )
 
             logger.info("Slack 适配器 (Socket Mode) 启动中...")

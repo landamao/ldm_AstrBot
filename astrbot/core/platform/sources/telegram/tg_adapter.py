@@ -130,13 +130,25 @@ class TelegramPlatformAdapter(Platform):
         )  # max seconds - hard cap to prevent indefinite delay
 
     def _build_application(self) -> None:
-        self.application = (
+        builder = (
             ApplicationBuilder()
             .token(self.config["telegram_token"])
             .base_url(self.base_url)
             .base_file_url(self.file_base_url)
-            .build()
         )
+        # 代理解析：平台独立代理 > 全局代理开关 > 直连（禁用 httpx 环境变量代理）
+        proxy = self.get_proxy()
+        if proxy:
+            logger.info(f"Telegram 适配器使用代理: {proxy}")
+            builder = builder.proxy(proxy).get_updates_proxy(proxy)
+        else:
+            # 未配置任何代理时强制直连，避免 httpx 自动读取环境变量代理
+            # （主请求与 getUpdates 轮询请求都要禁用 trust_env）
+            from telegram.request import HTTPXRequest
+
+            direct_req = HTTPXRequest(proxy=None, httpx_kwargs={"trust_env": False})
+            builder = builder.request(direct_req).get_updates_request(direct_req)
+        self.application = builder.build()
         message_handler = TelegramMessageHandler(
             filters=filters.ALL,
             callback=self.message_handler,

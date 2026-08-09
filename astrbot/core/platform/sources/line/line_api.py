@@ -18,15 +18,20 @@ class LineAPIClient:
         channel_access_token: str,
         channel_secret: str,
         timeout_seconds: int = 30,
+        proxy: str | None = None,
     ) -> None:
         self.channel_access_token = channel_access_token.strip()
         self.channel_secret = channel_secret.strip()
         self.timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        self.proxy = proxy or None
         self._session: aiohttp.ClientSession | None = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=self.timeout)
+            self._session = aiohttp.ClientSession(
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
         return self._session
 
     async def close(self) -> None:
