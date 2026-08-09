@@ -6,6 +6,89 @@
 ---
 
 <details>
+<summary><strong>[4.26.32] — 2026-08-09</strong> — WebUI 打开自动强刷；失败插件可直接编辑配置</summary>
+
+基于 ldm v4.26.31 的体验优化版本。本次部署新版 WebUI 后打开面板会自动检测版本变化并强制刷新，不再需要手动 Ctrl+F5；插件加载失败时可在失败列表直接「编辑配置」修正后重新加载，并优化了重载失败与保存配置日志窗口的交互。
+
+### 新增
+
+- **WebUI 打开时自动检测版本并强制刷新**
+  - 部署新版面板后，浏览器可能仍缓存旧页面，需要手动 Ctrl+F5 才能看到新版。现在打开 WebUI 时会自动比对当前版本与本地记录，版本不一致即自动执行强制刷新（清理缓存 + 重新拉取资源），无需手动操作。
+  - 带防循环保护：刷新后记录新版本，同版本不再重复刷新；开发模式（pnpm dev）不生效，不影响本地开发。
+
+- **插件加载失败可直接编辑配置**
+  - 插件加载失败（依赖变化、配置写错等原因）时，失败列表新增「编辑配置」按钮（有配置项 schema 的插件可用），可直接修正配置后保存，保存后自动重新加载插件；加载成功即进入正常列表，仍失败则留在失败列表并显示最新错误。
+  - 重载失败后列表立即刷新：正常插件重载失败会马上从正常列表移入失败表格，不再出现「旧插件还在 / 失败插件不出现」的假象。
+
+### 体验优化
+
+- **保存配置日志窗口交互优化**
+  - 保存插件配置弹出的日志窗口可点击外部直接关闭；插件重载报错时窗口保留日志、不再 2 秒自动关闭，便于查看错误原因。
+
+### 说明
+
+- 更新后请手动同步源码并重启服务。
+- 若面板显示异常，可用顶栏「强制刷新面板」或浏览器 Ctrl+F5。
+
+</details>
+
+<details>
+<summary><strong>[4.26.31] — 2026-08-06</strong> — StarTools 新增共享字体实例接口、统一字体文件名</summary>
+
+基于 ldm v4.26.30 的体验优化版本。本次为 StarTools 新增共享字体实例接口，插件可跨插件复用同一字体对象，避免各自加载字体实例导致的内存浪费；同时统一字体文件名为 `font.ttf`。
+
+### 新增
+
+- **StarTools.get_font(size) 共享字体实例接口**
+  - 新增 `StarTools.get_font(size=14)` 类方法，委托 `t2i/local_strategy.py` 的 `FontManager.get_font()`，按 size 缓存字体对象，跨插件复用同一个实例。
+  - 字体查找顺序：`data/font.ttf`（自定义）→ 系统字体（跨平台 CJK 回退链：微软雅黑 / 思源黑体 / 苹方 / Arial / DejaVu）→ PIL 默认字体。
+  - 插件侧从各自 `ImageFont.truetype(...)` 改为 `StarTools.get_font(24)` 即可，同 size 全局共享同一对象，减少内存占用。
+  - 使用 `from __future__ import annotations` + `TYPE_CHECKING` 延迟 PIL 导入，避免运行时注解求值 NameError。
+
+### 体验优化
+
+- **统一字体文件名为 font.ttf**
+  - `StarTools.get_font_path()` 原返回 `data/ldm.ttf`，与 `FontManager` 使用的 `data/font.ttf` 及配置提示文案不一致，现统一为 `font.ttf`。
+
+### 说明
+
+- 更新后请**手动重启**一次服务
+- 若插件中曾自行 `ImageFont.truetype` 加载字体，建议迁移到 `StarTools.get_font(size)` 以复用共享实例
+- 若曾使用 `StarTools.get_font_path()` 获取字体路径，请将字体文件从 `ldm.ttf` 重命名为 `font.ttf`
+
+</details>
+
+<details>
+<summary><strong>[4.26.30] — 2026-08-05</strong> — 跨提供商切换显示名修复、WebChat 重试可配置化、models.dev 镜像加速</summary>
+
+基于 ldm v4.26.29 的体验优化与修复版本。本次修复跨提供商自动切换时提供商名展示带模型名的问题，将 WebChat 标题生成的重试次数提升为可配置项，并将 models.dev 元数据源切换至国内镜像加速访问。
+
+### 修复
+
+- **跨提供商自动切换提示中的提供商名不再带模型名**
+  - 问题：使用 `/model 模型名` 触发跨提供商自动切换时，提示文案「检测到模型 [xxx] 属于提供商 [ldmapi/xin/mimo-v2.5-pro]」把完整实例 id（含模型/路由后缀）当作提供商名展示。
+  - 根因：`provider.py` 第 633 行用了 `target_prov.meta().id`（完整 id），而其他所有给用户看的提示（第 213、448、537、556、572 行）都用 `display_provider_id()`（取第一个 `/` 前的前缀）。
+  - 修复：展示文案改用 `target_prov.display_provider_id()`，与 `/provider`、`/model` 等指令的其余位置一致。`set_provider()` 调用仍用完整 id 不变。
+
+### 体验优化
+
+- **WebChat 标题生成重试次数可配置化**
+  - 将 `astr_main_agent.py` 中 `_handle_webchat` 的重试次数从硬编码改为通过 `config.provider_settings.get("request_max_retries", 5)` 传入，与主对话请求的重试策略保持一致，用户可在配置中统一调整。
+
+- **models.dev 元数据源切换至国内镜像**
+  - 将 `llm_metadata.py` 的元数据获取地址从 `https://models.dev/api.json` 改为 `http://39.106.102.162:9200/api/model_info.json`（公网服务器镜像），方便国内用户访问，速度更快。
+
+- **/plugin 指令帮助示例文案调整**
+  - 将 `plugin.py` 帮助示例中的 `/plugin help 指令拦截` + `/plugin on astrbot_plugin_stealer` 调整为更简洁的 `/plugin help ldm` + `/plugin on ldm`。
+
+### 说明
+
+- 更新后请手动同步源码并重启服务。
+- 若面板显示异常，可用顶栏「强制刷新面板」或浏览器 Ctrl+F5。
+
+</details>
+
+<details>
 <summary><strong>[4.26.29] — 2026-08-02</strong> — 核心稳定性与安全边界全面加固</summary>
 
 基于 ldm v4.26.28 的全面审查修复版本。本次集中修复模型请求、消息去重、任务生命周期、并发写入、定时任务和管理接口安全边界；WebUI 默认账号密码、免强制改密及 `0.0.0.0` 监听策略保持不变。
@@ -24,6 +107,7 @@
   - 停止或重启前会取消并等待已创建的消息 Pipeline，避免平台、模型或数据库关闭后仍有旧任务继续运行。
   - 插件热重载 watcher 纳入生命周期管理，关闭后不再继续监听或重载插件。
   - WebChat 流式请求保留任务取消语义，不再把取消当普通异常吞掉。
+  - Android proot 环境缺少可用 `/proc/stat` 启动时间时，重启流程会跳过无法执行的子进程清理并继续重启，不再因 psutil 抛出 `btime` 缺失异常而中断。
 
 - **对话并发写入不再互相覆盖**
   - 同一会话首次并发消息只会创建一份当前对话。
@@ -53,6 +137,7 @@
 
 - WebUI 默认用户名 `ldm`、默认密码 `ldm`、不强制改密及监听 `0.0.0.0` 的行为保持不变。
 - 更新后请手动同步源码并重启服务。
+- Android APK 用户建议同时升级到 ldmbot APK v1.5.8，并在安装后关闭旧终端标签、新建终端会话，使 `/proc/stat` 兼容挂载生效。
 
 </details>
 

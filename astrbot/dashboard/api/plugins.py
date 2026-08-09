@@ -768,11 +768,15 @@ async def update_plugin_config_by_id(
     plugin_id = _plugin_id_from_body(body)
     config = body.get("config")
     config = config if isinstance(config, dict) else {}
-    return ok(
-        message=await service.save_plugin_configs_from_dashboard_payload(
+    message, reload_success = (
+        await service.save_plugin_configs_from_dashboard_payload(
             config,
             plugin_name=plugin_id,
         )
+    )
+    return ok(
+        message=message,
+        data={"reload_success": reload_success},
     )
 
 

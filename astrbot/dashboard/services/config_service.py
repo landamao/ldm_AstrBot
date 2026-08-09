@@ -186,6 +186,22 @@ def get_schema_item(schema: dict | None, key_path: str) -> dict | None:
     return _get_schema_item(schema, key_path)
 
 
+def _find_failed_plugin_dir_name(plugin_manager, plugin_name: str) -> str | None:
+    """在加载失败的插件中，按插件名找到对应的目录名。
+
+    失败插件字典的键是插件目录名（root_dir_name），记录中还会带上
+    metadata.yaml 解析出的 name，两者都可能被前端用来定位插件，
+    因此这里同时匹配。
+    """
+    failed = getattr(plugin_manager, "failed_plugin_dict", None) or {}
+    for dir_name, info in failed.items():
+        if not isinstance(info, dict):
+            continue
+        if dir_name == plugin_name or info.get("name") == plugin_name:
+            return dir_name
+    return None
+
+
 def _sanitize_filename(name: str) -> str:
     cleaned = os.path.basename(name).strip()
     if not cleaned or cleaned in {".", ".."}:
@@ -780,7 +796,50 @@ class ConfigDisplayService:
             result["i18n"] = plugin_md.i18n
             break
 
+        # 插件加载失败时不会出现在 star_registry 中；尝试直接读取插件目录的
+        # 配置，方便用户修正配置后重新加载插件。
+        if result["metadata"] is None:
+            failed_config = self._get_failed_plugin_config(plugin_name)
+            if failed_config is not None:
+                result["metadata"], result["config"] = failed_config
+
         return result
+
+    def _get_failed_plugin_config(
+        self,
+        plugin_name: str,
+    ) -> tuple[dict, AstrBotConfig] | None:
+        """读取加载失败插件的配置（metadata + config），失败时返回 None。"""
+        plugin_manager = getattr(self.core_lifecycle, "plugin_manager", None)
+        if plugin_manager is None:
+            return None
+        dir_name = _find_failed_plugin_dir_name(plugin_manager, plugin_name)
+        if not dir_name:
+            return None
+        plugin_dir_path = os.path.join(plugin_manager.plugin_store_path, dir_name)
+        schema_path = os.path.join(plugin_dir_path, plugin_manager.conf_schema_fname)
+        if not os.path.exists(schema_path):
+            return None
+        try:
+            schema = plugin_manager._load_plugin_config_schema(schema_path)
+            config = AstrBotConfig(
+                config_path=os.path.join(
+                    plugin_manager.plugin_config_path,
+                    f"{dir_name}_config.json",
+                ),
+                schema=schema,
+            )
+        except Exception as exc:
+            logger.warning(f"读取插件 {plugin_name} 配置失败: {exc}")
+            return None
+        metadata = {
+            plugin_name: {
+                "description": f"{plugin_name} 配置",
+                "type": "object",
+                "items": schema,
+            },
+        }
+        return metadata, config
 
     async def register_platform_logo(self, platform, platform_default_tmpl) -> None:
         if not platform.logo_path:
@@ -910,10 +969,16 @@ class ConfigFileService:
         self,
         post_configs: dict,
         plugin_name: str,
-    ) -> None:
+    ) -> tuple[str | None, bool]:
+        """保存插件配置。
+
+        返回 (message, reload_success)：message 为 None 表示走通用成功文案；
+        reload_success 表示保存后插件是否成功重新加载。
+        """
         metadata = self.get_plugin_metadata_by_name(plugin_name)
         if not metadata:
-            raise ValueError(f"插件 {plugin_name} 不存在")
+            # 插件可能加载失败（不在 star_registry 中），尝试保存失败插件的配置
+            return await self._save_failed_plugin_configs(post_configs, plugin_name)
         if not metadata.config:
             raise ValueError(f"插件 {plugin_name} 没有注册配置")
 
@@ -925,17 +990,77 @@ class ConfigFileService:
         if errors:
             raise ValueError(f"格式校验未通过: {errors}")
         metadata.config.save_config(post_configs)
-        await self.core_lifecycle.plugin_manager.reload(plugin_name)
+
+        success, reload_err = await self.core_lifecycle.plugin_manager.reload(
+            plugin_name
+        )
+        if not success:
+            return (
+                f"保存插件 {plugin_name} 成功，但插件重新加载失败："
+                f"{reload_err or '未知错误'}",
+                False,
+            )
+        return None, True
+
+    async def _save_failed_plugin_configs(
+        self,
+        post_configs: dict,
+        plugin_name: str,
+    ) -> tuple[str, bool]:
+        """保存加载失败插件的配置，并尝试重新加载该插件。"""
+        plugin_manager = getattr(self.core_lifecycle, "plugin_manager", None)
+        if plugin_manager is None:
+            raise ValueError(f"插件 {plugin_name} 不存在")
+        dir_name = _find_failed_plugin_dir_name(plugin_manager, plugin_name)
+        if not dir_name:
+            raise ValueError(f"插件 {plugin_name} 不存在")
+        plugin_dir_path = os.path.join(plugin_manager.plugin_store_path, dir_name)
+        schema_path = os.path.join(plugin_dir_path, plugin_manager.conf_schema_fname)
+        if not os.path.exists(schema_path):
+            raise ValueError(f"插件 {plugin_name} 没有可编辑的配置")
+
+        schema = plugin_manager._load_plugin_config_schema(schema_path)
+        config = AstrBotConfig(
+            config_path=os.path.join(
+                plugin_manager.plugin_config_path,
+                f"{dir_name}_config.json",
+            ),
+            schema=schema,
+        )
+        errors, post_configs = validate_config(post_configs, schema, is_core=False)
+        if errors:
+            raise ValueError(f"格式校验未通过: {errors}")
+        config.save_config(post_configs)
+
+        # 配置修正后尝试重新加载插件；失败时把结果带给前端展示，
+        # 插件会继续留在失败列表中供用户查看错误。
+        try:
+            success, error = await plugin_manager.reload_failed_plugin(dir_name)
+        except Exception as exc:
+            success, error = False, str(exc)
+        if success:
+            return f"保存插件 {plugin_name} 成功~ 插件已重新加载。", True
+        logger.warning(
+            f"插件 {plugin_name} 保存配置后重新加载失败: {error}"
+        )
+        return (
+            f"保存插件 {plugin_name} 成功，但插件重新加载失败：{error or '未知错误'}",
+            False,
+        )
 
     async def save_plugin_configs_from_dashboard_payload(
         self,
         payload: object,
         *,
         plugin_name: str,
-    ) -> str:
+    ) -> tuple[str, bool]:
         post_configs = payload if isinstance(payload, dict) else {}
-        await self.save_plugin_configs(post_configs, plugin_name)
-        return f"保存插件 {plugin_name} 成功~ 机器人正在热重载插件。"
+        message, reload_success = await self.save_plugin_configs(
+            post_configs, plugin_name
+        )
+        if message:
+            return message, reload_success
+        return f"保存插件 {plugin_name} 成功~ 机器人正在热重载插件。", reload_success
 
     async def upload_config_file(
         self,

@@ -820,6 +820,10 @@ class PluginManager:
             "error": str(error),
             "traceback": error_trace,
             "reserved": reserved,
+            # 插件目录是否有 _conf_schema.json，决定 WebUI 是否允许编辑配置后重载
+            "has_config_schema": os.path.exists(
+                os.path.join(plugin_dir_path, self.conf_schema_fname)
+            ),
         }
         try:
             metadata = self._load_plugin_metadata(plugin_path=plugin_dir_path)
