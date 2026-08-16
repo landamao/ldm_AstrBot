@@ -35,6 +35,7 @@ from astrbot.core.provider.entities import (
     LLMResponse,
     ProviderRequest,
 )
+from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.star.star_handler import EventType
 from astrbot.core.utils.active_event_registry import active_event_registry
 from astrbot.core.utils.metrics import Metric
@@ -276,6 +277,15 @@ class InternalAgentSubStage(Stage):
             streaming_response = self.streaming_response
             if (enable_streaming := event.get_extra("enable_streaming")) is not None:
                 streaming_response = bool(enable_streaming)
+            else:
+                # 会话级流式输出覆盖（/flow 命令设置）：未设置时跟随全局配置
+                session_streaming = (
+                    await SessionServiceManager.get_streaming_override_for_session(
+                        event.unified_msg_origin,
+                    )
+                )
+                if session_streaming is not None:
+                    streaming_response = bool(session_streaming)
 
             has_provider_request = event.get_extra("provider_request") is not None
             has_valid_message = bool(event.message_str and event.message_str.strip())

@@ -154,6 +154,90 @@ class SessionServiceManager:
         return await SessionServiceManager.is_tts_enabled_for_session(session_id)
 
     # =============================================================================
+    # 流式输出相关方法
+    # =============================================================================
+
+    @staticmethod
+    async def get_streaming_override_for_session(session_id: str) -> bool | None:
+        """获取会话级流式输出覆盖值。
+
+        Args:
+            session_id: 会话ID (unified_msg_origin)
+
+        Returns:
+            bool | None: True=强制流式，False=强制非流式，None=未设置（跟随全局配置）
+
+        """
+        session_services = await sp.get_async(
+            scope="umo",
+            scope_id=session_id,
+            key="session_service_config",
+            default={},
+        )
+        return session_services.get("streaming_enabled")
+
+    @staticmethod
+    async def set_streaming_status_for_session(session_id: str, enabled: bool) -> None:
+        """设置会话级流式输出覆盖值。
+
+        Args:
+            session_id: 会话ID (unified_msg_origin)
+            enabled: True=强制流式，False=强制非流式
+
+        """
+        session_config = (
+            await sp.get_async(
+                scope="umo",
+                scope_id=session_id,
+                key="session_service_config",
+                default={},
+            )
+            or {}
+        )
+        session_config["streaming_enabled"] = enabled
+        await sp.put_async(
+            scope="umo",
+            scope_id=session_id,
+            key="session_service_config",
+            value=session_config,
+        )
+        logger.info(
+            f"会话 {session_id} 的流式输出已设为: {'开启' if enabled else '关闭'}",
+        )
+
+    @staticmethod
+    async def unset_streaming_status_for_session(session_id: str) -> bool:
+        """取消会话级流式输出覆盖，恢复跟随全局配置。
+
+        Args:
+            session_id: 会话ID (unified_msg_origin)
+
+        Returns:
+            bool: 原本是否设置了覆盖值
+
+        """
+        session_config = (
+            await sp.get_async(
+                scope="umo",
+                scope_id=session_id,
+                key="session_service_config",
+                default={},
+            )
+            or {}
+        )
+        if "streaming_enabled" not in session_config:
+            return False
+        session_config.pop("streaming_enabled")
+        await sp.put_async(
+            scope="umo",
+            scope_id=session_id,
+            key="session_service_config",
+            value=session_config,
+        )
+        logger.info(f"会话 {session_id} 的流式输出已恢复跟随全局配置")
+        return True
+
+    # =============================================================================
     # 会话整体启停相关方法
     # =============================================================================
 

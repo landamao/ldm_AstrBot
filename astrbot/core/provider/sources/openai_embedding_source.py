@@ -28,7 +28,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         super().__init__(provider_config, provider_settings)
         self.provider_config = provider_config
         self.provider_settings = provider_settings
-        proxy = provider_config.get("proxy", "")
+        proxy = self.get_proxy() or ""
         provider_id = provider_config.get("id", "unknown_id")
         http_client = None
         if proxy:

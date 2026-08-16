@@ -41,7 +41,7 @@ class ProviderEdgeTTS(TTSProvider):
         self.pitch = provider_config.get("pitch")
         self.timeout = provider_config.get("timeout", 30)
 
-        self.proxy = os.getenv("https_proxy", None)
+        self.proxy = self.get_proxy()
 
         self.set_model("edge_tts")
 

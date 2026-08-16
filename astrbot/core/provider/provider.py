@@ -62,6 +62,27 @@ class AbstractProvider(abc.ABC):
             default="unknown",
         )
 
+    def get_proxy(self) -> str | None:
+        """解析该提供商实际使用的代理地址。
+
+        优先级（从高到低）：
+        1. 提供商独立配置的 ``proxy`` 字段（覆盖一切）；
+        2. 提供商开启 ``use_global_proxy`` 开关时（默认开启），使用全局
+           HTTP 代理（即当前环境变量中的 https_proxy / http_proxy）；
+        3. 均未配置时返回 ``None``，表示直连。
+        """
+        proxy = (self.provider_config.get("proxy") or "").strip()
+        if proxy:
+            return proxy
+        if self.provider_config.get("use_global_proxy", True):
+            global_proxy = (
+                os.environ.get("https_proxy")
+                or os.environ.get("http_proxy")
+                or ""
+            ).strip()
+            return global_proxy or None
+        return None
+
     async def test(self) -> None:
         """test the provider is a
 

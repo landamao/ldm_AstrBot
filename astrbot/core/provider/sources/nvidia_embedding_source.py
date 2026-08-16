@@ -32,7 +32,7 @@ class NvidiaEmbeddingProvider(EmbeddingProvider):
         )
         self.input_type = provider_config.get("input_type", "passage")
 
-        proxy = provider_config.get("proxy", "")
+        proxy = self.get_proxy() or ""
         self.proxy = proxy
         if proxy:
             logger.info(f"[NVIDIA Embedding] Using proxy: {proxy}")

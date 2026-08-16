@@ -32,7 +32,7 @@ class ProviderMiMoTTSAPI(TTSProvider):
         super().__init__(provider_config, provider_settings)
         self.chosen_api_key = provider_config.get("api_key", "")
         self.api_base = provider_config.get("api_base", DEFAULT_MIMO_API_BASE)
-        self.proxy = provider_config.get("proxy", "")
+        self.proxy = self.get_proxy() or ""
         self.timeout = normalize_timeout(provider_config.get("timeout", 20))
         self.voice = provider_config.get("mimo-tts-voice", DEFAULT_MIMO_TTS_VOICE)
         self.audio_format = provider_config.get("mimo-tts-format", "wav")

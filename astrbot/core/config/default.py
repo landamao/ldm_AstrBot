@@ -1281,6 +1281,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.openai.com/v1",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1304,6 +1305,7 @@ CONFIG_METADATA_2 = {
                             "dangerous_content": "BLOCK_MEDIUM_AND_ABOVE",
                         },
                         "gm_thinking_config": {"budget": 0, "level": "HIGH"},
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "Anthropic": {
@@ -1315,6 +1317,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.anthropic.com/v1",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                         "anth_thinking_config": {"type": "", "budget": 0, "effort": ""},
@@ -1328,6 +1331,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.kimi.com/coding",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {"User-Agent": "claude-code/0.1.0"},
                         "anth_thinking_config": {"type": "", "budget": 0, "effort": ""},
@@ -1341,6 +1345,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "timeout": 120,
                         "api_base": "https://api.moonshot.cn/v1",
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1353,6 +1358,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.minimaxi.com/v1",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1365,6 +1371,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.minimaxi.com/anthropic",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {"User-Agent": "claude-code/0.1.0"},
                         "anth_thinking_config": {"type": "", "budget": 0, "effort": ""},
@@ -1378,6 +1385,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.xiaomimimo.com/v1",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1390,6 +1398,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://token-plan-cn.xiaomimimo.com/anthropic",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {"User-Agent": "claude-code/0.1.0"},
                         "anth_thinking_config": {"type": "", "budget": 0, "effort": ""},
@@ -1403,6 +1412,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.x.ai/v1",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                         "xai_native_search": False,
@@ -1416,6 +1426,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.deepseek.com/v1",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1428,6 +1439,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "timeout": 120,
                         "api_base": "https://open.bigmodel.cn/api/paas/v4/",
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1440,6 +1452,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.longcat.chat/openai",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1452,6 +1465,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "timeout": 120,
                         "api_base": "https://aihubmix.com/v1",
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1464,6 +1478,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "timeout": 120,
                         "api_base": "https://openrouter.ai/api/v1",
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1476,6 +1491,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://integrate.api.nvidia.com/v1",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1489,6 +1505,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1500,6 +1517,7 @@ CONFIG_METADATA_2 = {
                         "enable": True,
                         "key": ["ollama"],  # ollama 的 key 默认是 ollama
                         "api_base": "http://127.0.0.1:11434/v1",
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                         "ollama_disable_thinking": False,
@@ -1512,6 +1530,7 @@ CONFIG_METADATA_2 = {
                         "enable": True,
                         "key": ["lmstudio"],
                         "api_base": "http://127.0.0.1:1234/v1",
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1524,6 +1543,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://generativelanguage.googleapis.com/v1beta/openai/",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1536,6 +1556,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.groq.com/openai/v1",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1548,6 +1569,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.302.ai/v1",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1560,6 +1582,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "timeout": 120,
                         "api_base": "https://api.siliconflow.cn/v1",
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1572,6 +1595,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.ppinfra.com/v3/openai",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1584,6 +1608,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.tokenpony.cn/v1",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1596,6 +1621,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.modelverse.cn/v1",
                         "timeout": 120,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1608,6 +1634,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "timeout": 120,
                         "api_base": "https://api-inference.modelscope.cn/v1",
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                     },
@@ -1624,6 +1651,7 @@ CONFIG_METADATA_2 = {
                         "dify_query_input_key": "astrbot_text_query",
                         "variables": {},
                         "timeout": 60,
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "Coze": {
@@ -1636,6 +1664,7 @@ CONFIG_METADATA_2 = {
                         "bot_id": "",
                         "coze_api_base": "https://api.coze.cn",
                         "timeout": 60,
+                        "use_global_proxy": True,
                         "proxy": "",
                         # "auto_save_history": True,
                     },
@@ -1655,6 +1684,7 @@ CONFIG_METADATA_2 = {
                         },
                         "variables": {},
                         "timeout": 60,
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "DeerFlow": {
@@ -1674,6 +1704,7 @@ CONFIG_METADATA_2 = {
                         "deerflow_max_concurrent_subagents": 3,
                         "deerflow_recursion_limit": 1000,
                         "timeout": 300,
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "FastGPT": {
@@ -1685,6 +1716,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.fastgpt.in/api/v1",
                         "timeout": 60,
+                        "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
                         "custom_extra_body": {},
@@ -1698,6 +1730,7 @@ CONFIG_METADATA_2 = {
                         "api_key": "",
                         "api_base": "",
                         "model": "whisper-1",
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "MiMo STT(API)": {
@@ -1710,6 +1743,7 @@ CONFIG_METADATA_2 = {
                         "api_base": "https://api.xiaomimimo.com/v1",
                         "model": "mimo-v2.5-asr",
                         "timeout": "20",
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "Whisper(Local)": {
@@ -1717,6 +1751,10 @@ CONFIG_METADATA_2 = {
                         "type": "openai_whisper_selfhost",
                         "provider_type": "speech_to_text",
                         "enable": False,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "id": "whisper_selfhost",
                         "model": "tiny",
                         "whisper_device": "cpu",
@@ -1726,6 +1764,10 @@ CONFIG_METADATA_2 = {
                         "provider": "sensevoice",
                         "provider_type": "speech_to_text",
                         "enable": False,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "id": "sensevoice",
                         "stt_model": "iic/SenseVoiceSmall",
                         "is_emotion": False,
@@ -1741,6 +1783,7 @@ CONFIG_METADATA_2 = {
                         "model": "tts-1",
                         "openai-tts-voice": "alloy",
                         "timeout": "20",
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "MiMo TTS(API)": {
@@ -1758,6 +1801,7 @@ CONFIG_METADATA_2 = {
                         "mimo-tts-dialect": "",
                         "mimo-tts-seed-text": "Hello, MiMo, have you had lunch?",
                         "timeout": "20",
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "Genie TTS": {
@@ -1766,6 +1810,10 @@ CONFIG_METADATA_2 = {
                         "type": "genie_tts",
                         "provider_type": "text_to_speech",
                         "enable": False,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "genie_character_name": "mika",
                         "genie_onnx_model_dir": "CharacterModels/v2ProPlus/mika/tts_models",
                         "genie_language": "Japanese",
@@ -1779,6 +1827,10 @@ CONFIG_METADATA_2 = {
                         "type": "edge_tts",
                         "provider_type": "text_to_speech",
                         "enable": False,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "edge-tts-voice": "zh-CN-XiaoxiaoNeural",
                         "rate": "+0%",
                         "volume": "+0%",
@@ -1788,6 +1840,10 @@ CONFIG_METADATA_2 = {
                     "GSV TTS(Local)": {
                         "id": "gsv_tts",
                         "enable": False,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "provider": "gpt_sovits",
                         "type": "gsv_tts_selfhost",
                         "provider_type": "text_to_speech",
@@ -1823,6 +1879,10 @@ CONFIG_METADATA_2 = {
                         "provider": "gpt_sovits_inference",
                         "provider_type": "text_to_speech",
                         "enable": False,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "api_key": "",
                         "api_base": "http://127.0.0.1:8000",
                         "version": "v4",
@@ -1844,6 +1904,7 @@ CONFIG_METADATA_2 = {
                         "fishaudio-tts-character": "可莉",
                         "fishaudio-tts-reference-id": "",
                         "timeout": "20",
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "阿里云百炼 TTS(API)": {
@@ -1853,6 +1914,10 @@ CONFIG_METADATA_2 = {
                         "type": "dashscope_tts",
                         "provider_type": "text_to_speech",
                         "enable": False,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "api_key": "",
                         "model": "cosyvoice-v1",
                         "dashscope_tts_voice": "loongstella",
@@ -1871,6 +1936,7 @@ CONFIG_METADATA_2 = {
                         "azure_tts_volume": "100",
                         "azure_tts_subscription_key": "",
                         "azure_tts_region": "eastus",
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "MiniMax TTS(API)": {
@@ -1894,6 +1960,7 @@ CONFIG_METADATA_2 = {
                         "minimax-voice-latex": False,
                         "minimax-voice-english-normalization": False,
                         "timeout": 20,
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "火山引擎_TTS(API)": {
@@ -1909,6 +1976,7 @@ CONFIG_METADATA_2 = {
                         "volcengine_speed_ratio": 1.0,
                         "api_base": "https://openspeech.bytedance.com/api/v1/tts",
                         "timeout": 20,
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "Gemini TTS": {
@@ -1923,6 +1991,7 @@ CONFIG_METADATA_2 = {
                         "gemini_tts_model": "gemini-2.5-flash-preview-tts",
                         "gemini_tts_prefix": "",
                         "gemini_tts_voice_name": "Leda",
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "ElevenLabs TTS(API)": {
@@ -1942,6 +2011,7 @@ CONFIG_METADATA_2 = {
                         "elevenlabs-tts-style": "",
                         "elevenlabs-tts-use-speaker-boost": True,
                         "timeout": "20",
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "OpenAI Embedding": {
@@ -1956,6 +2026,7 @@ CONFIG_METADATA_2 = {
                         "embedding_model": "",
                         "embedding_dimensions": 1024,
                         "timeout": 20,
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "Gemini Embedding": {
@@ -1970,6 +2041,7 @@ CONFIG_METADATA_2 = {
                         "embedding_model": "gemini-embedding-exp-03-07",
                         "embedding_dimensions": 768,
                         "timeout": 20,
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "NVIDIA Embedding": {
@@ -1985,6 +2057,7 @@ CONFIG_METADATA_2 = {
                         "input_type": "passage",
                         "embedding_dimensions": 1024,
                         "timeout": 20,
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "Ollama Embedding": {
@@ -1998,6 +2071,7 @@ CONFIG_METADATA_2 = {
                         "embedding_model": "nomic-embed-text",
                         "embedding_dimensions": 768,
                         "timeout": 60,
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "DashScope Embedding": {
@@ -2012,6 +2086,7 @@ CONFIG_METADATA_2 = {
                         "embedding_model": "text-embedding-v4",
                         "embedding_dimensions": 1024,
                         "timeout": 60,
+                        "use_global_proxy": True,
                         "proxy": "",
                     },
                     "vLLM Rerank": {
@@ -2020,6 +2095,10 @@ CONFIG_METADATA_2 = {
                         "provider": "vllm",
                         "provider_type": "rerank",
                         "enable": True,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "rerank_api_key": "",
                         "rerank_api_base": "http://127.0.0.1:8000",
                         "rerank_api_suffix": "/v1/rerank",
@@ -2032,6 +2111,10 @@ CONFIG_METADATA_2 = {
                         "provider": "xinference",
                         "provider_type": "rerank",
                         "enable": True,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "rerank_api_key": "",
                         "rerank_api_base": "http://127.0.0.1:9997",
                         "rerank_model": "BAAI/bge-reranker-base",
@@ -2044,6 +2127,10 @@ CONFIG_METADATA_2 = {
                         "provider": "bailian",
                         "provider_type": "rerank",
                         "enable": True,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "rerank_api_key": "",
                         "rerank_api_base": "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
                         "rerank_model": "qwen3-rerank",
@@ -2057,6 +2144,10 @@ CONFIG_METADATA_2 = {
                         "provider": "nvidia",
                         "provider_type": "rerank",
                         "enable": True,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "nvidia_rerank_api_key": "",
                         "nvidia_rerank_api_base": "https://ai.api.nvidia.com/v1/retrieval",
                         "nvidia_rerank_model": "nv-rerank-qa-mistral-4b:1",
@@ -2070,6 +2161,10 @@ CONFIG_METADATA_2 = {
                         "provider": "huggingface",
                         "provider_type": "rerank",
                         "enable": True,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "rerank_api_key": "",
                         "rerank_api_base": "http://127.0.0.1:8080",
                         "timeout": 20,
@@ -2084,6 +2179,10 @@ CONFIG_METADATA_2 = {
                         "provider": "xinference",
                         "provider_type": "speech_to_text",
                         "enable": False,
+
+                        "use_global_proxy": True,
+
+                        "proxy": "",
                         "api_key": "",
                         "api_base": "http://127.0.0.1:9997",
                         "model": "whisper-large-v3",
@@ -2846,10 +2945,18 @@ CONFIG_METADATA_2 = {
                         "description": "API Base URL",
                         "type": "string",
                     },
+                    "use_global_proxy": {
+                        "description": "provider_group.provider.use_global_proxy.description",
+                        "type": "bool",
+                        "hint": "provider_group.provider.use_global_proxy.hint",
+                    },
                     "proxy": {
                         "description": "provider_group.provider.proxy.description",
                         "type": "string",
                         "hint": "provider_group.provider.proxy.hint",
+                        "condition": {
+                            "use_global_proxy": False,
+                        },
                     },
                     "model": {
                         "description": "模型 ID",

@@ -30,6 +30,7 @@ from astrbot.core.message.message_event_result import (
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.provider.entites import ProviderRequest
 from astrbot.core.provider.register import llm_tools
+from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.tools.computer_tools import (
     CuaKeyboardTypeTool,
     CuaMouseClickTool,
@@ -356,6 +357,12 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
         prov_settings: dict = ctx.get_config(umo=umo).get("provider_settings", {})
         agent_max_step = int(prov_settings.get("max_agent_step", 30))
         stream = prov_settings.get("streaming_response", False)
+        # 会话级流式输出覆盖（/flow 命令设置）：未设置时跟随全局配置
+        session_streaming = await SessionServiceManager.get_streaming_override_for_session(
+            umo,
+        )
+        if session_streaming is not None:
+            stream = bool(session_streaming)
         llm_resp = await ctx.tool_loop_agent(
             event=event,
             chat_provider_id=prov_id,

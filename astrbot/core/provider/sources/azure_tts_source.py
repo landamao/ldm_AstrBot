@@ -133,7 +133,7 @@ class AzureNativeProvider(TTSProvider):
             "rate": provider_config.get("azure_tts_rate", "1"),
             "volume": provider_config.get("azure_tts_volume", "100"),
         }
-        self.proxy = provider_config.get("proxy", "")
+        self.proxy = self.get_proxy() or ""
         if self.proxy:
             logger.info(f"[Azure TTS Native] 使用代理: {self.proxy}")
 

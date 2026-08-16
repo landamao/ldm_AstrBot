@@ -125,7 +125,7 @@ class ProviderAnthropic(Provider):
         different ``httpx`` module makes that check fail. We therefore prefer
         the SDK's own ``httpx`` module when available.
         """
-        proxy = provider_config.get("proxy", "")
+        proxy = self.get_proxy() or ""
         if not proxy:
             return None
         httpx_module: Any = httpx
@@ -525,12 +525,12 @@ class ProviderAnthropic(Provider):
                 max_attempts=request_max_retries,
             )
         except httpx.RequestError as e:
-            proxy = self.provider_config.get("proxy", "")
+            proxy = self.get_proxy() or ""
             log_connection_failure("Anthropic", e, proxy)
             raise
         except Exception as e:
             if is_connection_error(e):
-                proxy = self.provider_config.get("proxy", "")
+                proxy = self.get_proxy() or ""
                 log_connection_failure("Anthropic", e, proxy)
             raise
 

@@ -84,7 +84,7 @@ class ProviderGoogleGenAI(Provider):
 
     def _init_client(self) -> None:
         """初始化Gemini客户端"""
-        proxy = self.provider_config.get("proxy", "")
+        proxy = self.get_proxy() or ""
         http_options = types.HttpOptions(
             base_url=self.api_base,
             timeout=self.timeout * 1000,  # 毫秒
@@ -153,7 +153,7 @@ class ProviderGoogleGenAI(Provider):
 
         # 连接错误处理
         if is_connection_error(e):
-            proxy = self.provider_config.get("proxy", "")
+            proxy = self.get_proxy() or ""
             log_connection_failure("Gemini", e, proxy)
 
         raise e

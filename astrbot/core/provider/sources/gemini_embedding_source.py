@@ -28,7 +28,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         if api_base:
             api_base = api_base.removesuffix("/")
             http_options.base_url = api_base
-        proxy = provider_config.get("proxy", "")
+        proxy = self.get_proxy() or ""
         if proxy:
             http_options.async_client_args = {"proxy": proxy}
             logger.info(f"[Gemini Embedding] 使用代理: {proxy}")

@@ -30,7 +30,7 @@ class ProviderMiMoSTTAPI(STTProvider):
         super().__init__(provider_config, provider_settings)
         self.chosen_api_key = provider_config.get("api_key", "")
         self.api_base = provider_config.get("api_base", DEFAULT_MIMO_API_BASE)
-        self.proxy = provider_config.get("proxy", "")
+        self.proxy = self.get_proxy() or ""
         self.timeout = normalize_timeout(provider_config.get("timeout", 20))
         self.set_model(provider_config.get("model", DEFAULT_MIMO_STT_MODEL))
         self.client = create_http_client(self.timeout, self.proxy)

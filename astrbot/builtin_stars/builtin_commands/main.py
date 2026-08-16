@@ -6,6 +6,7 @@ from .commands import (
     AdminCommands,
     AlterCmdCommands,
     ConversationCommands,
+    FlowCommand,
     HelpCommand,
     LLMCommands,
     NameCommand,
@@ -36,6 +37,7 @@ class Main(star.Star):
         self.name_c = NameCommand(self.context)
         self.t2i_c = T2ICommand(self.context)
         self.tts_c = TTSCommand(self.context)
+        self.flow_c = FlowCommand(self.context)
         self.sid_c = SIDCommand(self.context)
 
     @filter.command("help")
@@ -113,6 +115,11 @@ class Main(star.Star):
     async def tts(self, event: AstrMessageEvent) -> None:
         """开关文本转语音（会话级别）"""
         await self.tts_c.tts(event)
+
+    @filter.command("flow")
+    async def flow(self, event: AstrMessageEvent, arg: str = "") -> None:
+        """开关当前会话的流式输出。传入 unset 恢复跟随全局配置"""
+        await self.flow_c.flow(event, arg)
 
     @filter.command("sid")
     async def sid(self, event: AstrMessageEvent) -> None:

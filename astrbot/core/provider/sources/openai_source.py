@@ -344,7 +344,7 @@ class ProviderOpenAIOfficial(Provider):
 
     def _create_http_client(self, provider_config: dict) -> httpx.AsyncClient:
         """创建带代理的 HTTP 客户端"""
-        proxy = provider_config.get("proxy", "")
+        proxy = self.get_proxy() or ""
         httpx_module: Any = httpx
         try:
             from openai import _base_client as openai_base_client
@@ -1270,7 +1270,7 @@ class ProviderOpenAIOfficial(Provider):
         # logger.error(f"发生了错误。Provider 配置如下: {self.provider_config}")
 
         if is_connection_error(e):
-            proxy = self.provider_config.get("proxy", "")
+            proxy = self.get_proxy() or ""
             log_connection_failure("OpenAI", e, proxy)
 
         raise e

@@ -3,6 +3,7 @@
 from .admin import AdminCommands
 from .alter_cmd import AlterCmdCommands
 from .conversation import ConversationCommands
+from .flow import FlowCommand
 from .help import HelpCommand
 from .llm import LLMCommands
 from .name import NameCommand
@@ -18,6 +19,7 @@ __all__ = [
     "AdminCommands",
     "AlterCmdCommands",
     "ConversationCommands",
+    "FlowCommand",
     "HelpCommand",
     "LLMCommands",
     "NameCommand",

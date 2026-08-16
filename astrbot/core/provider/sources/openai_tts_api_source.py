@@ -31,7 +31,7 @@ class ProviderOpenAITTSAPI(TTSProvider):
         if isinstance(timeout, str):
             timeout = int(timeout)
 
-        proxy = provider_config.get("proxy", "")
+        proxy = self.get_proxy() or ""
         http_client = None
         if proxy:
             logger.info(f"[OpenAI TTS] 使用代理: {proxy}")

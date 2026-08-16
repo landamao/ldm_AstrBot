@@ -61,7 +61,7 @@ class ProviderFishAudioTTSAPI(TTSProvider):
             self.timeout: int = int(provider_config.get("timeout", 20))
         except ValueError:
             self.timeout = 20
-        self.proxy: str = provider_config.get("proxy", "")
+        self.proxy: str = self.get_proxy() or ""
         if self.proxy:
             logger.info(f"[FishAudio TTS] 使用代理: {self.proxy}")
         self.headers = {
