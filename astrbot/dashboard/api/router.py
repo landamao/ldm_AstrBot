@@ -21,6 +21,7 @@ from .open_api import router as open_api_router
 from .personas import router as personas_router
 from .platform import router as platform_router
 from .plugins import router as plugins_router
+from .project_docs import router as project_docs_router
 from .providers import router as providers_router
 from .sessions import router as sessions_router
 from .skills import router as skills_router
@@ -42,6 +43,7 @@ def build_api_router() -> APIRouter:
     router.include_router(bots_router)
     router.include_router(providers_router)
     router.include_router(plugins_router)
+    router.include_router(project_docs_router)
     router.include_router(dashboard_preferences_router)
     router.include_router(chat_router)
     router.include_router(chat_projects_router)

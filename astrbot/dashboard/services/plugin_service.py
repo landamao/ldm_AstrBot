@@ -920,6 +920,7 @@ class PluginService:
                 fallback_desc,
             ),
         }
+        self._attach_aliases(component, command_filter)
         return self._wrap_command_component(parts[:-1], component)
 
     def _build_command_group_component(
@@ -942,6 +943,7 @@ class PluginService:
                 fallback_desc,
             ),
         }
+        self._attach_aliases(component, command_group_filter)
         if subcommands:
             component["subcommands"] = subcommands
         return self._wrap_command_component(parts[:-1], component)
@@ -955,6 +957,7 @@ class PluginService:
                 "name": command_filter.group_name,
                 "description": self._get_command_description(command_filter),
             }
+            self._attach_aliases(component, command_filter)
             subcommands = [
                 self._build_command_group_child(sub_filter)
                 for sub_filter in command_filter.sub_command_filters
@@ -963,10 +966,19 @@ class PluginService:
                 component["subcommands"] = subcommands
             return component
 
-        return {
+        component: dict[str, Any] = {
             "name": command_filter.command_name,
             "description": self._get_command_description(command_filter),
         }
+        self._attach_aliases(component, command_filter)
+        return component
+
+    @staticmethod
+    def _attach_aliases(component: dict, filter_ref) -> None:
+        """把过滤器上的别名集合挂到组件上（仅别名片段，与指令管理页一致）。"""
+        aliases = sorted(getattr(filter_ref, "alias", None) or set())
+        if aliases:
+            component["aliases"] = aliases
 
     @staticmethod
     def _wrap_command_component(parent_names: list[str], component: dict) -> dict:
@@ -1005,9 +1017,19 @@ class PluginService:
         if target.get("description") == "无描述" and source.get("description"):
             target["description"] = source["description"]
         for key, value in source.items():
-            if key in {"subcommands", "description"}:
+            if key in {"subcommands", "description", "aliases"}:
                 continue
             target.setdefault(key, value)
+
+        # 同一指令被多个 handler 注册时，别名取并集（去重保序）
+        source_aliases = source.get("aliases")
+        if isinstance(source_aliases, list) and source_aliases:
+            target_aliases = target.get("aliases")
+            if not isinstance(target_aliases, list):
+                target_aliases = []
+            merged = list(dict.fromkeys([*target_aliases, *source_aliases]))
+            if merged:
+                target["aliases"] = merged
 
         source_subcommands = source.get("subcommands")
         if not isinstance(source_subcommands, list):
