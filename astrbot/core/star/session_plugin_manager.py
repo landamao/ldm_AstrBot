@@ -46,6 +46,24 @@ class SessionPluginManager:
         return True
 
     @staticmethod
+    async def get_session_disabled_plugins(event: AstrMessageEvent) -> list:
+        """获取当前会话中禁用的插件列表（带事件级缓存，避免钩子高频派发时重复查库）"""
+        session_id = event.unified_msg_origin
+        if not session_id:
+            return []
+        session_plugin_config = event.get_extra("_sp_session_plugin_config", None)
+        if session_plugin_config is None:
+            session_plugin_config = await sp.get_async(
+                scope="umo",
+                scope_id=session_id,
+                key="session_plugin_config",
+                default={},
+            )
+            event.set_extra("_sp_session_plugin_config", session_plugin_config)
+        session_config = session_plugin_config.get(session_id, {})
+        return session_config.get("disabled_plugins", [])
+
+    @staticmethod
     async def filter_handlers_by_session(
         event: AstrMessageEvent,
         handlers: list,
@@ -65,14 +83,9 @@ class SessionPluginManager:
         session_id = event.unified_msg_origin
         filtered_handlers = []
 
-        session_plugin_config = await sp.get_async(
-            scope="umo",
-            scope_id=session_id,
-            key="session_plugin_config",
-            default={},
+        disabled_plugins = await SessionPluginManager.get_session_disabled_plugins(
+            event
         )
-        session_config = session_plugin_config.get(session_id, {})
-        disabled_plugins = session_config.get("disabled_plugins", [])
 
         for handler in handlers:
             # 获取处理器对应的插件

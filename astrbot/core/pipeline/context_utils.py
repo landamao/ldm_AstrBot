@@ -89,6 +89,10 @@ async def call_event_hook(
         hook_type,
         plugins_name=event.plugins_name,
     )
+    # 会话级禁用插件过滤：与指令链路保持一致，被会话规则禁用的插件其钩子不再触发
+    from astrbot.core.star.session_plugin_manager import SessionPluginManager
+
+    handlers = await SessionPluginManager.filter_handlers_by_session(event, handlers)
     for handler in handlers:
         try:
             assert inspect.iscoroutinefunction(handler.handler)

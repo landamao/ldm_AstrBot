@@ -1033,13 +1033,16 @@ async def _decorate_llm_request(
     await _apply_workspace_extra_prompt(event, req, plugin_context)
 
 
-def _plugin_tool_fix(event: AstrMessageEvent, req: ProviderRequest) -> None:
+async def _plugin_tool_fix(event: AstrMessageEvent, req: ProviderRequest) -> None:
     """根据事件中的插件设置，过滤请求中的工具列表。
 
     注意：没有 handler_module_path 的工具（如 MCP 工具）会被保留，
     因为它们不属于任何插件，不应被插件过滤逻辑影响。
     """
-    if event.plugins_name is not None and req.func_tool:
+    if not req.func_tool:
+        return
+    # 全局插件白名单过滤（plugin_set 配置）
+    if event.plugins_name is not None:
         new_tool_set = ToolSet()
         for tool in req.func_tool.tools:
             if isinstance(tool, MCPTool):
@@ -1058,6 +1061,32 @@ def _plugin_tool_fix(event: AstrMessageEvent, req: ProviderRequest) -> None:
                 new_tool_set.add_tool(tool)
                 continue
             if plugin.name in event.plugins_name or plugin.reserved:
+                new_tool_set.add_tool(tool)
+        req.func_tool = new_tool_set
+
+    # 会话级禁用插件过滤（自定义规则）：被会话规则禁用的插件，其 LLM 工具一并移除
+    from astrbot.core.star.session_plugin_manager import SessionPluginManager
+
+    disabled_plugins = await SessionPluginManager.get_session_disabled_plugins(event)
+    if disabled_plugins:
+        new_tool_set = ToolSet()
+        for tool in req.func_tool.tools:
+            if isinstance(tool, MCPTool):
+                # 保留 MCP 工具
+                new_tool_set.add_tool(tool)
+                continue
+            mp = tool.handler_module_path
+            if not mp:
+                # 没有 plugin 归属信息的工具（如 subagent transfer_to_*）
+                # 不应受到会话插件过滤影响。
+                new_tool_set.add_tool(tool)
+                continue
+            plugin = star_map.get(mp)
+            if not plugin:
+                # 无法解析插件归属时，保守保留工具，避免误过滤。
+                new_tool_set.add_tool(tool)
+                continue
+            if plugin.name not in disabled_plugins:
                 new_tool_set.add_tool(tool)
         req.func_tool = new_tool_set
 
@@ -1595,7 +1624,7 @@ async def build_main_agent(
     if not req.session_id:
         req.session_id = event.unified_msg_origin
 
-    _plugin_tool_fix(event, req)
+    await _plugin_tool_fix(event, req)
     await _apply_web_search_tools(event, req, plugin_context)
     _apply_image_caption_tool(event, req, plugin_context)
 

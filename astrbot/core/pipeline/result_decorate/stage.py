@@ -13,7 +13,6 @@ from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
-
 from astrbot.core.utils.segmented_reply import (
     SegmentedReplySplitter,
     resolve_segmented_reply_config,
@@ -151,6 +150,12 @@ class ResultDecorateStage(Stage):
         handlers = star_handlers_registry.get_handlers_by_event_type(
             EventType.OnDecoratingResultEvent,
             plugins_name=event.plugins_name,
+        )
+        # 会话级禁用插件过滤：与指令链路保持一致，被会话规则禁用的插件其钩子不再触发
+        from astrbot.core.star.session_plugin_manager import SessionPluginManager
+
+        handlers = await SessionPluginManager.filter_handlers_by_session(
+            event, handlers
         )
         for handler in handlers:
             try:

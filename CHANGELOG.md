@@ -6,6 +6,28 @@
 ---
 
 <details>
+<summary><strong>[4.26.35] — 2026-08-17</strong> — 会话级插件禁用全面生效（事件钩子 / 装饰结果 / LLM 工具）</summary>
+
+基于 ldm v4.26.34 的版本。本次修复 WebUI「会话管理 → 自定义规则 → 插件配置 → 禁用的插件」原本只拦截指令/消息处理器、事件钩子与 LLM 工具全部绕过的问题——现在三套派发链路全部按会话禁用规则过滤，与界面承诺的「整体禁用」语义一致。
+
+### 修复
+
+- **会话级插件禁用全面生效**
+  - 指令/消息处理器链路原本就生效（`filter_handlers_by_session`），本次补齐其余两条绕过路径：
+  - **事件钩子**（`on_llm_request` / `on_llm_response` / `on_agent_begin` / `on_agent_done` / `on_using_llm_tool` / `on_llm_tool_respond` / `on_after_message_sent` / `on_plugin_error` 等，统一派发点 `call_event_hook`）：被会话规则禁用的插件，其事件钩子不再触发；
+  - **发送前装饰钩子**（`on_decorating_result`，`result_decorate/stage.py` 手写循环派发）：同样按会话禁用过滤；
+  - **插件 LLM 工具**（`@llm_tool`，请求构建时注入）：被会话禁用插件的工具从工具集中剔除，不注入给模型（MCP 工具、无插件归属的保留工具不受影响）。
+  - 系统级事件（启动完成 / 插件加载 / 插件卸载）按自身循环派发、无会话概念，不受影响。
+- **查库缓存**：新增 `SessionPluginManager.get_session_disabled_plugins()` 助手，带事件级缓存（`event._extras`），避免一条消息请求周期内钩子高频派发（agent begin/done、llm request/response、tool start/end、after_message_sent、decorating_result、plugin_error 等十余次）反复查库。
+
+### 说明
+
+- 更新后请**手动重启**一次服务（后端 Python 改动需重启才加载）
+- 建议验证：WebUI「会话管理 → 自定义规则 → 插件配置」禁用某插件后，在该会话中确认：① 插件指令不再响应；② 插件的事件钩子不再触发（如 on_llm_request 拦截）；③ 插件的 LLM 工具不再出现在模型工具列表中；其他会话不受影响
+
+</details>
+
+<details>
 <summary><strong>[4.26.34] — 2026-08-16</strong> — /flow 指令会话级流式输出；模型提供商独立代理配置（三态：独立代理/全局代理/直连）</summary>
 
 基于 ldm v4.26.33 的版本。本次新增会话级流式输出指令 /flow，可按会话独立控制流式输出（默认跟随全局配置）；同时为模型提供商补齐与平台代理同构的独立代理配置，统一「独立代理 > 全局代理 > 直连」三态。
