@@ -1,0 +1,1 @@
+import{bZ as i}from"./index-B-8LQKSB.js";function a(){return i("$confirm",void 0)}async function c(n,r){const o=r??void 0;if(o)try{return await o({message:n})}catch{return!1}return window.confirm(n)}export{c as a,a as u};

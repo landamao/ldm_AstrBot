@@ -188,10 +188,16 @@ def _should_show_startup_banner(argv: list[str] | None = None) -> bool:
 def _run_startup_banner() -> None:
     """在后台线程中执行启动横幅动画，不阻塞主线程导入模块。"""
     try:
-        if os.name == "nt":  # Windows
-            os.system("cls")
-        else:  # Linux / macOS
-            os.system("clear")
+        # 不真正清屏（clear/cls 会连滚动缓冲一起抹掉，旧内容无法回滚）：
+        # 输出整屏换行把旧内容推到上方（保留可回滚），再把光标复位到
+        # 第 1 行，与清屏后的布局一致（提示语在顶部、艺术字在下方）
+        try:
+            terminal_rows = os.get_terminal_size().lines
+        except OSError:
+            terminal_rows = 50
+        sys.stdout.write("\n" * (terminal_rows + 1))
+        sys.stdout.write("\033[H")  # 光标复位到第 1 行
+        sys.stdout.flush()
 
         # 开头提示：动画与程序加载并行
         tip_color = bright_cyan if bright_cyan else cyan

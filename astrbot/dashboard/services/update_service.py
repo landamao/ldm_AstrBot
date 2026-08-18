@@ -409,7 +409,7 @@ class UpdateService:
             logger.debug(f"Update task failed: {exc!s}")
 
     async def update_dashboard(self) -> UpdateServiceResult:
-        """仅从 landamao/ldm_AstrBot 同步 WebUI 到 data/dist。"""
+        """仅从 landamao/ldm_AstrBot 同步 WebUI（目标目录跟随 --webui-dir，默认 data/dist）。"""
         try:
             applied = await self.astrbot_updator.apply_webui_only_from_package(
                 latest=True,

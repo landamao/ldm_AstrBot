@@ -637,6 +637,19 @@ class AstrBotDashboard:
             # Customized: when running interactively, offer to switch to a new
             # port, persist it to the config, then prompt for a restart and exit.
             if sys.stdin and sys.stdin.isatty():
+                # 启动横幅动画播放期间，直接写 stdout 的交互提示会被
+                # 动画覆盖（loguru 日志有挂起机制，input 没有）。
+                # 等待横幅播放结束再询问，避免 (y/N) 提示被遮挡。
+                try:
+                    _main_module = sys.modules.get("__main__")
+                    if (
+                        _main_module is not None
+                        and hasattr(_main_module, "is_startup_banner_running")
+                        and _main_module.is_startup_banner_running()
+                    ):
+                        _main_module.wait_startup_banner()
+                except Exception:
+                    pass
                 answer = (
                     input(f"端口 {port} 已被占用，是否使用其他端口？(y/N): ")
                     .strip()

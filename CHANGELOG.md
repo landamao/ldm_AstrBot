@@ -6,6 +6,70 @@
 ---
 
 <details>
+<summary><strong>[4.26.38] — 2026-08-19</strong> — 登录页 NapCat 风格重做、自定义壁纸、更新器支持 --webui-dir</summary>
+
+基于 ldm v4.26.37 的版本。本次将登录页全新重做为 NapCat 风格（粉紫渐变光斑、玻璃拟态卡片、3D 倾斜交互），登录按钮固定粉色渐变不再受旧主题色影响；设置页新增「自定义壁纸」（图片地址/本地上传/透明度调节）；修复更新器忽略 `--webui-dir` 启动参数导致更新 WebUI 不生效的问题。
+
+### 新增
+
+- **登录页 NapCat 风格重做**（`/auth/login` 整页重写，参考 NapCat WebUI 登录页并升级）
+  - 背景：粉紫渐变 + 3 个动态光斑（缓慢漂移动画，NapCat 为静态光斑）
+  - 右上角：新增 GitHub 图标（链接 landamao/ldm_AstrBot 仓库）+ 主题切换按钮（玻璃质感）
+  - 登录卡片：玻璃拟态（半透明 + backdrop-blur 磨砂 + 粉色描边 + 大圆角 28px）
+  - 3D 交互：卡片跟随鼠标 3D 倾斜，0.12s 快速过渡即时跟手，移出 0.12s 回弹归位
+  - 入场动画：卡片淡入 + 上浮 + 弹性缩放（spring 曲线）
+  - logo：头像放大 + 粉色投影（无浮动动画）
+  - 标题：「ldm」深色 +「WebUI」粉紫渐变高亮（仿 NapCat 两段式配色）
+  - 输入框：大圆角 16px + 聚焦粉晕
+  - 登录按钮：通栏胶囊造型（圆角 999px）+ 粉紫渐变 + 悬浮发光 + 点击按压回弹
+  - 暗色模式完整适配：深紫红渐变背景 + 暗色光斑 + 深色玻璃卡片 + 白色标题
+- **WebUI 自定义壁纸**（设置 → 外观 新增设置项）
+  - 壁纸图片地址（支持 http/https 或 data: 图片，地址无效/加载失败有提示）
+  - 上传图片：选择本地图片上传到服务器（data/wallpapers/），自动填入地址；支持 png/jpg/jpeg/webp/gif/bmp，最大 10MB；换壁纸/清除时自动删除旧上传文件
+  - 壁纸透明度滑块（10%-100%，默认 100%，数值越小壁纸越淡）
+  - 界面板块透明度滑块（0%-90%，默认 0%，数值越大侧边栏/顶栏/内容卡片越透明，壁纸越明显）
+  - 实时预览卡片：模拟侧边栏 + 顶栏 + 内容卡片骨架，拖动滑块即时联动
+  - 「清除壁纸」按钮恢复默认纯色背景
+  - 壁纸设置与主题色同一套机制：保存到服务端 preferences（`dashboard_wallpaper`，跨浏览器共享）+ localStorage 缓存；点右下角保存按钮才应用全局，未保存只在预览卡内看效果
+  - 壁纸只作用于登录后的主界面（wallpaper-mode），登录页保持 NapCat 渐变风格不受影响
+  - 上传文件访问接口 `GET /api/v1/ui-preferences/wallpaper/files/{uuid}.ext`（需登录，uuid 文件名防枚举、防路径穿越、长缓存）
+
+### 体验优化
+
+- **平台日志页「面板透明度」独立调节**
+  - 日志终端背景不再跟随全局板块透明度，平台日志页头新增「面板透明度」按钮（v-menu 弹滑块，0-90%）
+  - 终端区背景用独立 CSS 变量 `--console-alpha`（`rgba(surface, var(--console-alpha, var(--panel-alpha, 1)))`），未设置时回退全局；滑块写入 localStorage `console_panel_alpha`
+  - 浅色主题下日志终端底色固定深色 `rgba(30,30,30,alpha)`（=#1e1e1e），深浅主题一致可读，壁纸仍从半透明深色底透出
+- **移除登录页版本显示与版本不一致提示**
+  - 删除登录页底部版本显示（WebUI/ldm/ldm(Code) 版本信息行）、版本不一致提示按钮 + 版本状态弹窗（含相关 i18n 引用）、`publicApi.versions()` 调用及 `PublicVersionData` 类型引用
+
+### 修复
+
+- **登录按钮背景固定粉色渐变**（`#FF7FAC → #F06292`），不再使用主题变量（`--v-theme-primary/secondary`）
+  - 原因：按钮原用主题变量，若浏览器/服务端保存过旧主题色（换肤前紫色系），按钮会显示成紫色而非粉色；现在无论主题色如何覆盖，登录按钮始终是粉色
+- **更新器支持 `--webui-dir`**（修复「传 --webui-dir 启动后，更新 WebUI 仍覆盖默认 data/dist」）
+  - 根因：`updator.py` 的 `_应用webui()` 目标目录写死为 `data/dist`，完全不看启动参数；而启动时 `main.py:check_dashboard_files()` 与 `server.py` 都优先用 `--webui-dir` 服务 → 运行时服务和更新目标是两个地方，更新完 WebUI 不生效
+  - 新增 `_resolve_webui_dir()` 解析当前进程的 `--webui-dir`（来源优先级：命令行参数 → `ASTRBOT_WEBUI_DIR` 环境变量，与重启参数保留 `_build_frozen_reboot_args` 同一套来源）；`_应用webui()` 应用更新前先解析：指定且目录存在 → 覆盖到该目录；指定但不存在 → 警告并回退默认 data/dist；未指定 → 默认（行为不变）
+  - version 兜底逻辑（新包缺 assets/version 时回写旧 version）对自定义目录同样生效；完整更新（`apply_update_package`）与仅更新 WebUI（`apply_webui_only_from_package` / 面板「更新面板」）两条路径都覆盖
+  - 重启后 `_build_frozen_reboot_args` 会继续把 `--webui-dir` 带给新进程，更新目标不会丢
+- **修复「点外观后设置页按钮点不了」**：预览提示层（wallpaper-preview__empty）绝对定位逃逸到 .v-main 盖住全屏，已移入预览舞台内部并给容器加 position: relative
+- **修复「设置了壁纸但背景还是白色」**：根因是 `scss/wallpaper.scss` 在 `.v-application.wallpaper-mode` 上声明了 `--wallpaper-image: none` 等三个默认值——CSS 自定义属性一旦在元素自身声明就会阻断从 html 继承，而壁纸变量写在 `document.documentElement`，导致 `::before` 永远解析到 `none`。已删除这三行默认值（`::before`/板块规则里 `var(..., 默认值)` 本身有兜底）
+- **板块透明度覆盖范围扩展**（对照 astrbot_plugin_palette 策略）
+  - 侧边栏：`.v-navigation-drawer` + `.leftSidebar` 双保险，内部 `.v-list` 透明、激活项 `rgba(surface, alpha*0.72)`
+  - 日志终端：`.console-displayer-wrapper / .console-term / #console-wrapper / [style*="background-color: #1e1e1e"]` 系列（ConsoleDisplayer 硬编码 #1e1e1e 背景显式覆盖）+ 全屏 backdrop
+  - 模型提供商页：provider-workbench / __sidebar / __main / provider-config-* / provider-sources-* / provider-source-item / provider-empty-state / provider-chat-panel / provider-drawer-* 全部覆盖
+  - 其他页面级：config-* 系列、stats-page 卡片、trace-page 卡片、settings/session-management/knowledge-base/kb-detail/persona-manager 的 .v-card
+  - 边框弱化：v-card--variant-outlined / v-field--variant-outlined / v-table 边框 `rgba(on-surface, alpha*0.24)`；分隔线 `rgba(on-surface, alpha*0.18)`；provider 激活/悬停项 `rgba(primary, alpha*0.14)`
+  - Chat 页保持不纳入（ChatUI 自有背景体系）
+
+### 说明
+
+- 更新后请**手动重启**一次服务（后端 Python 改动需重启才加载，壁纸上传接口为新增路由，重启后上传才可用；前端改动需同步源码后强刷浏览器 Ctrl+F5）
+- 登录页暗色主题类名是 `v-theme--PurpleThemeDark`（Vuetify 3.7 按主题名生成），不是 `v-theme--dark`
+
+</details>
+
+<details>
 <summary><strong>[4.26.37] — 2026-08-18</strong> — NapCat 风格 q弹粉粉主题；系统设置手动保存；移除多语言仅保留中文；打断提示标签修复</summary>
 
 基于 ldm v4.26.36 的版本。本次将 WebUI 整体改为 NapCat 风格「q弹粉粉」主题（双粉配色、全局 Q 弹动效、新增退出登录入口）；「设置」页由「改即存」改为手动保存；移除英文/俄文语言包仅保留简体中文；修复打断回复提示标签与实际行为不一致、及打断时误污染上一条完整回复的问题。
@@ -18,9 +82,9 @@
 
 - **WebUI 整体改为 NapCat 风格「q弹粉粉」主题**
   - 亮色主色 樱花粉 `#FF7FAC`、辅色 玫瑰粉 `#F06292`（双粉配色，无蓝色）；暗色主色 `#f31260`、辅色 浅粉 `#F48FB1`
-  - 全局背景改为 粉白渐变 + ACG 光斑（NapCat 同款），暗色为深紫粉渐变
+  - 全局背景改为 纯色（亮色 `#ffffff` / 暗色 `#1E121C`），页面内容容器不透明底色；不使用渐变光斑（避免粉色审美疲劳）
   - 圆角 8px → 12px，卡片 hover 轻浮 + 粉色阴影，按钮 hover 微缩放（Q 弹手感）
-  - 滚动条改为浅粉（rgba(255,182,193,0.4)）；字体栈加入 Quicksand / Nunito（圆润），中文仍走系统字体兜底；选中文字浅粉底
+  - 滚动条改为浅粉（跟随主题主色的粉色半透明，如 rgba(255,127,172,…)）；字体栈加入 Quicksand / Nunito（圆润），中文仍走系统字体兜底；选中文字浅粉底
 - **全局点击按压动效（NapCat Q 弹）**
   - 按钮/图标/标签/chip 按下 0.06s 缩到 0.92、卡片 0.98、列表项 0.96、开关/复选框 0.88，松开走弹性曲线回弹；弹窗/抽屉内同样生效；文本输入框不跳动；触屏设备保留反馈
 - **右上角 ⋯ 菜单新增「退出登录」**
@@ -40,8 +104,8 @@
   - 主 bundle 4087KB → 3741KB（gzip 1131 → 1041KB）
   - 后端配置元数据 i18n 机制保留（ConfigMetadataI18n），插件自带 i18n 数据仍兼容（只取 zh-CN 部分）；老用户 localStorage 残留 `astrbot-locale` 不再读取，无需清理
 - **登录页卡片圆角加大、侧边栏 Q 弹动效**
-  - 登录页卡片圆角加大到 20px，背景透明露出全局渐变光斑
-  - 侧边栏菜单项 hover 弹性轻移（translateX 4px + scale 1.02）+ 粉色阴影 + 图标弹跳旋转；折叠 rail 态位移减弱防溢出
+  - 登录页卡片圆角加大到 20px，登录页背景为不透明容器底色（containerBg），不使用渐变光斑
+  - 侧边栏菜单项 hover 弹性轻移（translateX 4px + scale 1.02）+ 粉色阴影 + 图标放大（scale 1.16，不旋转）；折叠 rail 态位移减弱防溢出
   - 插件页 Q 弹策略：列表页每张插件卡片单独 Q 弹，卡片内部按钮/开关/chip 保持静态；插件详情页完全不 Q 弹
 
 ### 修复

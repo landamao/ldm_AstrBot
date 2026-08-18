@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi.responses import FileResponse
 
-from astrbot.dashboard.responses import ok
+from astrbot.dashboard.responses import ApiError, ok
 from astrbot.dashboard.services.dashboard_preference_service import (
     DashboardPreferenceService,
+    WALLPAPER_FILES_URL_PREFIX,
+    WALLPAPER_MAX_SIZE,
 )
 
 from .auth import require_dashboard_user
@@ -77,6 +80,68 @@ async def put_theme_colors_preference(
     return ok({"theme_colors": theme_colors}, message="主题颜色已保存")
 
 
+@router.get("/ui-preferences/wallpaper")
+async def get_wallpaper_preference(
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    return ok({"wallpaper": await service.get_wallpaper()})
+
+
+@router.put("/ui-preferences/wallpaper")
+async def put_wallpaper_preference(
+    request: Request,
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    body = await _json_or_empty(request)
+    payload = body.get("wallpaper", body.get("wallpaperSettings", body))
+    wallpaper = await service.set_wallpaper(payload)
+    return ok({"wallpaper": wallpaper}, message="壁纸设置已保存")
+
+
+@router.post("/ui-preferences/wallpaper/upload")
+async def upload_wallpaper(
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+    file: UploadFile = File(...),
+    compress: bool = True,
+):
+    """上传壁纸图片，保存到 data/wallpapers/ 并返回可访问 URL。
+
+    compress=true（默认）时自动压缩（最长边 1920px 内、无透明转 JPEG /
+    有透明转 WebP、GIF 动图保留）；compress=false 原样保存。
+    """
+    content = await file.read()
+    if len(content) > WALLPAPER_MAX_SIZE:
+        raise ApiError(f"图片大小超出限制（最大 {WALLPAPER_MAX_SIZE // 1024 // 1024}MB）", status_code=400)
+    try:
+        url = service.save_uploaded_wallpaper(
+            file.filename or "", content, compress=compress
+        )
+    except ValueError as exc:
+        raise ApiError(str(exc), status_code=400) from exc
+    return ok({"url": url}, message="壁纸上传成功")
+
+
+@router.get("/ui-preferences/wallpaper/files/{filename}")
+async def get_wallpaper_file(
+    filename: str,
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    """访问上传的壁纸文件（需登录，防路径穿越；uuid 文件名内容不变，长缓存）。"""
+    path = service.resolve_wallpaper_file_path(
+        f"{WALLPAPER_FILES_URL_PREFIX}{filename}"
+    )
+    if path is None or not path.is_file():
+        raise ApiError("壁纸文件不存在", status_code=404)
+    return FileResponse(
+        path,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 # ---- legacy ----
 
 @legacy_router.get("/api/ui-preferences")
@@ -125,3 +190,42 @@ async def legacy_save_theme_colors(
     payload = body.get("theme_colors", body.get("themeColors", body))
     theme_colors = await service.set_theme_colors(payload)
     return ok({"theme_colors": theme_colors}, message="主题颜色已保存")
+
+
+@legacy_router.get("/api/ui-preferences/wallpaper")
+async def legacy_get_wallpaper(
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    return ok({"wallpaper": await service.get_wallpaper()})
+
+
+@legacy_router.post("/api/ui-preferences/wallpaper")
+async def legacy_save_wallpaper(
+    request: Request,
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    body = await _json_or_empty(request)
+    payload = body.get("wallpaper", body.get("wallpaperSettings", body))
+    wallpaper = await service.set_wallpaper(payload)
+    return ok({"wallpaper": wallpaper}, message="壁纸设置已保存")
+
+
+@legacy_router.post("/api/ui-preferences/wallpaper/upload")
+async def legacy_upload_wallpaper(
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+    file: UploadFile = File(...),
+    compress: bool = True,
+):
+    content = await file.read()
+    if len(content) > WALLPAPER_MAX_SIZE:
+        raise ApiError(f"图片大小超出限制（最大 {WALLPAPER_MAX_SIZE // 1024 // 1024}MB）", status_code=400)
+    try:
+        url = service.save_uploaded_wallpaper(
+            file.filename or "", content, compress=compress
+        )
+    except ValueError as exc:
+        raise ApiError(str(exc), status_code=400) from exc
+    return ok({"url": url}, message="壁纸上传成功")

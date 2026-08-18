@@ -28,7 +28,7 @@ class AstrBotUpdator(RepoZipUpdator):
 
     支持：
     1. 仅检查 / 列表 GitHub Releases（按 tag/semver 比较，不再回退 commit）
-    2. 从同一源码包同步核心源码与 WebUI（dashboard/dist 或 data/dist）
+    2. 从同一源码包同步核心源码与 WebUI（目标目录跟随 --webui-dir，默认 data/dist）
     """
 
     # 应用更新时禁止整目录覆盖的顶层项（保护本地运行态）
@@ -467,11 +467,19 @@ class AstrBotUpdator(RepoZipUpdator):
     def _resolve_webui_dir_arg(cls, argv: list[str]) -> str | None:
         return cls._collect_flag_values(argv, "--webui-dir")
 
-    def _build_frozen_reboot_args(self) -> list[str]:
+    def _resolve_webui_dir(self) -> str | None:
+        """解析当前进程指定的 WebUI 目录。
+
+        来源优先级：命令行 --webui-dir 参数 → ASTRBOT_WEBUI_DIR 环境变量。
+        """
         argv = list(sys.argv[1:])
         webui_dir = self._resolve_webui_dir_arg(argv)
         if not webui_dir:
             webui_dir = os.environ.get("ASTRBOT_WEBUI_DIR")
+        return webui_dir or None
+
+    def _build_frozen_reboot_args(self) -> list[str]:
+        webui_dir = self._resolve_webui_dir()
 
         if webui_dir:
             return ["--webui-dir", webui_dir]
@@ -806,7 +814,11 @@ class AstrBotUpdator(RepoZipUpdator):
         return self._定位包内webui_dist(包根目录)
 
     def _应用webui(self, webui_dist: Path | None) -> bool:
-        """只覆盖 data/dist，不动 data 下其它内容（配置/数据库/插件数据等）。"""
+        """覆盖 WebUI 目录。
+
+        目标目录：显式指定了 --webui-dir（或 ASTRBOT_WEBUI_DIR）且目录存在时
+        覆盖到该目录；否则回退覆盖默认 data/dist。不动 data 下其它内容。
+        """
         if webui_dist is None:
             logger.warning(
                 "更新包中未找到 dashboard/dist 或 data/dist（缺 index.html），"
@@ -815,7 +827,16 @@ class AstrBotUpdator(RepoZipUpdator):
             return False
 
         目标 = Path(get_astrbot_data_path()) / "dist"
-        logger.info(f"正在覆盖 WebUI（仅 data/dist）: {webui_dist} -> {目标}")
+        webui_dir = self._resolve_webui_dir()
+        if webui_dir:
+            if os.path.isdir(webui_dir):
+                目标 = Path(webui_dir)
+                logger.info(f"检测到 --webui-dir，WebUI 将覆盖到指定目录: {目标}")
+            else:
+                logger.warning(
+                    f"指定的 --webui-dir 目录不存在: {webui_dir}，回退覆盖 data/dist。"
+                )
+        logger.info(f"正在覆盖 WebUI: {webui_dist} -> {目标}")
         # 尽量保留 assets/version：若新包没有 version 而旧包有，写回旧 version 仅作兜底
         旧version文件 = 目标 / "assets" / "version"
         旧version内容 = None
@@ -899,7 +920,7 @@ class AstrBotUpdator(RepoZipUpdator):
         proxy="",
         progress_callback=None,
     ) -> bool:
-        """仅从 ldm_AstrBot 更新包同步 WebUI 到 data/dist。"""
+        """仅从 ldm_AstrBot 更新包同步 WebUI（目标目录跟随 --webui-dir，默认 data/dist）。"""
         update_temp_parent = Path(get_astrbot_data_path()) / "temp" / "updates"
         ensure_dir(update_temp_parent)
         zip_path = update_temp_parent / f"webui-only-{int(time.time())}.zip"
