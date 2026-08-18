@@ -1,0 +1,1 @@
+import{J as a,b as e,w as t,ak as o,f as s,i as n,aj as r,o as c}from"./index-CtlRXRV4.js";const l=a({__name:"BlankLayout",setup(p){return(u,_)=>(c(),e(o,null,{default:t(()=>[s(n(r))]),_:1}))}});export{l as default};

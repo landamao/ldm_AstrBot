@@ -59,8 +59,11 @@
   - 日志终端：`.console-displayer-wrapper / .console-term / #console-wrapper / [style*="background-color: #1e1e1e"]` 系列（ConsoleDisplayer 硬编码 #1e1e1e 背景显式覆盖）+ 全屏 backdrop
   - 模型提供商页：provider-workbench / __sidebar / __main / provider-config-* / provider-sources-* / provider-source-item / provider-empty-state / provider-chat-panel / provider-drawer-* 全部覆盖
   - 其他页面级：config-* 系列、stats-page 卡片、trace-page 卡片、settings/session-management/knowledge-base/kb-detail/persona-manager 的 .v-card
-  - 边框弱化：v-card--variant-outlined / v-field--variant-outlined / v-table 边框 `rgba(on-surface, alpha*0.24)`；分隔线 `rgba(on-surface, alpha*0.18)`；provider 激活/悬停项 `rgba(primary, alpha*0.14)`
+  - 边框弱化：v-card--variant-outlined / v-field--variant-outlined / v-table 边框固定 `rgba(on-surface, 0.06)`（接近隐形）；分隔线 `rgba(on-surface, alpha*0.18)`；provider 激活/悬停项 `rgba(primary, alpha*0.14)`
   - Chat 页保持不纳入（ChatUI 自有背景体系）
+- **修复壁纸模式黑色线框**（插件页每张插件卡一框黑线不好看）
+  - 原因：壁纸 CSS 把 outlined 卡片/输入框/表格边框覆盖为 `rgba(on-surface, 板块透明度 * 0.24)`——即使板块透明度 100% 也比 Vuetify 默认边框（0.12）深一倍，且随透明度滑块联动
+  - 修法：边框改为固定淡色 `rgba(on-surface, 0.06)`，不再跟随板块透明度变化（用户反馈 0.12 仍偏重后调低）；分隔线/激活项高亮等其他规则不受影响
 
 ### 说明
 
