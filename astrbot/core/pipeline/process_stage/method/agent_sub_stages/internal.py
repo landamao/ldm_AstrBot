@@ -673,6 +673,15 @@ class InternalAgentSubStage(Stage):
         """
         delivered = self._get_delivered_llm_plain(event)
 
+        if not delivered and runner_aborted:
+            # 生成中被打断且未发出任何内容：本次请求对用户不可见，历史无需裁剪、不写打断提示
+            # （否则 target_idx 会指向上一条已完整发出的回复，误把打断提示挂在它身上）
+            logger.info(
+                "打断时未发送任何内容，跳过历史裁剪与打断提示: umo=%s",
+                event.unified_msg_origin,
+            )
+            return messages
+
         interrupt_cfg = self._get_interrupt_reply_config(event)
         note = ""
         if interrupt_cfg.get("add_to_context", True):
@@ -684,6 +693,9 @@ class InternalAgentSubStage(Stage):
                 )
                 or ""
             ).strip()
+        # 与超时兜底的临时注入路径保持一致：自动包裹 <system_reminder> 标签，无需用户手写
+        if note and "<system_reminder>" not in note:
+            note = f"<system_reminder>{note}</system_reminder>"
 
         # 优先最后一条无 tool_calls 的 assistant（最终回复）
         target_idx = None

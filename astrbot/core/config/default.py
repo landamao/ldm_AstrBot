@@ -4698,7 +4698,7 @@ CONFIG_METADATA_3 = {
                     "platform_settings.interrupt_reply.add_to_context": {
                         "description": "将打断提示写入对话上下文",
                         "type": "bool",
-                        "hint": "启用后，会在新一轮用户消息中以 <system_reminder> 临时注入打断提示（不重复写入持久历史），供 LLM 知晓上一轮被打断。",
+                        "hint": "启用后，打断发生时会在上一轮回复的历史中追加打断提示并自动包裹 <system_reminder> 标签（已完整发出的回复不再追加）；等待旧任务超时时，改为在新请求中临时注入，不落库。",
                         "condition": {
                             "platform_settings.interrupt_reply.enable": True,
                         },
@@ -4706,7 +4706,7 @@ CONFIG_METADATA_3 = {
                     "platform_settings.interrupt_reply.context_text": {
                         "description": "写入上下文的打断提示文案",
                         "type": "string",
-                        "hint": "写入 <system_reminder> 的提示正文（无需手写标签；保存时不污染用户原文，且不落库重复）。",
+                        "hint": "写入 <system_reminder> 的提示正文；无需手写标签，会自动包裹（已手写标签则不重复包裹）。",
                         "condition": {
                             "platform_settings.interrupt_reply.enable": True,
                             "platform_settings.interrupt_reply.add_to_context": True,
