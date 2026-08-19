@@ -1,0 +1,1 @@
+import{y as s,B as a,cA as r,C as u,cB as i}from"./index-f2DOm-m1.js";import{_ as t}from"./icon-no-shadow-B3LGfhdP.js";function L(){const e=s(t);function o(){var n;e.value=((n=i())==null?void 0:n.url)||t}return a(()=>{o(),window.addEventListener(r,o)}),u(()=>{window.removeEventListener(r,o)}),{logoUrl:e}}export{L as u};

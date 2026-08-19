@@ -8,6 +8,8 @@ from fastapi.responses import FileResponse
 from astrbot.dashboard.responses import ApiError, ok
 from astrbot.dashboard.services.dashboard_preference_service import (
     DashboardPreferenceService,
+    LOGO_FILES_URL_PREFIX,
+    LOGO_MAX_SIZE,
     WALLPAPER_FILES_URL_PREFIX,
     WALLPAPER_MAX_SIZE,
 )
@@ -142,6 +144,65 @@ async def get_wallpaper_file(
     )
 
 
+@router.get("/ui-preferences/logo")
+async def get_logo_preference(
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    return ok({"logo": await service.get_logo()})
+
+
+@router.put("/ui-preferences/logo")
+async def put_logo_preference(
+    request: Request,
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    body = await _json_or_empty(request)
+    payload = body.get("logo", body)
+    logo = await service.set_logo(payload)
+    return ok({"logo": logo}, message="Logo 设置已保存")
+
+
+@router.post("/ui-preferences/logo/upload")
+async def upload_logo(
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+    file: UploadFile = File(...),
+    compress: bool = True,
+):
+    """上传 Logo 图片，保存到 data/logos/ 并返回可访问 URL（最长边缩到 512px）。"""
+    content = await file.read()
+    if len(content) > LOGO_MAX_SIZE:
+        raise ApiError(
+            f"图片大小超出限制（最大 {LOGO_MAX_SIZE // 1024 // 1024}MB）",
+            status_code=400,
+        )
+    try:
+        url = service.save_uploaded_logo(
+            file.filename or "", content, compress=compress
+        )
+    except ValueError as exc:
+        raise ApiError(str(exc), status_code=400) from exc
+    return ok({"url": url}, message="Logo 上传成功")
+
+
+@router.get("/ui-preferences/logo/files/{filename}")
+async def get_logo_file(
+    filename: str,
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    """访问上传的 Logo 文件（需登录，防路径穿越；uuid 文件名内容不变，长缓存）。"""
+    path = service.resolve_logo_file_path(f"{LOGO_FILES_URL_PREFIX}{filename}")
+    if path is None or not path.is_file():
+        raise ApiError("Logo 文件不存在", status_code=404)
+    return FileResponse(
+        path,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 # ---- legacy ----
 
 @legacy_router.get("/api/ui-preferences")
@@ -229,3 +290,42 @@ async def legacy_upload_wallpaper(
     except ValueError as exc:
         raise ApiError(str(exc), status_code=400) from exc
     return ok({"url": url}, message="壁纸上传成功")
+
+
+@legacy_router.get("/api/ui-preferences/logo")
+async def legacy_get_logo(
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    return ok({"logo": await service.get_logo()})
+
+
+@legacy_router.post("/api/ui-preferences/logo")
+async def legacy_save_logo(
+    request: Request,
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    body = await _json_or_empty(request)
+    payload = body.get("logo", body)
+    logo = await service.set_logo(payload)
+    return ok({"logo": logo}, message="Logo 设置已保存")
+
+
+@legacy_router.post("/api/ui-preferences/logo/upload")
+async def legacy_upload_logo(
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+    file: UploadFile = File(...),
+    compress: bool = True,
+):
+    content = await file.read()
+    if len(content) > LOGO_MAX_SIZE:
+        raise ApiError(f"图片大小超出限制（最大 {LOGO_MAX_SIZE // 1024 // 1024}MB）", status_code=400)
+    try:
+        url = service.save_uploaded_logo(
+            file.filename or "", content, compress=compress
+        )
+    except ValueError as exc:
+        raise ApiError(str(exc), status_code=400) from exc
+    return ok({"url": url}, message="Logo 上传成功")

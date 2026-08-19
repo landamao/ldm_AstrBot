@@ -42,6 +42,7 @@ class CommandDescriptor:
     reserved: bool = False
     config: CommandConfig | None = None
     has_conflict: bool = False
+    conflicts: list[dict[str, Any]] = field(default_factory=list)
     sub_commands: list[CommandDescriptor] = field(default_factory=list)
     rename_conflicts: list[str] = field(default_factory=list)
 
@@ -197,6 +198,38 @@ async def list_commands() -> list[dict[str, Any]]:
         d.handler_full_name for group in conflict_groups.values() for d in group
     }
 
+    # 为每个指令构建冲突详情：冲突的完整指令名 + 其他命中该名称的指令
+    desc_conflicts: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for key, group in conflict_groups.items():
+        for d in group:
+            others = []
+            for item in group:
+                if item.handler_full_name == d.handler_full_name:
+                    continue
+                # 对方命中该名称的方式：主指令名 or 别名
+                hit_kind = (
+                    "command"
+                    if (item.effective_command or "").strip() == key.strip()
+                    else "alias"
+                )
+                others.append(
+                    {
+                        "handler_full_name": item.handler_full_name,
+                        "plugin": item.plugin_name,
+                        "plugin_display_name": item.plugin_display_name,
+                        "current_name": item.effective_command,
+                        "hit_kind": hit_kind,
+                    }
+                )
+            kind = (
+                "command"
+                if (d.effective_command or "").strip() == key.strip()
+                else "alias"
+            )
+            desc_conflicts[d.handler_full_name].append(
+                {"conflict_key": key, "kind": kind, "targets": others}
+            )
+
     # 分类，设置冲突标志，将子指令挂载到父指令组
     group_map: dict[str, CommandDescriptor] = {}
     sub_commands: list[CommandDescriptor] = []
@@ -204,6 +237,7 @@ async def list_commands() -> list[dict[str, Any]]:
 
     for desc in descriptors:
         desc.has_conflict = desc.handler_full_name in conflict_handler_names
+        desc.conflicts = desc_conflicts.get(desc.handler_full_name, [])
         if desc.is_group:
             group_map[desc.handler_full_name] = desc
         elif desc.is_sub_command:
@@ -569,6 +603,9 @@ def _descriptor_to_dict(desc: CommandDescriptor) -> dict[str, Any]:
         "has_conflict": desc.has_conflict,
         "reserved": desc.reserved,
     }
+    # 冲突详情仅在存在时输出，保持 JSON 干净
+    if desc.conflicts:
+        result["conflicts"] = desc.conflicts
     # 如果是指令组，包含子指令列表
     if desc.is_group and desc.sub_commands:
         result["sub_commands"] = [_descriptor_to_dict(sub) for sub in desc.sub_commands]
