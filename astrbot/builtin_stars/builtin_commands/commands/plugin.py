@@ -1,3 +1,8 @@
+import os
+from datetime import datetime
+
+import yaml
+
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core import DEMO_MODE, logger
@@ -5,6 +10,7 @@ from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.star_handler import StarHandlerMetadata, star_handlers_registry
 from astrbot.core.star.star_manager import PluginManager
+from astrbot.core.star.updator import PLUGIN_METADATA_FILENAMES
 from astrbot.core.utils.github_proxy import (
     get_configured_github_proxy,
     log_github_proxy_usage,
@@ -299,6 +305,70 @@ class PluginCommands:
             logger.error(f"更新插件失败: {e}")
             event.set_result(MessageEventResult().message(f"更新插件失败: {e}"))
 
+    def _plugin_dir(self, plugin) -> str | None:
+        """解析插件安装目录（绝对路径，跟随软链）。"""
+        root = (getattr(plugin, "root_dir_name", None) or "").strip()
+        if not root and plugin.module_path:
+            parts = plugin.module_path.split(".")
+            for idx, part in enumerate(parts):
+                if part in ("builtin_stars", "plugins") and idx + 1 < len(parts):
+                    root = parts[idx + 1]
+                    break
+        if not root:
+            return None
+        try:
+            star_mgr = self.context._star_manager  # type: ignore
+            base = (
+                star_mgr.reserved_plugin_path
+                if getattr(plugin, "reserved", False)
+                else star_mgr.plugin_store_path
+            )
+            path = os.path.realpath(os.path.join(base, root))
+        except Exception:
+            return None
+        return path if os.path.isdir(path) else None
+
+    @staticmethod
+    def _read_plugin_metadata(plugin_dir: str) -> dict:
+        """读取插件目录下的 metadata 文件（metadata.yaml / metadata.yml）。"""
+        for fname in PLUGIN_METADATA_FILENAMES:
+            meta_path = os.path.join(plugin_dir, fname)
+            if os.path.isfile(meta_path):
+                try:
+                    with open(meta_path, encoding="utf-8") as f:
+                        data = yaml.safe_load(f)
+                    return data if isinstance(data, dict) else {}
+                except Exception:
+                    return {}
+        return {}
+
+    @staticmethod
+    def _metadata_mtime(plugin_dir: str) -> str | None:
+        """metadata 文件的最后修改时间（以 metadata.yaml 的修改时间为准）。"""
+        for fname in PLUGIN_METADATA_FILENAMES:
+            meta_path = os.path.join(plugin_dir, fname)
+            if os.path.isfile(meta_path):
+                try:
+                    t = datetime.fromtimestamp(os.path.getmtime(meta_path))
+                except OSError:
+                    return None
+                return f"{t.year}-{t.month}-{t.day} {t.hour:02d}:{t.minute:02d}"
+        return None
+
+    @staticmethod
+    def _plugin_files_line(plugin_dir: str) -> str | None:
+        """插件目录关键文件状态。"""
+        parts = []
+        if os.path.isfile(os.path.join(plugin_dir, "main.py")):
+            parts.append("main.py ✓")
+        if os.path.isfile(os.path.join(plugin_dir, "_conf_schema.json")):
+            parts.append("配置面板 ✓")
+        if os.path.isfile(os.path.join(plugin_dir, "README.md")):
+            parts.append("README ✓")
+        if os.path.isfile(os.path.join(plugin_dir, "CHANGELOG.md")):
+            parts.append("CHANGELOG ✓")
+        return " | ".join(parts) if parts else None
+
     async def plugin_help(self, event: AstrMessageEvent, plugin_name: str = "") -> None:
         """获取插件帮助"""
         if not plugin_name:
@@ -316,8 +386,49 @@ class PluginCommands:
                 ),
             )
             return
-        help_msg = ""
-        help_msg += f"\n\n✨ 作者: {plugin.author}\n✨ 版本: {plugin.version}"
+
+        plugin_dir = self._plugin_dir(plugin)
+        meta = self._read_plugin_metadata(plugin_dir) if plugin_dir else {}
+
+        name = (plugin.name or "").strip()
+        display = (getattr(plugin, "display_name", None) or "").strip()
+        version = (plugin.version or "").strip()
+        author = (plugin.author or "").strip()
+        desc = (plugin.desc or plugin.short_desc or "").strip()
+        repo = (plugin.repo or "").strip()
+
+        title = display or name or (plugin_name or "").strip() or "插件"
+        lines: list[str] = [f"✦ 插件详情: {title} ✦"]
+        if name:
+            lines.append(f"插件名: {name}")
+        lines.append(f"显示名: {display or name}")
+        if version:
+            lines.append(f"版本: {version}")
+        if author:
+            lines.append(f"作者: {author}")
+        if desc:
+            lines.append(f"描述: {desc}")
+        if repo:
+            lines.append(f"仓库: {repo}")
+
+        help_text = meta.get("help")
+        if isinstance(help_text, str) and help_text.strip():
+            lines.append(f"帮助: {help_text.strip()}")
+        deps = meta.get("dependencies")
+        if isinstance(deps, list) and deps:
+            lines.append(f"依赖: {', '.join(str(d) for d in deps)}")
+        if getattr(plugin, "support_platforms", None):
+            lines.append(f"平台: {', '.join(plugin.support_platforms)}")
+
+        if plugin_dir:
+            files_line = self._plugin_files_line(plugin_dir)
+            if files_line:
+                lines.append(f"文件: {files_line}")
+            lines.append(f"安装目录: {plugin_dir}")
+        mtime = self._metadata_mtime(plugin_dir) if plugin_dir else None
+        if mtime:
+            lines.append(f"最后更新: {mtime}")
+
         command_handlers = []
         command_names = []
         for handler in star_handlers_registry:
@@ -333,8 +444,9 @@ class PluginCommands:
                     command_handlers.append(handler)
                     command_names.append(filter_.group_name)
 
-        if len(command_handlers) > 0:
-            parts = ["\n\n🔧 指令列表：\n"]
+        if command_handlers:
+            lines.append("")
+            lines.append("🔧 指令列表：")
             for i in range(len(command_handlers)):
                 cmd = (command_names[i] or "").strip()
                 if cmd and not cmd.startswith("/"):
@@ -342,10 +454,10 @@ class PluginCommands:
                 line = cmd or "/"
                 if command_handlers[i].desc:
                     line += f": {command_handlers[i].desc}"
-                parts.append(line + "\n")
-            parts.append("\n提示：指令的触发需要添加唤醒前缀，默认为 /。")
-            help_msg += "".join(parts)
+                lines.append(line)
+            lines.append("")
+            lines.append("提示：指令的触发需要添加唤醒前缀，默认为 /。")
 
-        ret = f"🧩 插件「{plugin_name}」帮助信息：\n" + help_msg
-        ret += "更多帮助信息请查看插件仓库说明文档。"
-        event.set_result(MessageEventResult().message(ret).use_t2i(False))
+        event.set_result(
+            MessageEventResult().message("\n".join(lines)).use_t2i(False),
+        )

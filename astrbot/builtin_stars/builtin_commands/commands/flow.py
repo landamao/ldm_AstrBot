@@ -56,14 +56,19 @@ class FlowCommand:
             原本已设置 = await SessionServiceManager.unset_streaming_status_for_session(
                 umo,
             )
+            全局状态文案 = "开启" if 全局流式 else "关闭"
             if not 原本已设置:
                 await event.send(
-                    MessageChain().message("当前会话未设置流式输出，本就跟随全局配置。"),
+                    MessageChain().message(
+                        "当前会话未设置流式输出，本就跟随全局配置。\n"
+                        f"全局配置：{全局状态文案}",
+                    ),
                 )
             else:
                 await event.send(
                     MessageChain().message(
-                        "已取消当前会话的流式输出设置，恢复跟随全局配置。",
+                        "已取消当前会话的流式输出设置，恢复跟随全局配置。\n"
+                        f"全局配置：{全局状态文案}",
                     ),
                 )
             return

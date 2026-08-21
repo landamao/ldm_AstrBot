@@ -1,5 +1,6 @@
 name: builtin_commands
+display_name: 内置指令插件
 desc: LDMBOT 自带指令，提供常用的对话管理、工具使用、插件管理等功能。
 author: 懒大猫
-version: 0.0.1
+version: 0.0.2
 repo: https://github.com/landamao/as_builtin_commands
