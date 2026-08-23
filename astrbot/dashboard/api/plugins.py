@@ -521,19 +521,23 @@ async def validate_plugin_repo(
 
 
 @router.post("/plugins/install/github")
-async def install_plugin_from_github(
+@router.post("/plugins/install/git")
+async def install_plugin_from_repository(
+    request: Request,
     payload: PluginInstallRequest,
     _auth: AuthContext = Depends(require_plugin_scope),
     service: PluginService = Depends(get_service),
 ):
     body = _model_dict(payload)
     repository = str(body.get("repository") or body.get("url") or "").strip()
-    if repository and not repository.startswith(("http://", "https://")):
+    repository_transport = request.url.path.rsplit("/", 1)[-1]
+    if repository and not repository.startswith(("http://", "https://", "git@", "ssh://")):
         repository = f"https://github.com/{repository}"
     install_payload = {
         "url": repository,
         "proxy": body.get("proxy"),
         "ignore_version_check": body.get("ignore_version_check", False),
+        "repository_transport": repository_transport,
         **{
             key: body[key]
             for key in (

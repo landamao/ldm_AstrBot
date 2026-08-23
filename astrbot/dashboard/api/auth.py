@@ -18,6 +18,7 @@ from astrbot.dashboard.services.auth_service import (
     ALL_OPEN_API_SCOPES,
     DASHBOARD_JWT_COOKIE_MAX_AGE,
     DASHBOARD_JWT_COOKIE_NAME,
+    DEFAULT_OPEN_API_SCOPES,
     OPEN_API_SCOPE_INCLUDES,
     TOTP_TRUSTED_DEVICE_COOKIE_NAME,
     TOTP_TRUSTED_DEVICE_MAX_AGE,
@@ -41,12 +42,20 @@ class AuthContext:
     via: str = "jwt"
 
 
+def _auth_scheme_and_credentials(auth_header: str) -> tuple[str, str]:
+    scheme, separator, credentials = auth_header.partition(" ")
+    if not separator:
+        return "", ""
+    return scheme.lower(), credentials.strip()
+
+
 def _extract_raw_api_key(request: Request) -> str | None:
     auth_header = request.headers.get("Authorization", "").strip()
-    if auth_header.startswith("Bearer "):
+    scheme, credentials = _auth_scheme_and_credentials(auth_header)
+    if scheme == "bearer":
         return None
-    if auth_header.startswith("ApiKey "):
-        return auth_header.removeprefix("ApiKey ").strip()
+    if scheme == "apikey":
+        return credentials or None
     if key := request.query_params.get("api_key"):
         return key.strip()
     if key := request.query_params.get("key"):
@@ -71,10 +80,9 @@ def _get_dashboard_state_username(request: Request) -> str | None:
 
 def _extract_dashboard_jwt(request: Request) -> str | None:
     auth_header = request.headers.get("Authorization", "").strip()
-    if auth_header.startswith("Bearer "):
-        token = auth_header.removeprefix("Bearer ").strip()
-        if token:
-            return token
+    scheme, credentials = _auth_scheme_and_credentials(auth_header)
+    if scheme == "bearer" and credentials:
+        return credentials
 
     cookie_token = request.cookies.get(DASHBOARD_JWT_COOKIE_NAME, "").strip()
     if cookie_token:
@@ -122,7 +130,7 @@ async def _require_api_key_scope(
     scopes = (
         [str(scope) for scope in api_key.scopes]
         if isinstance(api_key.scopes, list)
-        else [str(scope) for scope in ALL_OPEN_API_SCOPES]
+        else [str(scope) for scope in DEFAULT_OPEN_API_SCOPES]
     )
     if (
         "*" not in scopes
@@ -161,7 +169,8 @@ async def require_scope(request: Request, scope: str) -> AuthContext:
         raise ApiError("Token expired", status_code=401) from exc
     except jwt.InvalidTokenError as exc:
         auth_header = request.headers.get("Authorization", "").strip()
-        if auth_header.startswith("Bearer "):
+        scheme, _credentials = _auth_scheme_and_credentials(auth_header)
+        if scheme == "bearer":
             try:
                 return await _require_api_key_scope(request, token, scope)
             except ApiError as api_key_exc:
@@ -300,8 +309,9 @@ def _auth_service_response(
 
 def _has_auth_credentials(request: Request) -> bool:
     auth_header = request.headers.get("Authorization", "")
+    scheme, credentials = _auth_scheme_and_credentials(auth_header.strip())
     return bool(
-        auth_header.startswith(("Bearer ", "ApiKey "))
+        (scheme in {"bearer", "apikey"} and credentials)
         or request.query_params.get("api_key")
         or request.query_params.get("key")
         or request.headers.get("X-API-Key")

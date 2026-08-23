@@ -1623,13 +1623,6 @@ class PluginManager:
             plugin_path = ""
             dir_name = ""
             try:
-                _, repo_name, _ = self.updator.parse_github_url(repo_url)
-                repo_name = self.updator.format_name(repo_name)
-                plugin_path = os.path.join(self.plugin_store_path, repo_name)
-                if os.path.exists(plugin_path):
-                    raise Exception(
-                        f"安装失败：目录 {os.path.basename(plugin_path)} 已存在。"
-                    )
                 if download_url:
                     plugin_path = await self.updator.install(
                         repo_url,
@@ -1712,6 +1705,14 @@ class PluginManager:
                         f"安装插件 {dir_name} 失败，插件安装目录：{plugin_path}",
                     )
                 raise
+
+    async def inspect_plugin_repository(
+        self,
+        repo_url: str,
+        proxy: str = "",
+    ) -> dict[str, object]:
+        """读取并校验插件仓库暴露的关键元数据。"""
+        return await self.updator.inspect_repository(repo_url, proxy)
 
     async def uninstall_plugin(
         self,
@@ -1887,6 +1888,7 @@ class PluginManager:
             plugin,
             proxy=proxy,
             download_url=resolved_download,
+            repo_url=resolved_repo,
         )
         plugin_dir_path = os.path.join(self.plugin_store_path, dir_name)
         await self._ensure_plugin_requirements(plugin_dir_path, dir_name)
@@ -1959,7 +1961,11 @@ class PluginManager:
         )
 
     async def update_plugin(
-        self, plugin_name: str, proxy="", download_url: str = ""
+        self,
+        plugin_name: str,
+        proxy="",
+        download_url: str = "",
+        repo_url: str = "",
     ) -> None:
         """升级一个插件"""
         plugin = self.context.get_registered_star(plugin_name)
@@ -1968,7 +1974,12 @@ class PluginManager:
         if plugin.reserved:
             raise Exception("该插件是 AstrBot 保留插件，无法更新。")
 
-        await self.updator.update(plugin, proxy=proxy, download_url=download_url)
+        await self.updator.update(
+            plugin,
+            proxy=proxy,
+            download_url=download_url,
+            repo_url=repo_url,
+        )
         if plugin.root_dir_name:
             plugin_dir_path = os.path.join(self.plugin_store_path, plugin.root_dir_name)
             await self._ensure_plugin_requirements(

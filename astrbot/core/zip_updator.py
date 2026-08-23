@@ -54,54 +54,117 @@ class RepoZipUpdator:
             return body
         return body[:max_len] + "...[truncated]"
 
-    async def fetch_github_default_branch(self, author: str, repo: str) -> str | None:
-        """Fetch the default branch for a GitHub repository.
+    @staticmethod
+    def _拼接github加速(url: str, proxy: str = "") -> str:
+        """把 github_proxy 前缀接到目标 URL 前面。空则原样返回。"""
+        proxy = (proxy or "").strip().rstrip("/")
+        if not proxy:
+            return url
+        return f"{proxy}/{url}"
 
-        Args:
-            author: GitHub repository owner.
-            repo: GitHub repository name.
+    async def fetch_github_default_branch(
+        self,
+        author: str,
+        repo: str,
+        proxy: str = "",
+    ) -> str | None:
+        """通过 GitHub API 取仓库默认分支。
 
-        Returns:
-            The default branch name, or None if it cannot be resolved.
+        有 github_proxy 时先走加速前缀。gh-proxy 一类镜像对 api.github.com
+        常 403 限流，失败则返回 None，由调用方改探测 zip。
         """
         url = f"https://api.github.com/repos/{author}/{repo}"
+        request_url = self._拼接github加速(url, proxy)
         try:
             async with self._create_httpx_client(timeout=10.0) as client:
-                response = await client.get(url)
+                response = await client.get(request_url)
                 response.raise_for_status()
                 repo_info = response.json()
         except Exception as exc:
-            logger.debug("获取 GitHub 默认分支失败 %s/%s: %s", author, repo, exc)
+            logger.debug(
+                "获取 GitHub 默认分支失败 %s/%s 地址=%s: %s",
+                author,
+                repo,
+                request_url,
+                exc,
+            )
             return None
 
+        if not isinstance(repo_info, dict):
+            return None
         default_branch = str(repo_info.get("default_branch") or "").strip()
         return default_branch or None
+
+    async def _探测github分支zip(
+        self,
+        author: str,
+        repo: str,
+        branch: str,
+        proxy: str = "",
+    ) -> bool:
+        """HEAD 探测 refs/heads/<branch>.zip 是否存在。"""
+        url = f"https://github.com/{author}/{repo}/archive/refs/heads/{branch}.zip"
+        request_url = self._拼接github加速(url, proxy)
+        try:
+            async with self._create_httpx_client(timeout=10.0) as client:
+                response = await client.get(
+                    request_url,
+                    headers={"Range": "bytes=0-0"},
+                )
+                return response.status_code in {200, 206}
+        except Exception as exc:
+            logger.debug(
+                "探测 GitHub 分支 zip 失败 %s/%s 分支=%s: %s",
+                author,
+                repo,
+                branch,
+                exc,
+            )
+            return False
 
     async def resolve_github_source_branch(
         self,
         repo_url: str,
+        proxy: str = "",
     ) -> tuple[str, str, str]:
-        """Resolve the GitHub branch used for repository source downloads.
+        """解析仓库下载用的分支。
 
-        Args:
-            repo_url: GitHub repository URL, optionally with a tree branch.
-
-        Returns:
-            Repository owner, name, and resolved source branch.
-
-        Raises:
-            ValueError: If the repository URL is invalid.
+        URL 里带 /tree/<分支> 时直接用。否则先走 API 取默认分支；
+        API 失败（直连限流、加速镜像不转 API）再探测 main、master 的 zip，
+        不再盲回退 main。
         """
         author, repo, branch = self.parse_github_url(repo_url)
         if branch:
             return author, repo, branch
 
-        default_branch = await self.fetch_github_default_branch(author, repo)
+        default_branch = await self.fetch_github_default_branch(author, repo, proxy=proxy)
         if default_branch:
+            logger.info(
+                "已获取 %s/%s 的默认分支: %s",
+                author,
+                repo,
+                default_branch,
+            )
             return author, repo, default_branch
 
-        logger.info("未能获取 %s/%s 的默认分支，将尝试 main 分支", author, repo)
-        return author, repo, "main"
+        logger.info(
+            "未能通过 API 获取 %s/%s 的默认分支，改为探测 main / master 的 zip",
+            author,
+            repo,
+        )
+        for candidate in ("main", "master"):
+            if await self._探测github分支zip(author, repo, candidate, proxy=proxy):
+                logger.info(
+                    "探测到 %s/%s 存在分支 %s，将使用该分支",
+                    author,
+                    repo,
+                    candidate,
+                )
+                return author, repo, candidate
+
+        raise ValueError(
+            f"未能获取 {author}/{repo} 的默认分支，且 main / master 的源码包都不存在。"
+        )
 
     async def _download_file(
         self,
@@ -274,27 +337,29 @@ class RepoZipUpdator:
     async def download_from_repo_url(
         self, target_path: str, repo_url: str, proxy=""
     ) -> None:
-        author, repo, branch = await self.resolve_github_source_branch(repo_url)
+        author, repo, branch = await self.resolve_github_source_branch(
+            repo_url,
+            proxy=proxy,
+        )
 
         logger.info(f"正在下载更新 {repo} ...")
         logger.info(f"正在从分支 {branch} 下载 {author}/{repo}")
         release_url = (
             f"https://github.com/{author}/{repo}/archive/refs/heads/{branch}.zip"
         )
+        request_url = self._拼接github加速(release_url, proxy)
 
         if proxy:
-            proxy = proxy.rstrip("/")
-            release_url = f"{proxy}/{release_url}"
             logger.info(
                 f"GitHub 加速: 使用中 动作=下载仓库源码 目标={author}/{repo} "
-                f"代理={proxy} 地址={release_url}"
+                f"代理={proxy.strip().rstrip('/')} 地址={request_url}"
             )
         else:
             logger.info(
                 f"GitHub 加速: 未使用 动作=下载仓库源码 目标={author}/{repo}"
             )
 
-        await self._download_file(release_url, target_path + ".zip")
+        await self._download_file(request_url, target_path + ".zip")
 
     def parse_github_url(self, url: str):
         """使用正则表达式解析 GitHub 仓库 URL，支持 `.git` 后缀和 `tree/branch` 结构

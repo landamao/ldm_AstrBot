@@ -6,6 +6,106 @@
 ---
 
 <details>
+<summary><strong>[4.27.4] — 2026-08-24</strong> — 跟随官方 v4.27.4 全量合入、镜像服务器更新源、人格工具分组弹窗、Shell 会话、群消息历史</summary>
+
+大版本更新。跟随官方 AstrBot v4.27.4（从 v4.26.5–4.26.7 基线跨 6 个 tag 全量合入），同时新增 ldm 镜像服务器更新功能、人格编辑页工具/Skills 分组弹窗、设置页缓存卡片样式统一等多项改进。
+
+### 跟随官方 v4.27.4
+
+#### 新增提供商
+
+- **OpenAI Responses API**：WebUI 提供商模板可新增 OpenAI Responses / DeepSeek Responses 类型，走官方 Responses 接口
+- **胜算云（SSYCloud）**：新增胜算云聊天补全提供商模板，请求头带 `X-Title: ldmbot` 品牌标识
+
+#### 新增工具与功能
+
+- **群消息历史工具**：群聊场景下 LLM 可调用 `GetGroupMessageHistoryTool` 获取群历史消息；群消息入站/出站自动持久化到数据库；可配置最大保存条数
+- **Shell 会话工具**：本地计算机运行时支持 Shell 会话管理（创建/列出/轮询/关闭），`LocalExecuteShellTool` + `ShellSessionTool`；停止/重启时自动关闭本地 booter
+- **Git 仓库装插件**：支持直接从 Git 仓库安装插件（不限于 GitHub），安装前可 inspect 仓库结构；WebUI 安装入口新增 Git 选项
+- **内置 Skills 目录**：官方 Skills（文档处理 / PDF / 电子表格 / 技能创建器）已内置于源码树，启动后自动加载
+- **JSON 卡片进群聊上下文**：群聊上下文摘要支持解析 JSON 卡片消息（提取标题/描述/链接），不再只处理文本和图片
+
+#### 提供商与模型
+
+- **推理元数据与供应商配置分离**：`reasoning_effort` 独立配置项（默认 high），不再误存到 provider 配置里；WebUI 提供商面板展示调整
+- **NVIDIA 检索模型更新**：embedding 默认模型更新为 `nvidia/nemotron-3-embed-1b`（2048 维），rerank 默认模型更新为 `nvidia/llama-nemotron-rerank-vl-1b-v2`
+- **模型元数据多源回退**：模型元数据获取支持多 URL 回退（ldm 镜像 → models.dev → models.opencode.ai），任一成功即返回，全部失败才报错
+
+#### 知识库与检索
+
+- **知识库上传去掉 10 文件上限**：WebUI 知识库上传不再限制单次 10 个文件
+- **检索融合优化**：相对分数 + RRF 同分处理；稠密向量全局归一化、稀疏按库归一化；按文本块去重
+- **Embedding 上下文**：向量化使用「标题+正文」，原文存储仍是块文本
+- **知识库按 UUID 匹配**：按名称找不到时自动按 UUID 匹配
+- **BM25 延迟导入**：`rank_bm25` 延迟到检索时导入，不影响启动
+
+#### 平台适配
+
+- **QQ 官方分片上传**：本地文件大于 10MB 走分片上传
+- **Telegram**：音频走 Record 类型、动态/视频贴纸用缩略图、视频留言适配
+- **微信客服**：`open_kfid` 缺失不再炸 webhook
+
+#### API 与安全
+
+- **API Key 子权限**：新增 `chat:admin`、`config:edit_admin` 子权限；无 `chat:admin` 禁止用管理员 ID 当 username；无 `config:edit_admin` 禁止改 `admins_id`
+- **Bearer 大小写不敏感**：Authorization scheme 大小写不敏感，Cookie 鉴权仍保留
+
+#### 定时任务
+
+- **时区继承**：cron 创建继承配置时区；列表/创建回执按配置时区展示；调度器 `get_next_run_time` 正确
+
+#### 更新器
+
+- **官方 updater 共存**：官方 `AstrBotUpdater` / `_PluginUpdater` 文件在树里但无人引用，项目更新仍走 `AstrBotUpdator`，插件管理仍走 `PluginUpdator`；两套共存不冲突
+
+### ldm 镜像服务器更新功能
+
+- **镜像服务器**：在公网服务器部署 sync.sh + systemd timer，每 30 分钟自动同步 GitHub 最新 Release 到镜像，增量更新 manifest.json，不删旧版本
+- **后端镜像支持**：更新器支持从镜像服务器获取版本列表和下载更新包，镜像优先、失败回退 GitHub（REST API → Atom → git ls-remote 三级回退）
+- **前端下载源选择**：WebUI 更新对话框新增下载源下拉选择器（ldm 镜像 / GitHub），默认 ldm 镜像；切到 GitHub 时显示加速代理选择器；切换下载源自动刷新版本列表
+- **镜像地址移后端**：镜像服务器地址从前端硬编码迁移到后端 `github_proxy.py` 常量，前端只传标记值 `'ldm_mirror'`，后端自动替换为真实地址
+- **GitHub 回退成功日志**：GitHub REST API 403 限流后回退到 Atom / git ls-remote 时，回退成功后打 INFO 日志确认，不再让用户以为出问题
+
+### 人格编辑页工具/Skills 分组弹窗
+
+- **工具按来源分组**：人格编辑页工具勾选列表按来源分组（内置工具 / MCP / 插件），每组一行紧凑展示（组名 + 选中数/总数 + 来源标签），组行可全选/反选
+- **Skills 按 source_type 分组**：Skills 列表按来源类型分组（插件 / 沙箱预设 / 本地+沙箱 / 本地）
+- **弹窗选择**：点击组行右侧「设置」按钮弹出独立弹窗，弹窗内可单项切换、全选/反选，保存后自动切到「选择指定」模式
+- **搜索跨组过滤**：搜索仍跨组生效，搜不到匹配项的组自动隐藏
+
+### WebUI 体验优化
+
+- **插件配置恢复默认**：每个插件配置项旁新增「恢复默认值」按钮，可单项恢复（仅插件配置弹窗）
+- **粘贴超长文本转附件**：聊天输入框粘贴超过 1 万字的文本自动转为文本附件上传
+- **聊天区拖放上传**：聊天区域支持拖放文件上传，全区域遮罩提示
+- **设置页时区预览**：设置页常规组标题旁显示「ldm 当前时间 · UTC±x」
+- **插件市场下载量排序**：插件市场新增「下载量」排序选项；市场详情显示更新时间到秒
+- **ChatUI 工作区文件浏览器**：聊天顶栏文件夹按钮打开项目工作区文件面板，可浏览/下载项目文件
+- **欢迎页卡片边框**：欢迎页卡片加细边框
+- **缓存卡片样式统一**：设置页缓存清理卡片改为 `v-card` + `config-row` 结构，与日志等分组卡片样式/动画一致
+- **Trace 颜色跟主题**：TraceDisplayer 13 处硬编码颜色替换为主题色变量，暗色主题不再不协调
+- **中等宽度侧边栏**：中等宽度（md, 960-1279px）下聊天侧边栏按钮不再消失
+- **SVG MIME 注册**：Windows 下 .svg MIME 类型正确注册
+
+### 修复
+
+- **插件默认分支走加速**：查默认分支的 GitHub API 走 `github_proxy` 加速；API 403 后探测 main/master zip（先 main），不再盲回退 main 导致 404
+- **同步源码不再覆盖运行库**：同步源码脚本排除整份 `/data` 目录，不再用源码树空壳数据库覆盖运行库（修复插件启用状态丢失）
+- **手写 ANSI 色码清理**：3 处 `logger.info` 消息里手写的 `\033[32m...\033[0m` 清除，让日志系统自动着色，修复 WebUI 控制台显示异常
+- **缓存面板跟随壁纸透明度**：`storage-cleanup-card` 加入壁纸透明度选择器列表，缓存面板不再脱离壁纸透明度
+
+### 不跟的官方改动
+
+- 登录页 / 插件默认图标：继续用自定义 Logo
+- 插件页拆独立路由、MCP/Skills 收到插件顶栏：保持本地侧边栏展开
+- GenUI HTML 节点、语言切换器、ChatUI 刷新续流
+- SharedPreferences 不预加载整表（ldm 从未跟过预加载，不存在此问题）
+- `password_change_required` 保留密码（ldm 改密必须废会话）
+- 用户名长度 ≥ 3 限制
+
+</details>
+
+<details>
 <summary><strong>[4.26.40] — 2026-08-21</strong> — 插件图标自定义 Logo 兜底、plugin help 详情化、flow unset 显示全局配置</summary>
 
 基于 ldm v4.26.39 的版本。本次为插件没有图标时 WebUI 各处插件图标统一显示自定义 Logo（未设置时回落默认 Logo）；/plugin help 输出改为详情卡片式（字段逐行展示，空值不显示）；/flow unset 回执补充当前全局流式配置状态。

@@ -600,6 +600,25 @@ class TelegramPlatformAdapter(Platform):
             record.path = path_wav
             message.message = [record]
 
+        elif update.message.audio:
+            # 音频文件走独立 Bot API 字段，不会回落到 document。
+            file = await update.message.audio.get_file()
+
+            file_basename = os.path.basename(cast(str, file.file_path))
+            temp_dir = get_astrbot_temp_path()
+            temp_path = os.path.join(temp_dir, file_basename)
+            await download_file(cast(str, file.file_path), path=temp_path)
+            path_wav = await MediaResolver(
+                temp_path,
+                media_type="audio",
+                default_suffix=".wav",
+            ).to_path(target_format="wav")
+
+            record = Comp.Record(file=path_wav, url=path_wav)
+            record.path = path_wav
+            message.message.append(record)
+            _apply_caption()
+
         elif update.message.photo:
             photo = update.message.photo[-1]  # get the largest photo
             file = await photo.get_file()
@@ -607,11 +626,18 @@ class TelegramPlatformAdapter(Platform):
             _apply_caption()
 
         elif update.message.sticker:
-            # 将sticker当作图片处理
-            file = await update.message.sticker.get_file()
-            message.message.append(Comp.Image(file=file.file_path, url=file.file_path))
-            if update.message.sticker.emoji:
-                sticker_text = f"Sticker: {update.message.sticker.emoji}"
+            # 将 sticker 当作图片处理；动态/视频贴纸不是位图，改用静态缩略图。
+            sticker = update.message.sticker
+            if sticker.is_animated or sticker.is_video:
+                file = await sticker.thumbnail.get_file() if sticker.thumbnail else None
+            else:
+                file = await sticker.get_file()
+            if file:
+                message.message.append(
+                    Comp.Image(file=file.file_path, url=file.file_path)
+                )
+            if sticker.emoji:
+                sticker_text = f"Sticker: {sticker.emoji}"
                 message.message_str = sticker_text
                 message.message.append(Comp.Plain(sticker_text))
 
@@ -640,6 +666,15 @@ class TelegramPlatformAdapter(Platform):
             else:
                 message.message.append(Comp.Video(file=file_path, path=file.file_path))
                 _apply_caption()
+
+        elif update.message.video_note:
+            # 视频留言没有 file_name，也不能带 caption。
+            file = await update.message.video_note.get_file()
+            file_path = file.file_path
+            if file_path is None:
+                logger.warning("Telegram 视频留言 file_path 为空，无法保存。")
+            else:
+                message.message.append(Comp.Video(file=file_path, path=file_path))
 
         return message
 

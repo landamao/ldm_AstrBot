@@ -299,6 +299,15 @@ class CronJobManager:
             return None
         return aps_job.next_run_time.astimezone(timezone.utc)
 
+    def get_next_run_time(self, job_id: str):
+        """直接从调度器读下一次运行时间。
+
+        ``_schedule_job`` 里写库是 fire-and-forget，``add_active_job`` /
+        ``update_job`` 刚返回时行上的 ``next_run_time`` 可能还是空的。
+        调度器本身是同步更新的，需要立刻展示时用这个。
+        """
+        return self._get_next_run_time(job_id)
+
     async def run_job_now(self, job_id: str) -> None:
         await self._run_job(job_id, ignore_enabled=True, delete_run_once=False)
 

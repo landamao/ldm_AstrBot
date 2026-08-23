@@ -19,6 +19,7 @@ from astrbot.core.desktop_runtime import (
 )
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_path
 from astrbot.core.utils.io import ensure_dir, on_error
+from astrbot.core.utils.github_proxy import normalize_ldm_mirror
 
 from .zip_updator import ReleaseInfo, RepoZipUpdator
 
@@ -347,16 +348,85 @@ class AstrBotUpdator(RepoZipUpdator):
             return []
         return self._parse_ls_remote_tags(output)
 
+    async def fetch_release_info_from_mirror(self, mirror_url: str) -> list:
+        """从 ldm 镜像服务器的 manifest.json 获取版本列表。
+
+        返回和 fetch_release_info 相同结构的 list[dict]，
+        每个 item 含 tag_name, published_at, body, zipball_url。
+        失败时返回空 list。
+        """
+        mirror_url = normalize_ldm_mirror(mirror_url)
+        if not mirror_url:
+            return []
+        manifest_url = f"{mirror_url}/manifest.json"
+        try:
+            async with self._create_httpx_client(timeout=20.0) as client:
+                response = await client.get(manifest_url)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as exc:
+            logger.warning(f"从 ldm 镜像获取 manifest.json 失败: {exc}")
+            return []
+
+        releases_data = data.get("releases", [])
+        if not releases_data:
+            return []
+
+        ret: list = []
+        for item in releases_data:
+            tag = item.get("tag_name", "")
+            if not tag:
+                continue
+            ret.append({
+                "version": tag,
+                "published_at": item.get("published_at", ""),
+                "body": item.get("body", ""),
+                "tag_name": tag,
+                "zipball_url": item.get("url", "")
+                    or f"{mirror_url}/releases/{tag}.zip",
+            })
+        ret.sort(
+            key=lambda item: self._tag_sort_key(str(item.get("tag_name") or "")),
+            reverse=True,
+        )
+        return ret
+
     async def fetch_release_info(
         self,
         url: str,
         latest: bool = True,
         force_refresh: bool = False,
+        mirror_url: str = "",
     ) -> list:
-        """优先 GitHub API；失败则 releases.atom；再失败则 git ls-remote。
+        """优先从 ldm 镜像获取；失败则 GitHub API → atom → git ls-remote。
 
         force_refresh=True 时跳过内存短缓存，强制重新拉取远端。
+        mirror_url 非空时优先从镜像 manifest.json 获取版本列表。
         """
+        mirror_url = normalize_ldm_mirror(mirror_url)
+
+        # 镜像优先
+        if mirror_url:
+            now = time.time()
+            if (
+                not force_refresh
+                and self._releases_cache is not None
+                and now - self._releases_cache_at < self._cache_ttl_seconds
+            ):
+                return list(self._releases_cache)
+
+            ret = await self.fetch_release_info_from_mirror(mirror_url)
+            if ret:
+                logger.info(
+                    f"从 ldm 镜像服务器获取到 {len(ret)} 个版本"
+                    f"（{mirror_url}）"
+                )
+                self._releases_cache = ret
+                self._releases_cache_at = now
+                return list(ret)
+            logger.warning("ldm 镜像服务器获取失败，回退到 GitHub API")
+            # 回退到 GitHub 链路
+
         now = time.time()
         if (
             not force_refresh
@@ -399,12 +469,15 @@ class AstrBotUpdator(RepoZipUpdator):
         # 2) Atom feed（不占 REST 限额，且带发布时间）
         ret = await self._fetch_releases_via_atom()
         if ret:
+            logger.info(f"GitHub Atom 回退成功，获取到 {len(ret)} 个版本")
             self._releases_cache = ret
             self._releases_cache_at = now
             return list(ret)
 
         # 3) git ls-remote（只有 tag，没有时间）
         ret = await self._fetch_releases_via_git()
+        if ret:
+            logger.info(f"git ls-remote 回退成功，获取到 {len(ret)} 个版本")
         self._releases_cache = ret
         self._releases_cache_at = now
         return list(ret)
@@ -541,6 +614,7 @@ class AstrBotUpdator(RepoZipUpdator):
         current_version: str | None,
         consider_prerelease: bool = True,
         force_refresh: bool = False,
+        mirror_url: str = "",
     ) -> ReleaseInfo | None:
         """检查 landamao/ldm_AstrBot 是否有新 Release（仅 tag，不检查 commit）。"""
         import re
@@ -550,6 +624,7 @@ class AstrBotUpdator(RepoZipUpdator):
             releases = await self.fetch_release_info(
                 self.ASTRBOT_RELEASE_API,
                 force_refresh=force_refresh,
+                mirror_url=mirror_url,
             )
         except Exception as exc:
             logger.warning(f"获取 Release 列表失败: {exc}")
@@ -591,13 +666,14 @@ class AstrBotUpdator(RepoZipUpdator):
             )
         return None
 
-    async def get_releases(self, force_refresh: bool = False) -> list:
+    async def get_releases(self, force_refresh: bool = False, mirror_url: str = "") -> list:
         """返回可安装的 GitHub Release 列表（仅 tag，新版本在前）。"""
         releases: list = []
         try:
             releases = await self.fetch_release_info(
                 self.ASTRBOT_RELEASE_API,
                 force_refresh=force_refresh,
+                mirror_url=mirror_url,
             )
         except Exception as exc:
             logger.warning(f"获取 GitHub Releases 列表失败: {exc}")
@@ -630,6 +706,86 @@ class AstrBotUpdator(RepoZipUpdator):
         if reboot:
             self._reboot()
 
+    async def _download_from_mirror(
+        self,
+        *,
+        mirror_url: str,
+        latest: bool,
+        version: str | None,
+        path: str | Path,
+        progress_callback=None,
+    ) -> Path:
+        """从 ldm 镜像服务器下载更新包（直连国内服务器）。"""
+        mirror_url = normalize_ldm_mirror(mirror_url)
+        if not mirror_url:
+            raise Exception("镜像地址为空")
+
+        version_text = "" if version is None else str(version).strip()
+
+        # 获取 manifest.json 确定版本信息
+        try:
+            mirror_releases = await self.fetch_release_info_from_mirror(mirror_url)
+        except Exception as exc:
+            raise Exception(f"从 ldm 镜像获取版本信息失败: {exc}") from exc
+
+        if not mirror_releases:
+            raise Exception(
+                f"ldm 镜像服务器（{mirror_url}）没有可用的版本，无法下载"
+            )
+
+        target_version = None
+        file_url = None
+
+        if latest or version_text in {"", "latest"}:
+            target_version = mirror_releases[0]["tag_name"]
+            file_url = f"{mirror_url}/releases/{target_version}.zip"
+        elif version_text.startswith(("v", "V")):
+            # 查找指定版本
+            for item in mirror_releases:
+                if item["tag_name"] == version_text:
+                    target_version = item["tag_name"]
+                    file_url = f"{mirror_url}/releases/{target_version}.zip"
+                    break
+            if not file_url:
+                raise Exception(
+                    f"ldm 镜像服务器上没有找到版本 {version_text} 的更新包"
+                )
+        else:
+            raise Exception(
+                f"仅支持按 Release / tag 更新，不支持 commit 或分支: {version_text!r}"
+            )
+
+        logger.info(
+            f"从 ldm 镜像服务器下载更新包: {target_version}（{mirror_url}）"
+        )
+
+        zip_path = Path(path)
+        ensure_dir(zip_path.parent)
+        await self._download_file(
+            file_url,
+            str(zip_path),
+            progress_callback=progress_callback,
+        )
+        if not zipfile.is_zipfile(zip_path):
+            raise RuntimeError("下载的更新包不是有效 ZIP 文件")
+
+        # 旁路元数据
+        side_meta = zip_path.with_suffix(zip_path.suffix + ".meta.json")
+        side_meta.write_text(
+            json.dumps(
+                {
+                    "version": target_version,
+                    "sha": None,
+                    "source": f"ldm 镜像服务器（{mirror_url}）",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return zip_path
+
     async def download_update_package(
         self,
         latest=True,
@@ -637,13 +793,30 @@ class AstrBotUpdator(RepoZipUpdator):
         proxy="",
         path: str | Path = "temp.zip",
         progress_callback=None,
+        mirror_url: str = "",
     ) -> Path:
-        """下载 ldm_AstrBot 源码更新包（不解压）。"""
+        """下载 ldm_AstrBot 源码更新包（不解压）。
+
+        mirror_url 非空时优先从 ldm 镜像服务器下载（直连国内服务器，不走 proxy）。
+        """
         if os.environ.get("ASTRBOT_CLI") or os.environ.get("ASTRBOT_LAUNCHER"):
             raise Exception(
                 "当前以 CLI/Launcher 方式运行，请改用源码目录方式更新 ldm_AstrBot。"
             )
 
+        mirror_url = normalize_ldm_mirror(mirror_url)
+
+        # 镜像模式：直接从国内服务器下载
+        if mirror_url:
+            return await self._download_from_mirror(
+                mirror_url=mirror_url,
+                latest=latest,
+                version=version,
+                path=path,
+                progress_callback=progress_callback,
+            )
+
+        # GitHub 模式（现有逻辑）
         file_url = None
         target_version = None
         version_text = "" if version is None else str(version).strip()
@@ -919,6 +1092,7 @@ class AstrBotUpdator(RepoZipUpdator):
         version=None,
         proxy="",
         progress_callback=None,
+        mirror_url: str = "",
     ) -> bool:
         """仅从 ldm_AstrBot 更新包同步 WebUI（目标目录跟随 --webui-dir，默认 data/dist）。"""
         update_temp_parent = Path(get_astrbot_data_path()) / "temp" / "updates"
@@ -931,6 +1105,7 @@ class AstrBotUpdator(RepoZipUpdator):
                 proxy=proxy or "",
                 path=zip_path,
                 progress_callback=progress_callback,
+                mirror_url=mirror_url,
             )
             with tempfile.TemporaryDirectory(prefix="ldm-webui-only-") as tmp:
                 tmp_root = Path(tmp)
@@ -955,7 +1130,10 @@ class AstrBotUpdator(RepoZipUpdator):
         self, target_path: str, repo_url: str, proxy=""
     ) -> None:
         """按仓库 URL 下载源码 zip（用于通用仓库安装场景）。"""
-        author, repo, branch = await self.resolve_github_source_branch(repo_url)
+        author, repo, branch = await self.resolve_github_source_branch(
+            repo_url,
+            proxy=proxy,
+        )
         logger.info(f"正在下载更新 {repo} ...")
         logger.info(f"正在从分支 {branch} 下载 {author}/{repo}")
         release_url = (

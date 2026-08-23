@@ -5,8 +5,10 @@ import copy
 import inspect
 import os
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from astrbot.core import file_token_service, logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
@@ -490,12 +492,44 @@ class ConfigProfileService:
         }
 
     def get_system_config(self) -> dict:
-        return self.get_system_schema()
+        """返回系统配置，并附带服务端当前时间。"""
+        data = self.get_system_schema()
+        server_utc_time = datetime.now(timezone.utc)
+        timezone_name = str(data["config"].get("timezone") or "").strip()
+        if timezone_name:
+            try:
+                configured_time = server_utc_time.astimezone(ZoneInfo(timezone_name))
+            except (ValueError, ZoneInfoNotFoundError):
+                configured_time = server_utc_time.astimezone()
+        else:
+            configured_time = server_utc_time.astimezone()
+        utc_offset = configured_time.utcoffset()
+        data["server_utc_time"] = server_utc_time.isoformat()
+        data["server_utc_offset_minutes"] = (
+            int(utc_offset.total_seconds() / 60) if utc_offset else 0
+        )
+        return data
 
     def list_profiles(self) -> dict:
         return {"info_list": self.acm.get_conf_list()}
 
-    async def create_profile(self, name: str | None, config: dict | None) -> dict:
+    async def create_profile(
+        self,
+        name: str | None,
+        config: dict | None,
+        *,
+        allow_admin_id_change: bool = True,
+    ) -> dict:
+        if (
+            not allow_admin_id_change
+            and isinstance(config, dict)
+            and config.get("admins_id", DEFAULT_CONFIG.get("admins_id"))
+            != DEFAULT_CONFIG.get("admins_id")
+        ):
+            raise ApiError(
+                "config:edit_admin scope is required to change admins_id",
+                status_code=403,
+            )
         conf_id = self.acm.create_conf(name=name, config=config or DEFAULT_CONFIG)
         await self.core_lifecycle.reload_pipeline_scheduler(conf_id)
         return {"conf_id": conf_id}
@@ -544,6 +578,7 @@ class ConfigProfileService:
         config: dict,
         *,
         two_factor_code: str | None = None,
+        allow_admin_id_change: bool = True,
     ) -> str | None:
         if config_id not in self.acm.confs:
             raise ValueError(f"Config file {config_id} does not exist")
@@ -554,6 +589,15 @@ class ConfigProfileService:
                 config[key] = default_conf.get(key, [])
 
         current_config = self.acm.confs[config_id]
+        if (
+            not allow_admin_id_change
+            and "admins_id" in config
+            and config.get("admins_id") != current_config.get("admins_id")
+        ):
+            raise ApiError(
+                "config:edit_admin scope is required to change admins_id",
+                status_code=403,
+            )
         protected_2fa_changed = _protected_2fa_config_changed(current_config, config)
         if (
             is_totp_enabled(current_config)
@@ -1403,6 +1447,20 @@ class ProviderConfigService:
         self.config = core_lifecycle.astrbot_config
         self.provider_manager = core_lifecycle.provider_manager
 
+    @staticmethod
+    def _strip_legacy_reasoning_metadata(provider: dict) -> dict:
+        """移除误存到 provider 配置里的 reasoning 元数据字段。
+
+        Args:
+            provider: 要清理的 provider 配置（原地修改）。
+
+        Returns:
+            清理后的 provider 配置。
+        """
+        if provider.get("provider_source_id"):
+            provider.pop("reasoning", None)
+        return provider
+
     def get_provider_schema(self) -> dict:
         provider_metadata = ConfigMetadataI18n.convert_to_i18n_keys(
             {
@@ -1427,6 +1485,7 @@ class ProviderConfigService:
 
         model_metadata = {}
         for provider in providers:
+            self._strip_legacy_reasoning_metadata(provider)
             model_id = provider.get("model")
             if isinstance(model_id, str) and model_id in LLM_METADATAS:
                 model_metadata[model_id] = LLM_METADATAS[model_id]
@@ -1710,6 +1769,7 @@ class ProviderConfigService:
                 )
             else:
                 provider_response = copy.deepcopy(provider)
+            self._strip_legacy_reasoning_metadata(provider_response)
             model_id = provider_response.get("model")
             if isinstance(model_id, str) and model_id in LLM_METADATAS:
                 model_metadata[model_id] = LLM_METADATAS[model_id]
@@ -1745,6 +1805,7 @@ class ProviderConfigService:
         if provider is None:
             raise ValueError(f"Provider {provider_id} not found")
         provider_response = copy.deepcopy(provider)
+        self._strip_legacy_reasoning_metadata(provider_response)
         from astrbot.core.utils.llm_metadata import LLM_METADATAS
 
         model_id = provider_response.get("model")
@@ -1757,11 +1818,14 @@ class ProviderConfigService:
         config = copy.deepcopy(config)
         if source_id:
             config["provider_source_id"] = source_id
+        self._strip_legacy_reasoning_metadata(config)
         await self.provider_manager.create_provider(config)
 
     async def update_provider(self, provider_id: str, config: dict) -> None:
+        config = copy.deepcopy(config)
         if not config.get("id"):
             config["id"] = provider_id
+        self._strip_legacy_reasoning_metadata(config)
         await self.provider_manager.update_provider(provider_id, config)
 
     async def set_provider_enabled(self, provider_id: str, enabled: bool) -> None:

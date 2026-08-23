@@ -1,5 +1,7 @@
 from astrbot.core.db import BaseDatabase
 from astrbot.core.db.po import PlatformMessageHistory
+from astrbot.core.message.components import ComponentType
+from astrbot.core.message.message_event_result import MessageChain
 
 
 class PlatformMessageHistoryManager:
@@ -10,10 +12,11 @@ class PlatformMessageHistoryManager:
         self,
         platform_id: str,
         user_id: str,
-        content: dict,  # TODO: parse from message chain
+        content: dict,
         sender_id: str | None = None,
         sender_name: str | None = None,
         llm_checkpoint_id: str | None = None,
+        max_messages: int | None = None,
     ) -> PlatformMessageHistory:
         """Insert a new platform message history record."""
         return await self.db.insert_platform_message_history(
@@ -23,6 +26,83 @@ class PlatformMessageHistoryManager:
             sender_id=sender_id,
             sender_name=sender_name,
             llm_checkpoint_id=llm_checkpoint_id,
+            max_messages=max_messages,
+        )
+
+    async def insert_message_chain(
+        self,
+        platform_id: str,
+        user_id: str,
+        message_chain: MessageChain,
+        role: str,
+        sender_id: str | None = None,
+        sender_name: str | None = None,
+        max_messages: int | None = None,
+    ) -> PlatformMessageHistory | None:
+        """把消息链存成不含本地路径的平台中立表示。
+
+        Args:
+            platform_id: 平台实例 ID。
+            user_id: 该群的 unified_msg_origin。
+            message_chain: 要持久化的消息组件。
+            role: 消息角色，通常是 ``user`` 或 ``bot``。
+            sender_id: 平台上报的发送者 ID。
+            sender_name: 平台上报的发送者显示名。
+            max_messages: 该平台+用户范围内最多保留的行数。
+
+        Returns:
+            插入的历史记录；空消息链返回 ``None``。
+        """
+        parts: list[dict] = []
+        for component in message_chain.chain:
+            raw_component_type = component.type
+            component_type_name = (
+                raw_component_type.value
+                if isinstance(raw_component_type, ComponentType)
+                else str(raw_component_type)
+            )
+            if component.type == ComponentType.Plain:
+                text = str(getattr(component, "text", ""))
+                if text:
+                    parts.append({"type": "plain", "text": text})
+            elif component.type in {
+                ComponentType.Image,
+                ComponentType.Record,
+                ComponentType.Video,
+                ComponentType.File,
+            }:
+                parts.append({"type": "plain", "text": f"[{component_type_name}]"})
+            elif component.type == ComponentType.At:
+                parts.append(
+                    {
+                        "type": "at",
+                        "user_id": str(getattr(component, "qq", "")),
+                        "name": str(getattr(component, "name", "") or ""),
+                    }
+                )
+            elif component.type == ComponentType.Reply:
+                parts.append(
+                    {
+                        "type": "reply",
+                        "message_id": str(getattr(component, "id", "")),
+                        "sender_name": str(
+                            getattr(component, "sender_nickname", "") or ""
+                        ),
+                        "text": str(getattr(component, "message_str", "") or ""),
+                    }
+                )
+            else:
+                parts.append({"type": "plain", "text": f"[{component_type_name}]"})
+
+        if not parts:
+            return None
+        return await self.insert(
+            platform_id=platform_id,
+            user_id=user_id,
+            content={"type": role, "message": parts},
+            sender_id=sender_id,
+            sender_name=sender_name,
+            max_messages=max_messages,
         )
 
     async def get(

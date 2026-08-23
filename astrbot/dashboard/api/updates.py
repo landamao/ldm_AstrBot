@@ -86,11 +86,14 @@ async def _run(operation) -> JSONResponse:
 async def check_updates(
     update_type: str | None = Query(default=None, alias="type"),
     force_refresh: bool = Query(default=False),
+    mirror_url: str = Query(default=""),
     _auth: AuthContext = Depends(require_system_scope),
     service: UpdateService = Depends(get_service),
 ):
     return await _run(
-        lambda: service.check_update(update_type, force_refresh=force_refresh)
+        lambda: service.check_update(
+            update_type, force_refresh=force_refresh, mirror_url=mirror_url
+        )
     )
 
 
@@ -98,30 +101,43 @@ async def check_updates(
 async def check_dashboard_updates(
     update_type: str | None = Query(default=None, alias="type"),
     force_refresh: bool = Query(default=False),
+    mirror_url: str = Query(default=""),
     _username: str = Depends(require_dashboard_user),
     service: UpdateService = Depends(get_service),
 ):
     return await _run(
-        lambda: service.check_update(update_type, force_refresh=force_refresh)
+        lambda: service.check_update(
+            update_type, force_refresh=force_refresh, mirror_url=mirror_url
+        )
     )
 
 
 @router.get("/updates/releases")
 async def update_releases(
     force_refresh: bool = Query(default=False),
+    mirror_url: str = Query(default=""),
     _auth: AuthContext = Depends(require_system_scope),
     service: UpdateService = Depends(get_service),
 ):
-    return await _run(lambda: service.get_releases(force_refresh=force_refresh))
+    return await _run(
+        lambda: service.get_releases(
+            force_refresh=force_refresh, mirror_url=mirror_url
+        )
+    )
 
 
 @legacy_router.get("/releases")
 async def dashboard_update_releases(
     force_refresh: bool = Query(default=False),
+    mirror_url: str = Query(default=""),
     _username: str = Depends(require_dashboard_user),
     service: UpdateService = Depends(get_service),
 ):
-    return await _run(lambda: service.get_releases(force_refresh=force_refresh))
+    return await _run(
+        lambda: service.get_releases(
+            force_refresh=force_refresh, mirror_url=mirror_url
+        )
+    )
 
 
 @router.get("/updates/progress/{task_id}")
@@ -162,18 +178,22 @@ async def update_dashboard_core(
 
 @router.post("/updates/dashboard")
 async def update_dashboard(
+    payload: UpdateRequest | None = None,
     _auth: AuthContext = Depends(require_system_scope),
     service: UpdateService = Depends(get_service),
 ):
-    return await _run(service.update_dashboard)
+    mirror_url = _model_dict(payload).get("mirror_url", "") if payload else ""
+    return await _run(lambda: service.update_dashboard(mirror_url=mirror_url))
 
 
 @legacy_router.post("/dashboard")
 async def update_dashboard_assets(
+    payload: UpdateRequest | None = None,
     _username: str = Depends(require_dashboard_user),
     service: UpdateService = Depends(get_service),
 ):
-    return await _run(service.update_dashboard)
+    mirror_url = _model_dict(payload).get("mirror_url", "") if payload else ""
+    return await _run(lambda: service.update_dashboard(mirror_url=mirror_url))
 
 
 @router.post("/pip/install")

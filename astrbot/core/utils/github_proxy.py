@@ -73,3 +73,27 @@ def log_github_proxy_usage(
             f"GitHub 加速: 未使用 动作={action}{target_part}{source_part}"
         )
     return normalized
+
+
+# ============ ldm 镜像服务器辅助 ============
+
+# 镜像服务器地址硬编码在后端，前端不持有此值
+LDM_MIRROR_URL = "http://39.106.102.162:9200/api/ldmbot"
+
+
+def normalize_ldm_mirror(mirror_url: str | None) -> str:
+    """规范化镜像地址：去空白、去尾斜杠；空则返回空串。
+
+    传入 'ldm_mirror' 时替换为后端内置的镜像地址。
+    """
+    if not mirror_url:
+        return ""
+    value = str(mirror_url).strip()
+    if value == "ldm_mirror":
+        return LDM_MIRROR_URL.rstrip("/")
+    return value.rstrip("/")
+
+
+def get_ldm_mirror_url() -> str:
+    """返回内置镜像服务器地址。"""
+    return LDM_MIRROR_URL.rstrip("/")

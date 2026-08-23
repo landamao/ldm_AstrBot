@@ -57,7 +57,8 @@ class AstrBotConfig(dict):
         object.__setattr__(self, "_save_revision", 0)
         object.__setattr__(self, "_save_committed_revision", 0)
 
-        if schema:
+        # 空 schema（{}）在布尔判断里是假值，但合法：表示零个配置项，不是回落到全局默认。
+        if schema is not None:
             default_config = self._config_schema_to_default_config(schema)
 
         if not self.check_exist():

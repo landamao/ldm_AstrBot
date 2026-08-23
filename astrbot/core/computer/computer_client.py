@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from astrbot.core.utils.astrbot_path import (
 )
 
 from .booters.base import ComputerBooter
-from .booters.local import LocalBooter
+from .booters.local import LocalBooter, resolve_windows_shell
 
 session_booter: dict[str, ComputerBooter] = {}
 local_booter: ComputerBooter | None = None
@@ -679,4 +680,22 @@ def get_local_booter() -> ComputerBooter:
     global local_booter
     if local_booter is None:
         local_booter = LocalBooter()
+        if sys.platform == "win32":
+            logger.info(
+                "[Computer] Windows 本地运行时 Shell: %s",
+                resolve_windows_shell(),
+            )
     return local_booter
+
+
+async def shutdown_local_booter() -> None:
+    """关闭已创建的本地 computer 资源，不存在则不新建。"""
+    global local_booter
+    if local_booter is None:
+        return
+    booter = local_booter
+    local_booter = None
+    try:
+        await booter.shutdown()
+    except Exception as exc:
+        logger.warning("关闭本地 computer booter 失败: %s", exc)

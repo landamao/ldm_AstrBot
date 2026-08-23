@@ -81,6 +81,7 @@ class BackupRenameRequest(OpenModel):
 class UpdateRequest(OpenModel):
     version: str | None = None
     proxy: str | None = None
+    mirror_url: str | None = None
     reboot: bool | None = None
     progress_id: str | None = None
 

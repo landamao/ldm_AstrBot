@@ -638,6 +638,7 @@ class SQLiteDatabase(BaseDatabase):
         sender_id=None,
         sender_name=None,
         llm_checkpoint_id=None,
+        max_messages=None,
     ):
         """Insert a new platform message history record."""
         async with self.get_db() as session:
@@ -652,6 +653,24 @@ class SQLiteDatabase(BaseDatabase):
                     llm_checkpoint_id=llm_checkpoint_id,
                 )
                 session.add(new_history)
+                await session.flush()
+                if max_messages is not None:
+                    keep_ids = (
+                        select(PlatformMessageHistory.id)
+                        .where(
+                            col(PlatformMessageHistory.platform_id) == platform_id,
+                            col(PlatformMessageHistory.user_id) == user_id,
+                        )
+                        .order_by(desc(PlatformMessageHistory.id))
+                        .limit(max(1, int(max_messages)))
+                    )
+                    await session.execute(
+                        delete(PlatformMessageHistory).where(
+                            col(PlatformMessageHistory.platform_id) == platform_id,
+                            col(PlatformMessageHistory.user_id) == user_id,
+                            col(PlatformMessageHistory.id).not_in(keep_ids),
+                        )
+                    )
                 return new_history
 
     async def update_platform_message_history(

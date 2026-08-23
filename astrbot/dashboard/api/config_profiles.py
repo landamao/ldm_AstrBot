@@ -12,6 +12,7 @@ from astrbot.dashboard.schemas import (
     ConfigRouteUpsertRequest,
     RenameRequest,
 )
+from astrbot.dashboard.services.auth_service import CONFIG_EDIT_ADMIN_SCOPE
 from astrbot.dashboard.services.config_service import (
     ConfigDisplayService,
     ConfigFileService,
@@ -66,6 +67,15 @@ def _model_dict(payload) -> dict[str, Any]:
     return payload.model_dump(exclude_none=True)
 
 
+def _can_edit_admin_ids(auth: AuthContext) -> bool:
+    """当前调用方是否可以改管理员 ID。"""
+    return (
+        auth.via != "api_key"
+        or "*" in auth.scopes
+        or CONFIG_EDIT_ADMIN_SCOPE in auth.scopes
+    )
+
+
 @router.get("/config-profiles/schema")
 async def get_config_profile_schema(
     _auth: AuthContext = Depends(require_config_scope),
@@ -82,13 +92,23 @@ async def list_config_profiles(
     return ok(service.list_profiles())
 
 
-@router.post("/config-profiles")
+@router.post(
+    "/config-profiles",
+    openapi_extra={"x-astrbot-sensitive-scopes": [CONFIG_EDIT_ADMIN_SCOPE]},
+)
 async def create_config_profile(
     payload: ConfigProfileCreateRequest,
-    _auth: AuthContext = Depends(require_config_scope),
+    auth: AuthContext = Depends(require_config_scope),
     service: ConfigProfileService = Depends(get_service),
 ):
-    return ok(await service.create_profile(payload.name, payload.config), "创建成功")
+    return ok(
+        await service.create_profile(
+            payload.name,
+            payload.config,
+            allow_admin_id_change=_can_edit_admin_ids(auth),
+        ),
+        "创建成功",
+    )
 
 
 @router.get("/config-profiles/{config_id}")
@@ -100,18 +120,22 @@ async def get_config_profile(
     return ok(service.get_profile(config_id))
 
 
-@router.put("/config-profiles/{config_id}")
+@router.put(
+    "/config-profiles/{config_id}",
+    openapi_extra={"x-astrbot-sensitive-scopes": [CONFIG_EDIT_ADMIN_SCOPE]},
+)
 async def update_config_profile(
     config_id: str,
     payload: ConfigContentRequest,
     request: Request,
-    _auth: AuthContext = Depends(require_config_scope),
+    auth: AuthContext = Depends(require_config_scope),
     service: ConfigProfileService = Depends(get_service),
 ):
     message = await service.update_profile(
         config_id,
         _model_dict(payload),
         two_factor_code=request.headers.get("X-2FA-Code"),
+        allow_admin_id_change=_can_edit_admin_ids(auth),
     )
     return ok(message=message or "保存成功")
 
@@ -161,17 +185,21 @@ async def get_system_config_runtime(
     return ok(await service.get_configs())
 
 
-@router.put("/system-config")
+@router.put(
+    "/system-config",
+    openapi_extra={"x-astrbot-sensitive-scopes": [CONFIG_EDIT_ADMIN_SCOPE]},
+)
 async def update_system_config(
     payload: ConfigContentRequest,
     request: Request,
-    _auth: AuthContext = Depends(require_config_scope),
+    auth: AuthContext = Depends(require_config_scope),
     service: ConfigProfileService = Depends(get_service),
 ):
     message = await service.update_profile(
         "default",
         _model_dict(payload),
         two_factor_code=request.headers.get("X-2FA-Code"),
+        allow_admin_id_change=_can_edit_admin_ids(auth),
     )
     return ok(message=message or "保存成功")
 
@@ -234,7 +262,7 @@ async def list_dashboard_alias_config_profiles(
 @legacy_router.post("/abconf/new")
 async def create_dashboard_alias_config_profile(
     request: Request,
-    _auth: AuthContext = Depends(require_config_scope),
+    auth: AuthContext = Depends(require_config_scope),
     service: ConfigProfileService = Depends(get_service),
 ):
     body = await _json_or_empty(request)
@@ -243,6 +271,7 @@ async def create_dashboard_alias_config_profile(
             await service.create_profile(
                 body.get("name"),
                 body.get("config"),
+                allow_admin_id_change=_can_edit_admin_ids(auth),
             ),
             "创建成功",
         )
@@ -304,7 +333,7 @@ async def rename_dashboard_alias_config_profile(
 @legacy_router.post("/astrbot/update")
 async def update_dashboard_alias_astrbot_config(
     request: Request,
-    _auth: AuthContext = Depends(require_config_scope),
+    auth: AuthContext = Depends(require_config_scope),
     service: ConfigProfileService = Depends(get_service),
 ):
     body = await _json_or_empty(request)
@@ -319,6 +348,7 @@ async def update_dashboard_alias_astrbot_config(
             str(config_id),
             config,
             two_factor_code=request.headers.get("X-2FA-Code"),
+            allow_admin_id_change=_can_edit_admin_ids(auth),
         )
         return ok(message=message or "保存成功~")
     except ValueError as exc:

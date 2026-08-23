@@ -25,7 +25,11 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_data_path,
     get_astrbot_temp_path,
 )
-from astrbot.core.utils.github_proxy import log_github_proxy_usage, resolve_github_proxy
+from astrbot.core.utils.github_proxy import (
+    log_github_proxy_usage,
+    resolve_github_proxy,
+    normalize_ldm_mirror,
+)
 from astrbot.core.utils.io import (
     download_dashboard as _download_dashboard,
 )
@@ -122,6 +126,7 @@ class UpdateService:
         self,
         update_type: str | None,
         force_refresh: bool = False,
+        mirror_url: str = "",
     ) -> UpdateServiceResult:
         try:
             dashboard_version = await self.get_dashboard_version()
@@ -138,6 +143,7 @@ class UpdateService:
                     None,
                     False,
                     force_refresh=force_refresh,
+                    mirror_url=mirror_url,
                 )
             except Exception as exc:
                 # 限流/网络问题时不把整个检查接口打成 error，方便前端继续工作
@@ -180,10 +186,13 @@ class UpdateService:
             logger.warning(f"检查更新失败: {exc!s} (不影响除项目更新外的正常使用)")
             raise UpdateServiceError(exc.__str__()) from exc
 
-    async def get_releases(self, force_refresh: bool = False) -> UpdateServiceResult:
+    async def get_releases(
+        self, force_refresh: bool = False, mirror_url: str = ""
+    ) -> UpdateServiceResult:
         try:
             releases = await self.astrbot_updator.get_releases(
                 force_refresh=force_refresh,
+                mirror_url=mirror_url,
             )
             return UpdateServiceResult(data=releases)
         except Exception as exc:
@@ -208,18 +217,28 @@ class UpdateService:
         else:
             latest = False
 
+        # ldm 镜像服务器地址（前端硬编码传入，不需要服务端配置）
+        mirror_url = normalize_ldm_mirror(payload.get("mirror_url", ""))
+
         proxy: str | None = payload.get("proxy", None)
         explicit = (proxy or "").strip() if proxy is not None else ""
-        proxy = resolve_github_proxy(
-            proxy,
-            getattr(self.core_lifecycle, "astrbot_config", None),
-        ) or None
-        log_github_proxy_usage(
-            proxy,
-            action="更新本体",
-            target=version or "latest",
-            source="请求参数" if explicit else ("服务端配置" if proxy else "无"),
-        )
+        # 镜像模式忽略 proxy（直连国内服务器不需要加速）
+        if mirror_url:
+            proxy = None
+            logger.info(
+                f"使用 ldm 镜像服务器更新: {mirror_url}（忽略 GitHub 加速）"
+            )
+        else:
+            proxy = resolve_github_proxy(
+                proxy,
+                getattr(self.core_lifecycle, "astrbot_config", None),
+            ) or None
+            log_github_proxy_usage(
+                proxy,
+                action="更新本体",
+                target=version or "latest",
+                source="请求参数" if explicit else ("服务端配置" if proxy else "无"),
+            )
 
         existing_task = self._update_tasks.get(progress_id)
         if existing_task and not existing_task.done():
@@ -231,7 +250,9 @@ class UpdateService:
 
         self._init_update_progress(progress_id, version)
         task = asyncio.create_task(
-            self._run_update_project(progress_id, version, latest, reboot, proxy)
+            self._run_update_project(
+                progress_id, version, latest, reboot, proxy, mirror_url
+            )
         )
         self._update_tasks[progress_id] = task
         task.add_done_callback(lambda _task: self._update_tasks.pop(progress_id, None))
@@ -248,6 +269,7 @@ class UpdateService:
         latest: bool,
         reboot: bool,
         proxy: str | None,
+        mirror_url: str = "",
     ) -> None:
         """下载并应用 ldm_AstrBot 源码包（核心 + WebUI）。"""
         update_temp_parent = Path(get_astrbot_temp_path()) / "updates"
@@ -284,6 +306,7 @@ class UpdateService:
                             5,
                             70,
                         ),
+                        mirror_url=mirror_url,
                     )
                 )
                 self._set_update_stage(
@@ -408,13 +431,16 @@ class UpdateService:
             logger.error(f"/api/update_project: {traceback.format_exc()}")
             logger.debug(f"Update task failed: {exc!s}")
 
-    async def update_dashboard(self) -> UpdateServiceResult:
+    async def update_dashboard(
+        self, mirror_url: str = ""
+    ) -> UpdateServiceResult:
         """仅从 landamao/ldm_AstrBot 同步 WebUI（目标目录跟随 --webui-dir，默认 data/dist）。"""
         try:
             applied = await self.astrbot_updator.apply_webui_only_from_package(
                 latest=True,
                 version=None,
                 proxy="",
+                mirror_url=normalize_ldm_mirror(mirror_url),
             )
             if not applied:
                 raise UpdateServiceError(

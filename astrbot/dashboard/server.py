@@ -1,5 +1,6 @@
 import asyncio
 import ipaddress
+import mimetypes
 import os
 import socket
 import sys
@@ -35,8 +36,13 @@ from astrbot.dashboard.asgi_runtime import (
 from astrbot.dashboard.responses import error
 
 from .api.app import create_dashboard_asgi_app
+from .api.auth import _auth_scheme_and_credentials
 from .plugin_page_auth import PluginPageAuth
 from .services.auth_service import DASHBOARD_JWT_COOKIE_NAME
+
+if os.name == "nt":
+    # Windows 的 mimetypes 会把 .svg 映射成非标准的 image/svg,这里强制覆盖为标准类型
+    mimetypes.add_type("image/svg+xml", ".svg", strict=True)
 
 _RATE_LIMITED_ENDPOINTS: frozenset = frozenset(
     {
@@ -422,10 +428,9 @@ class AstrBotDashboard:
     @staticmethod
     def _extract_dashboard_jwt(current_request: Request) -> str | None:
         auth_header = current_request.headers.get("Authorization", "").strip()
-        if auth_header.startswith("Bearer "):
-            token = auth_header.removeprefix("Bearer ").strip()
-            if token:
-                return token
+        scheme, credentials = _auth_scheme_and_credentials(auth_header)
+        if scheme == "bearer" and credentials:
+            return credentials
 
         cookie_token = current_request.cookies.get(
             DASHBOARD_JWT_COOKIE_NAME,
