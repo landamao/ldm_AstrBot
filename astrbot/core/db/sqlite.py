@@ -728,6 +728,22 @@ class SQLiteDatabase(BaseDatabase):
                     ),
                 )
 
+    async def delete_platform_message_history_all(
+        self,
+        platform_id,
+        user_id,
+    ) -> None:
+        """Delete all platform message history records for a specific user."""
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                await session.execute(
+                    delete(PlatformMessageHistory).where(
+                        col(PlatformMessageHistory.platform_id) == platform_id,
+                        col(PlatformMessageHistory.user_id) == user_id,
+                    ),
+                )
+
     async def get_platform_message_history(
         self,
         platform_id,

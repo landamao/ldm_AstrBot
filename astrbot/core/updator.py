@@ -85,6 +85,8 @@ class AstrBotUpdator(RepoZipUpdator):
         self._cache_ttl_seconds = int(
             os.environ.get("LDMBOT_UPDATE_CACHE_TTL", "300")
         )
+        # 并发锁：防止 checkUpdate + getReleases 同时调用导致重复拉取和重复日志
+        self._fetch_lock = asyncio.Lock()
 
     def _更新元数据路径(self) -> Path:
         return Path(get_astrbot_data_path()) / "ldm_update_meta.json"
@@ -405,6 +407,29 @@ class AstrBotUpdator(RepoZipUpdator):
         """
         mirror_url = normalize_ldm_mirror(mirror_url)
 
+        # 并发锁：防止 checkUpdate + getReleases 同时调用导致重复拉取和重复日志
+        async with self._fetch_lock:
+            # 拿到锁后再查一次缓存：可能前一个并发请求已经填充了缓存
+            now = time.time()
+            if (
+                not force_refresh
+                and self._releases_cache is not None
+                and now - self._releases_cache_at < self._cache_ttl_seconds
+            ):
+                return list(self._releases_cache)
+
+            return await self._fetch_release_info_inner(
+                url, latest, force_refresh, mirror_url
+            )
+
+    async def _fetch_release_info_inner(
+        self,
+        url: str,
+        latest: bool = True,
+        force_refresh: bool = False,
+        mirror_url: str = "",
+    ) -> list:
+        """实际拉取版本列表（调用方已持有 _fetch_lock）。"""
         # 镜像优先
         if mirror_url:
             now = time.time()
@@ -462,6 +487,7 @@ class AstrBotUpdator(RepoZipUpdator):
             )
             self._releases_cache = ret
             self._releases_cache_at = now
+            logger.info(f"GitHub API 获取到 {len(ret)} 个版本")
             return list(ret)
         except Exception as api_exc:
             logger.warning(f"GitHub Releases API 失败，尝试 Atom/git 回退: {api_exc}")

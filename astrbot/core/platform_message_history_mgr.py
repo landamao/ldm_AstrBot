@@ -132,6 +132,13 @@ class PlatformMessageHistoryManager:
             offset_sec=offset_sec,
         )
 
+    async def delete_all(self, platform_id: str, user_id: str) -> None:
+        """Delete all platform message history records for a specific user."""
+        await self.db.delete_platform_message_history_all(
+            platform_id=platform_id,
+            user_id=user_id,
+        )
+
     async def update(
         self,
         message_id: int,

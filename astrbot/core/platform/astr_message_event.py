@@ -501,6 +501,9 @@ class AstrMessageEvent(abc.ABC):
         try:
             chain = getattr(message, "chain", None) if message is not None else None
             outline = self._outline_chain(chain) if chain else ""
+            # 空消息链不打发送日志（流式输出后基类的空链调用）
+            if not outline:
+                return
             plain = ""
             if message is not None and hasattr(message, "get_plain_text"):
                 plain = (message.get_plain_text() or "").strip()
@@ -508,7 +511,7 @@ class AstrMessageEvent(abc.ABC):
                 "发送消息 - %s/%s: %s",
                 self.get_sender_name() or "-",
                 self.get_sender_id() or "-",
-                outline or "(空)",
+                outline,
             )
             if plain:
                 prev = self.get_extra("_delivered_plain_text", "") or ""

@@ -19,6 +19,15 @@ class FlowCommand:
         umo = event.unified_msg_origin
         参数 = (arg or "").strip().lower()
 
+        # WebChat 平台的流式输出由前端控制，不走会话级覆盖
+        if event.get_platform_name() == "webchat":
+            await event.send(
+                MessageChain().message(
+                    "WebChat 的流式输出开关可在当前页面的设置里实时切换，无需使用指令。"
+                ),
+            )
+            return
+
         if 参数 == "help":
             帮助 = (
                 "流式输出管理命令：\n"

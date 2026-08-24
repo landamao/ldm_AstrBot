@@ -106,6 +106,18 @@ class ConversationCommands:
             [],
         )
 
+        # 清除群聊上下文增强的历史消息
+        # 1. 设置标记，after_message_sent 钩子会清内存中的 raw_records
+        message.set_extra("_clean_group_context_session", True)
+        # 2. 清除数据库中的 platform_message_history
+        try:
+            await self.context.message_history_manager.delete_all(
+                platform_id=message.get_platform_id(),
+                user_id=umo,
+            )
+        except Exception:
+            logger.exception("清除群聊消息历史失败。")
+
         ret = "清除聊天历史成功！"
 
         message.set_extra("_clean_ltm_session", True)

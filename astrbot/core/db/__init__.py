@@ -243,6 +243,15 @@ class BaseDatabase(abc.ABC):
         ...
 
     @abc.abstractmethod
+    async def delete_platform_message_history_all(
+        self,
+        platform_id: str,
+        user_id: str,
+    ) -> None:
+        """Delete all platform message history records for a specific user."""
+        ...
+
+    @abc.abstractmethod
     async def get_platform_message_history(
         self,
         platform_id: str,
