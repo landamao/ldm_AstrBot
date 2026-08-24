@@ -6,6 +6,30 @@
 ---
 
 <details>
+<summary><strong>[4.27.7] — 2026-08-24</strong> — 修复更新后重启二次下载源码、聊天重启指令卡死</summary>
+
+本次为 4.27.6 之上的两项关键修复。修复 WebUI 更新后手动确认重启时误触源码下载，以及聊天 `/restart` 指令因 event bus 自毁死锁导致进程卡死的问题。
+
+### 修复
+
+- **更新后手动确认重启触发二次下载源码**
+  - 问题：关闭 autoReboot 开关后，更新完成弹窗点「立即重启」，会再次从 GitHub/镜像下载完整源码包并应用，而非单纯重启
+  - 根因：`confirmRestartNow()` 调的是 `updatesApi.core()`（更新核心代码 API），而非 `statsApi.restart()`（重启 API），前者走 `POST /updates/core` → `service.update_project()`，会下载源码包
+  - 修复：改调 `statsApi.restart()`，走 `POST /api/v1/system/restart` → `core_lifecycle.restart()`，只重启不下载
+
+- **聊天 `/restart` 指令卡死，平台断开但进程不退出**
+  - 问题：聊天 `/restart` 指令执行后，平台适配器断开连接（收不到新消息），但进程不退出、WebUI 仍可访问，新进程没有启动
+  - 根因：`/restart` 指令在 event_bus 的 pipeline 任务中执行。`core_lifecycle.restart()` 第一行 `await event_bus.shutdown()` 会 cancel 所有 `_pending_tasks` —— 包括当前正在执行 restart 的任务自己。当前任务被 cancel 后，`CancelledError` 传播回 `restart()`，后续的 `platform_manager.terminate()` / `dashboard_shutdown_event.set()` / `_reboot()` 全部跳过 → event bus 停了但平台/WebUI 还活着，新进程没启动
+  - 修复：把终止+重启逻辑包进 `asyncio.create_task(asyncio.shield(_do_restart()))`，放到独立后台 task 执行。调用者（pipeline 任务）可以安全被 cancel，后台 shielded task 不受影响，能完整执行 shutdown → terminate → _reboot 链路
+
+### 说明
+
+- 更新后请**手动重启**一次服务
+- 若面板显示异常，可用顶栏「强制刷新面板」或浏览器 Ctrl+F5
+
+</details>
+
+<details>
 <summary><strong>[4.27.6] — 2026-08-24</strong> — 上传压缩包更新、autoReboot 开关、版本列表下载链接</summary>
 
 本次为 4.27.5 之上的 WebUI 更新功能增强版本。新增上传压缩包一键更新功能（含文件完整性校验和两步危险确认），所有更新路径共用 autoReboot 自动重启开关，版本列表新增下载链接查看；修复 updator 旧版本回写掩盖缺失数据的问题。

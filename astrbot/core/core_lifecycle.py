@@ -446,20 +446,34 @@ class AstrBotCoreLifecycle:
             logger.warning(f"释放数据库引擎失败: {e}")
 
     async def restart(self) -> None:
-        """重启 AstrBot 核心生命周期管理类, 终止各个管理器并重新加载平台实例"""
-        if self.event_bus:
-            await self.event_bus.shutdown()
-        await self.plugin_manager.shutdown()
-        await shutdown_local_booter()
-        await self.provider_manager.terminate()
-        await self.platform_manager.terminate()
-        await self.kb_manager.terminate()
-        self.dashboard_shutdown_event.set()
-        threading.Thread(
-            target=self.astrbot_updator._reboot,
-            name="restart",
-            daemon=True,
-        ).start()
+        """重启 AstrBot 核心生命周期管理类, 终止各个管理器并重新加载平台实例.
+
+        关键: 本方法可能从 event_bus 的 pipeline 任务内被调用 (聊天 /restart 指令).
+        此时 event_bus.shutdown() 会 cancel 所有 _pending_tasks —— 包括当前正在执行
+        restart 的任务自己. 如果直接在当前任务里 await 整条 shutdown 链, 当前任务
+        被 cancel 后后续的 platform_manager.terminate() / dashboard_shutdown_event
+        / _reboot() 全部跳过, 导致进程卡死: event bus 停了但平台/WebUI 还活着, 新
+        进程没启动.
+
+        修复: 把实际的终止+重启逻辑放到一个独立的后台 task 里, 并用 asyncio.shield
+        保护. 调用者 (pipeline 任务) 可以安全被 cancel, 后台 task 不受影响.
+        """
+        async def _do_restart():
+            if self.event_bus:
+                await self.event_bus.shutdown()
+            await self.plugin_manager.shutdown()
+            await shutdown_local_booter()
+            await self.provider_manager.terminate()
+            await self.platform_manager.terminate()
+            await self.kb_manager.terminate()
+            self.dashboard_shutdown_event.set()
+            threading.Thread(
+                target=self.astrbot_updator._reboot,
+                name="restart",
+                daemon=True,
+            ).start()
+
+        asyncio.create_task(asyncio.shield(_do_restart()))
 
     def load_platform(self) -> list[asyncio.Task]:
         """加载平台实例并返回所有平台实例的异步任务列表"""
