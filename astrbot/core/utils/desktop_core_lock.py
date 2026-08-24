@@ -9,7 +9,7 @@ from astrbot.core.utils.runtime_env import is_packaged_desktop_runtime
 
 logger = logging.getLogger("astrbot")
 
-DESKTOP_CORE_LOCK_PATH_ENV = "ASTRBOT_DESKTOP_CORE_LOCK_PATH"
+DESKTOP_CORE_LOCK_PATH_ENV = "LDMBOT_DESKTOP_CORE_LOCK_PATH"
 
 
 def _canonicalize_distribution_name(name: str) -> str:

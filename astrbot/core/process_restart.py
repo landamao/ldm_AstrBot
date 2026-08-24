@@ -71,7 +71,7 @@ def _build_frozen_restart_args() -> list[str]:
     """
     webui_dir = _collect_flag_values(list(sys.argv[1:]), "--webui-dir")
     if not webui_dir:
-        webui_dir = os.environ.get("ASTRBOT_WEBUI_DIR")
+        webui_dir = os.environ.get("LDMBOT_WEBUI_DIR")
     return ["--webui-dir", webui_dir] if webui_dir else []
 
 
@@ -94,7 +94,7 @@ def _build_restart_argv(executable: str) -> list[str]:
     Returns:
         Argument vector for the replacement process.
     """
-    if os.environ.get("ASTRBOT_CLI") == "1":
+    if os.environ.get("LDMBOT_CLI") == "1":
         return [executable, "-m", "astrbot.cli.__main__", *sys.argv[1:]]
     if getattr(sys, "frozen", False):
         return [executable, *_build_frozen_restart_args()]

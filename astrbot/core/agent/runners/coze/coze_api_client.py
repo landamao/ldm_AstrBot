@@ -289,8 +289,8 @@ if __name__ == "__main__":
     import os
 
     async def test_coze_api_client() -> None:
-        api_key = os.getenv("COZE_API_KEY", "")
-        bot_id = os.getenv("COZE_BOT_ID", "")
+        api_key = os.getenv("LDMBOT_COZE_API_KEY", "")
+        bot_id = os.getenv("LDMBOT_COZE_BOT_ID", "")
         client = CozeAPIClient(api_key=api_key)
 
         try:

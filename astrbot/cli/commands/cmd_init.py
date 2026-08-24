@@ -5,7 +5,7 @@ from pathlib import Path
 import click
 from filelock import FileLock, Timeout
 
-DASHBOARD_INITIAL_PASSWORD_ENV = "ASTRBOT_DASHBOARD_INITIAL_PASSWORD"
+DASHBOARD_INITIAL_PASSWORD_ENV = "LDMBOT_DASHBOARD_INITIAL_PASSWORD"
 
 
 async def check_dashboard(astrbot_root: Path) -> None:

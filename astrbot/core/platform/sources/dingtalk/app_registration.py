@@ -20,14 +20,14 @@ class DingtalkAppRegistration:
 
 def dingtalk_registration_base_url() -> str:
     return (
-        os.getenv("DINGTALK_REGISTRATION_BASE_URL", "").strip()
+        os.getenv("LDMBOT_DINGTALK_REGISTRATION_BASE_URL", "").strip()
         or DEFAULT_DINGTALK_REGISTRATION_BASE_URL
     ).rstrip("/")
 
 
 def dingtalk_registration_source() -> str:
     return (
-        os.getenv("DINGTALK_REGISTRATION_SOURCE", "").strip()
+        os.getenv("LDMBOT_DINGTALK_REGISTRATION_SOURCE", "").strip()
         or DEFAULT_DINGTALK_REGISTRATION_SOURCE
     )
 

@@ -7,4 +7,4 @@ DESKTOP_MANAGED_RESTART_MESSAGE = (
 
 
 def is_desktop_managed_backend() -> bool:
-    return os.environ.get("ASTRBOT_DESKTOP_MANAGED") == "1"
+    return os.environ.get("LDMBOT_DESKTOP_MANAGED") == "1"

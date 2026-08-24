@@ -71,8 +71,8 @@ class AstrBotUpdator(RepoZipUpdator):
     def __init__(self, repo_mirror: str = "", verify: str | bool | None = None) -> None:
         super().__init__(repo_mirror, verify=verify)
         self.MAIN_PATH = get_astrbot_path()
-        self.仓库所有者 = os.environ.get("LDM_ASTRBOT_REPO_OWNER", "landamao").strip()
-        self.仓库名 = os.environ.get("LDM_ASTRBOT_REPO_NAME", "ldm_AstrBot").strip()
+        self.仓库所有者 = os.environ.get("LDMBOT_REPO_OWNER", "landamao").strip()
+        self.仓库名 = os.environ.get("LDMBOT_REPO_NAME", "ldm_AstrBot").strip()
         self.ASTRBOT_RELEASE_API = (
             f"https://api.github.com/repos/{self.仓库所有者}/{self.仓库名}/releases"
         )
@@ -83,7 +83,7 @@ class AstrBotUpdator(RepoZipUpdator):
         self._releases_cache: list | None = None
         self._releases_cache_at: float = 0.0
         self._cache_ttl_seconds = int(
-            os.environ.get("LDM_ASTRBOT_UPDATE_CACHE_TTL", "300")
+            os.environ.get("LDMBOT_UPDATE_CACHE_TTL", "300")
         )
 
     def _更新元数据路径(self) -> Path:
@@ -124,10 +124,10 @@ class AstrBotUpdator(RepoZipUpdator):
 
     def _github_token(self) -> str:
         for key in (
-            "LDM_GITHUB_TOKEN",
+            "LDMBOT_GITHUB_TOKEN",
             "GITHUB_TOKEN",
             "GH_TOKEN",
-            "ASTRBOT_GITHUB_TOKEN",
+            "LDMBOT_GITHUB_TOKEN",
         ):
             value = (os.environ.get(key) or "").strip()
             if value:
@@ -543,12 +543,12 @@ class AstrBotUpdator(RepoZipUpdator):
     def _resolve_webui_dir(self) -> str | None:
         """解析当前进程指定的 WebUI 目录。
 
-        来源优先级：命令行 --webui-dir 参数 → ASTRBOT_WEBUI_DIR 环境变量。
+        来源优先级：命令行 --webui-dir 参数 → LDMBOT_WEBUI_DIR 环境变量。
         """
         argv = list(sys.argv[1:])
         webui_dir = self._resolve_webui_dir_arg(argv)
         if not webui_dir:
-            webui_dir = os.environ.get("ASTRBOT_WEBUI_DIR")
+            webui_dir = os.environ.get("LDMBOT_WEBUI_DIR")
         return webui_dir or None
 
     def _build_frozen_reboot_args(self) -> list[str]:
@@ -568,7 +568,7 @@ class AstrBotUpdator(RepoZipUpdator):
                 os.environ.pop(key, None)
 
     def _build_reboot_argv(self, executable: str) -> list[str]:
-        if os.environ.get("ASTRBOT_CLI") == "1":
+        if os.environ.get("LDMBOT_CLI") == "1":
             args = sys.argv[1:]
             return [executable, "-m", "astrbot.cli.__main__", *args]
         if getattr(sys, "frozen", False):
@@ -799,7 +799,7 @@ class AstrBotUpdator(RepoZipUpdator):
 
         mirror_url 非空时优先从 ldm 镜像服务器下载（直连国内服务器，不走 proxy）。
         """
-        if os.environ.get("ASTRBOT_CLI") or os.environ.get("ASTRBOT_LAUNCHER"):
+        if os.environ.get("LDMBOT_CLI") or os.environ.get("LDMBOT_LAUNCHER"):
             raise Exception(
                 "当前以 CLI/Launcher 方式运行，请改用源码目录方式更新 ldm_AstrBot。"
             )
@@ -989,7 +989,7 @@ class AstrBotUpdator(RepoZipUpdator):
     def _应用webui(self, webui_dist: Path | None) -> bool:
         """覆盖 WebUI 目录。
 
-        目标目录：显式指定了 --webui-dir（或 ASTRBOT_WEBUI_DIR）且目录存在时
+        目标目录：显式指定了 --webui-dir（或 LDMBOT_WEBUI_DIR）且目录存在时
         覆盖到该目录；否则回退覆盖默认 data/dist。不动 data 下其它内容。
         """
         if webui_dist is None:

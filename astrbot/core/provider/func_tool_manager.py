@@ -29,8 +29,8 @@ DEFAULT_MCP_CONFIG = {"mcpServers": {}}
 
 DEFAULT_MCP_INIT_TIMEOUT_SECONDS = 180.0
 DEFAULT_ENABLE_MCP_TIMEOUT_SECONDS = 180.0
-MCP_INIT_TIMEOUT_ENV = "ASTRBOT_MCP_INIT_TIMEOUT"
-ENABLE_MCP_TIMEOUT_ENV = "ASTRBOT_MCP_ENABLE_TIMEOUT"
+MCP_INIT_TIMEOUT_ENV = "LDMBOT_MCP_INIT_TIMEOUT"
+ENABLE_MCP_TIMEOUT_ENV = "LDMBOT_MCP_ENABLE_TIMEOUT"
 MAX_MCP_TIMEOUT_SECONDS = 300.0
 
 
@@ -559,8 +559,8 @@ class FunctionToolManager:
         ```
 
         Timeout behavior:
-        - 初始化超时使用环境变量 ASTRBOT_MCP_INIT_TIMEOUT 或默认值。
-        - 动态启用超时使用 ASTRBOT_MCP_ENABLE_TIMEOUT（独立于初始化超时）。
+        - 初始化超时使用环境变量 LDMBOT_MCP_INIT_TIMEOUT 或默认值。
+        - 动态启用超时使用 LDMBOT_MCP_ENABLE_TIMEOUT（独立于初始化超时）。
         """
         data_dir = get_astrbot_data_path()
 
@@ -896,7 +896,7 @@ class FunctionToolManager:
             config: Configuration for the MCP server.
             shutdown_event: Event to signal when the MCP client should shut down.
             timeout: Timeout in seconds for initialization.
-                Uses ASTRBOT_MCP_ENABLE_TIMEOUT by default (separate from init timeout).
+                Uses LDMBOT_MCP_ENABLE_TIMEOUT by default (separate from init timeout).
 
         Raises:
             MCPInitTimeoutError: If initialization does not complete within timeout.

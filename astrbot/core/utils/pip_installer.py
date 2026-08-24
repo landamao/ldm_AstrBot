@@ -91,7 +91,7 @@ def _get_pip_main():
                 "pip module is unavailable "
                 f"(sys.executable={sys.executable}, "
                 f"frozen={getattr(sys, 'frozen', False)}, "
-                f"ASTRBOT_DESKTOP_CLIENT={os.environ.get('ASTRBOT_DESKTOP_CLIENT')})"
+                f"LDMBOT_DESKTOP_CLIENT={os.environ.get('LDMBOT_DESKTOP_CLIENT')})"
             ) from exc
 
     return pip_main

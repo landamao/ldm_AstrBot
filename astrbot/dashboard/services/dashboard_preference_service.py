@@ -13,6 +13,7 @@ SIDEBAR_CUSTOMIZATION_KEY = "dashboard_sidebar_customization"
 THEME_COLORS_KEY = "dashboard_theme_colors"
 WALLPAPER_KEY = "dashboard_wallpaper"
 LOGO_KEY = "dashboard_logo"
+LOGIN_WALLPAPER_KEY = "dashboard_login_wallpaper"
 
 # 壁纸透明度范围（10-100，100=完全不透明）
 WALLPAPER_OPACITY_MIN = 10
@@ -502,4 +503,83 @@ class DashboardPreferenceService:
             "theme_colors": await self.get_theme_colors(),
             "wallpaper": await self.get_wallpaper(),
             "logo": await self.get_logo(),
+            "login_wallpaper": await self.get_login_wallpaper(),
         }
+
+    # ---- 登录页独立壁纸 ----
+
+    @classmethod
+    def normalize_login_wallpaper(cls, value: object) -> dict[str, object] | None:
+        """规范化登录页壁纸设置；None 表示未设置（使用默认渐变+光斑效果）。
+
+        字段：{landscape, portrait, mode, cardBlur}
+        - landscape/portrait: {"url": 地址} 或 None
+        - mode: separate / portrait_use_landscape / landscape_use_portrait
+        - cardBlur: 登录框背景模糊度 0-40（px，0=无模糊，默认24）
+
+        与主壁纸结构一致但独立存储，不含 opacity/panelOpacity/enabled。
+        """
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            return None
+        if value.get("reset") is True or value.get("clear") is True:
+            return None
+
+        card_blur = _clamp_number(
+            value.get("cardBlur", value.get("card_blur", 24)),
+            24,
+            0,
+            40,
+        )
+
+        def _slot(raw: object) -> dict[str, str] | None:
+            if not isinstance(raw, dict):
+                return None
+            url = _clean_wallpaper_url(raw.get("url", ""))
+            return {"url": url} if url else None
+
+        landscape = _slot(value.get("landscape"))
+        portrait = _slot(value.get("portrait"))
+
+        mode = value.get("mode", WALLPAPER_MODE_SEPARATE)
+        if mode not in WALLPAPER_MODES:
+            mode = WALLPAPER_MODE_SEPARATE
+
+        if (
+            landscape is None
+            and portrait is None
+            and card_blur == 24
+        ):
+            return None
+
+        result: dict[str, object] = {}
+        if landscape is not None:
+            result["landscape"] = landscape
+        if portrait is not None:
+            result["portrait"] = portrait
+        if mode != WALLPAPER_MODE_SEPARATE:
+            result["mode"] = mode
+        if card_blur != 24:
+            result["cardBlur"] = card_blur
+        return result or None
+
+    async def get_login_wallpaper(self) -> dict[str, object] | None:
+        raw = await sp.global_get(LOGIN_WALLPAPER_KEY, None)
+        return self.normalize_login_wallpaper(raw)
+
+    async def set_login_wallpaper(self, data: object) -> dict[str, object] | None:
+        normalized = self.normalize_login_wallpaper(data)
+        old = await self.get_login_wallpaper()
+        # 换壁纸/清除时，删除旧的横竖上传文件（不误删 http 外链）
+        if old:
+            old_urls = self._collect_wallpaper_urls(old)
+            new_urls = self._collect_wallpaper_urls(normalized)
+            for old_url in old_urls:
+                if old_url not in new_urls:
+                    self.delete_uploaded_wallpaper(old_url)
+        if normalized is None:
+            await sp.global_remove(LOGIN_WALLPAPER_KEY)
+            return None
+        await sp.global_put(LOGIN_WALLPAPER_KEY, normalized)
+        return normalized

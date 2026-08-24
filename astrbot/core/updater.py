@@ -91,7 +91,7 @@ class AstrBotUpdater(_RepoZipUpdater):
             return None
 
         base_url = os.environ.get(
-            "ASTRBOT_CORE_PACKAGE_BASE_URL",
+            "LDMBOT_CORE_PACKAGE_BASE_URL",
             self._core_package_base_url,
         ).strip()
         if not base_url:
@@ -403,7 +403,7 @@ class AstrBotUpdater(_RepoZipUpdater):
 
         file_url = None
 
-        if os.environ.get("ASTRBOT_CLI") or os.environ.get("ASTRBOT_LAUNCHER"):
+        if os.environ.get("LDMBOT_CLI") or os.environ.get("LDMBOT_LAUNCHER"):
             raise Exception(
                 "Error: You are running AstrBot via CLI, please use `pip` or `uv tool upgrade` to update AstrBot."
             )  # 避免版本管理混乱

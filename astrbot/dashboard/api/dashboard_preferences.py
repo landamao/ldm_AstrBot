@@ -144,6 +144,26 @@ async def get_wallpaper_file(
     )
 
 
+@router.get("/ui-preferences/login-wallpaper")
+async def get_login_wallpaper_preference(
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    """获取登录页壁纸设置（公开接口，无需登录，供登录页读取）。"""
+    return ok({"login_wallpaper": await service.get_login_wallpaper()})
+
+
+@router.put("/ui-preferences/login-wallpaper")
+async def put_login_wallpaper_preference(
+    request: Request,
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    body = await _json_or_empty(request)
+    payload = body.get("login_wallpaper", body)
+    login_wallpaper = await service.set_login_wallpaper(payload)
+    return ok({"login_wallpaper": login_wallpaper}, message="登录页壁纸设置已保存")
+
+
 @router.get("/ui-preferences/logo")
 async def get_logo_preference(
     _username: str = Depends(require_dashboard_user),

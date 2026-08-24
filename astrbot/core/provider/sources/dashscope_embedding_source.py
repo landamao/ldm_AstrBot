@@ -33,7 +33,7 @@ class DashScopeEmbeddingProvider(EmbeddingProvider):
         self.provider_config = provider_config
 
         self.api_key = provider_config.get("embedding_api_key") or os.getenv(
-            "DASHSCOPE_API_KEY", ""
+            "LDMBOT_DASHSCOPE_API_KEY", ""
         )
         if not self.api_key:
             raise ValueError("阿里云百炼(DashScope) Embedding API Key 不能为空。")

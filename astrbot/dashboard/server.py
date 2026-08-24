@@ -272,13 +272,11 @@ class AstrBotDashboard:
             "/api/auth/logout",
             "/api/auth/setup-status",
             "/api/auth/setup",
-            "/api/stat/versions",
         }
         allowed_endpoint_prefixes = [
             "/api/file",
             "/api/v1/files/tokens",
             "/api/platform/webhook",
-            "/api/stat/start-time",
             # legacy 备份下载：用一次性 ticket query 鉴权，不旁路到无鉴权
             # （路由内校验 ticket；无 ticket 时仍走 require_dashboard_user）
             "/api/backup/download",
@@ -367,7 +365,7 @@ class AstrBotDashboard:
         path: str,
     ) -> JSONResponse | None:
         if (
-            os.environ.get("ASTRBOT_TEST_MODE") != "true"
+            os.environ.get("LDMBOT_TEST_MODE") != "true"
             and path in _RATE_LIMITED_ENDPOINTS
         ):
             rl_config = self.config.get("dashboard", {}).get("auth_rate_limit", {})
@@ -531,18 +529,15 @@ class AstrBotDashboard:
         ssl_config: dict,
     ) -> tuple[bool, dict[str, str]]:
         cert_file = (
-            os.environ.get("DASHBOARD_SSL_CERT")
-            or os.environ.get("ASTRBOT_DASHBOARD_SSL_CERT")
+            os.environ.get("LDMBOT_DASHBOARD_SSL_CERT")
             or ssl_config.get("cert_file", "")
         )
         key_file = (
-            os.environ.get("DASHBOARD_SSL_KEY")
-            or os.environ.get("ASTRBOT_DASHBOARD_SSL_KEY")
+            os.environ.get("LDMBOT_DASHBOARD_SSL_KEY")
             or ssl_config.get("key_file", "")
         )
         ca_certs = (
-            os.environ.get("DASHBOARD_SSL_CA_CERTS")
-            or os.environ.get("ASTRBOT_DASHBOARD_SSL_CA_CERTS")
+            os.environ.get("LDMBOT_DASHBOARD_SSL_CA_CERTS")
             or ssl_config.get("ca_certs", "")
         )
 
@@ -585,13 +580,11 @@ class AstrBotDashboard:
         ip_addr = []
         dashboard_config = self.core_lifecycle.astrbot_config.get("dashboard", {})
         port = (
-            os.environ.get("DASHBOARD_PORT")
-            or os.environ.get("ASTRBOT_DASHBOARD_PORT")
+            os.environ.get("LDMBOT_DASHBOARD_PORT")
             or dashboard_config.get("port", 6185)
         )
         host = (
-            os.environ.get("DASHBOARD_HOST")
-            or os.environ.get("ASTRBOT_DASHBOARD_HOST")
+            os.environ.get("LDMBOT_DASHBOARD_HOST")
             or dashboard_config.get("host", "0.0.0.0")
         )
         enable = dashboard_config.get("enable", True)
@@ -599,8 +592,7 @@ class AstrBotDashboard:
         if not isinstance(ssl_config, dict):
             ssl_config = {}
         ssl_enable = _parse_env_bool(
-            os.environ.get("DASHBOARD_SSL_ENABLE")
-            or os.environ.get("ASTRBOT_DASHBOARD_SSL_ENABLE"),
+            os.environ.get("LDMBOT_DASHBOARD_SSL_ENABLE"),
             bool(ssl_config.get("enable", False)),
         )
         resolved_ssl_config: dict[str, str] = {}

@@ -437,7 +437,7 @@ class PluginPageService:
         }
 
         csp = "object-src 'none'; base-uri 'self'"
-        if os.environ.get("ASTRBOT_LAUNCHER") not in ("1", "true"):
+        if os.environ.get("LDMBOT_LAUNCHER") not in ("1", "true"):
             headers["X-Frame-Options"] = "SAMEORIGIN"
             csp = f"frame-ancestors 'self'; {csp}"
         headers["Content-Security-Policy"] = csp

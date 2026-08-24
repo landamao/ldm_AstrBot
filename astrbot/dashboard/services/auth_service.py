@@ -77,8 +77,7 @@ OPEN_API_SCOPE_INCLUDES = {
 
 DASHBOARD_JWT_COOKIE_NAME = "astrbot_dashboard_jwt"
 DASHBOARD_JWT_COOKIE_MAX_AGE = 7 * 24 * 60 * 60
-SKIP_DEFAULT_PASSWORD_AUTH_ENV = "ASTRBOT_DASHBOARD_SKIP_DEFAULT_PASSWORD_AUTH"
-SKIP_DEFAULT_PASSWORD_AUTH_ENV_OLD = "DASHBOARD_SKIP_DEFAULT_PASSWORD_AUTH"
+SKIP_DEFAULT_PASSWORD_AUTH_ENV = "LDMBOT_DASHBOARD_SKIP_DEFAULT_PASSWORD_AUTH"
 LOCAL_DASHBOARD_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_PASSWORD_LOGIN_FAILURE_MESSAGE = (
     "Login failed. If this is your first time using AstrBot, the old default "
@@ -459,8 +458,8 @@ class AuthService:
         if not self.env_flag_enabled(SKIP_DEFAULT_PASSWORD_AUTH_ENV):
             return False
         host = (
-            os.environ.get("DASHBOARD_HOST")
-            or os.environ.get("ASTRBOT_DASHBOARD_HOST")
+            os.environ.get("LDMBOT_DASHBOARD_HOST")
+            or os.environ.get("LDMBOT_DASHBOARD_HOST")
             or self.config["dashboard"].get("host", "")
         )
         return str(host).strip().lower() in LOCAL_DASHBOARD_HOSTS
@@ -468,8 +467,6 @@ class AuthService:
     @staticmethod
     def env_flag_enabled(name: str) -> bool:
         value = os.environ.get(name)
-        if value is None and name == SKIP_DEFAULT_PASSWORD_AUTH_ENV:
-            value = os.environ.get(SKIP_DEFAULT_PASSWORD_AUTH_ENV_OLD)
         return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod

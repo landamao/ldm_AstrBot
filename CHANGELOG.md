@@ -6,6 +6,68 @@
 ---
 
 <details>
+<summary><strong>[4.27.5] — 2026-08-24</strong> — 环境变量统一 LDMBOT 前缀、登录页独立壁纸、公开接口安全收紧、--help 秒出、--reset-password 交互式</summary>
+
+本次为 4.27.4 之上的体验与安全改进版本。环境变量全面统一为 LDMBOT_ 前缀并新增 --data-dir / LDMBOT_DATA_DIR 直指定 data 目录；登录页支持独立壁纸（横竖屏+模糊度+跨设备生效）；公开接口收紧为需要登录；--help 提前拦截跳过重模块加载；--reset-password 改为交互式直接写配置退出；修复终端光标丢失和 Ctrl+C 被吞的问题。
+
+### 新增
+
+- **环境变量统一 LDMBOT_ 前缀**
+  - 34 个文件、106 处替换：ASTRBOT_ / LDM_ASTRBOT_ / DINGTALK_ / DASHSCOPE_ / COZE_ / BAY_DATA_DIR / DEMO_MODE 等全部统一为 LDMBOT_ 前缀；删除 DASHBOARD_SKIP_DEFAULT_PASSWORD_AUTH 旧名兼容常量和 env_flag_enabled 旧名回退逻辑；VITE_ASTRBOT_RELEASE_BASE_URL → VITE_LDMBOT_RELEASE_BASE_URL（前端）
+  - 不动的：TERM / NO_COLOR（标准 Unix 变量）、ASTRBOT_CONFIG_PATH / ASTRBOT_RELEASE_API / ASTRBOT_T2I_DEFAULT_ENDPOINT（Python 变量名/常量，非环境变量）
+
+- **LDMBOT_DATA_DIR 环境变量 + --data-dir 启动参数**
+  - 新增 `LDMBOT_DATA_DIR` 环境变量直接指定 data 目录路径，优先级高于 `LDMBOT_ROOT`
+  - 新增 `--data-dir <路径>` 启动参数，在核心模块 import 之前设置环境变量
+  - `astrbot_path.py::get_astrbot_data_path()` 优先读 LDMBOT_DATA_DIR，其次 LDMBOT_ROOT/data，最后 cwd/data
+
+- **--reset-password 交互式重置**
+  - `--reset-password`（中文别名 `--重置密码`）不再设环境变量走启动流程，改为交互式终端提示输入新密码（留空用默认 "ldm"），非交互式（管道/脚本/Docker）直接用 "ldm"
+  - 直接读写 cmd_config.json（PBKDF2 + MD5 哈希 + password_change_required），写完打印密码、提示重启、退出，不播横幅不启动服务
+  - main.py 和 cmd_run.py（click）两处入口同步支持
+
+- **--help 提前拦截加速**
+  - 在 `import runtime_bootstrap` 之前检测 -h/--help，直接构造 argparse 打印帮助退出
+  - 帮助信息含启动参数 + 全部环境变量（按功能分组）+ 用法示例
+  - `python main.py --help` 从数秒降到 0.07 秒，不加载任何 astrbot 模块
+
+- **登录页独立壁纸**
+  - 登录页支持自定义壁纸，独立于主界面壁纸，支持横屏/竖屏分别设置
+  - 使用方式下拉选择（横竖各用各的 / 竖屏用横屏 / 横屏用竖屏）
+  - 登录框模糊度滑块（0-40px，默认 24px），实时预览
+  - 设置存服务端（`dashboard_login_wallpaper` key），跨设备生效；公开 GET 接口供登录页无需登录读取
+  - 壁纸生效时隐藏渐变背景和动态光斑，登录框透明 + backdrop-filter:blur 产生磨砂效果
+
+### 体验优化
+
+- **欢迎页表情**：问候语表情从 😊 改为 ♡（凌晨 0-5 点仍为 😴，春节当天仍为 🧨）
+- **弹窗关闭按钮**：ProviderConfigDialog 和 AddNewPlatform 两个弹窗新增右上角关闭按钮（mdi-close），手机小屏全屏时可关闭
+- **登录成功跳欢迎页**：登录成功后无论 onboarding 是否完成都跳转 /welcome（原来 onboarding 完成时跳 /dashboard/default）
+
+### 修复
+
+- **公开接口安全收紧**
+  - `/api/stat/versions` 和 `/api/stat/start-time`（新版+legacy 共 4 个路由）从无需登录改为需要登录
+  - 中间件白名单同步移除这两个端点；前端 webuiVersionRefresh.ts 未登录时跳过版本检查
+  - 登录页不再泄露版本号和启动时间
+
+- **终端光标丢失**
+  - 启动横幅 daemon 线程用 `\033[?25l` 隐藏光标，程序退出时 daemon 被强杀、finally 来不及恢复 → 光标永久消失
+  - 修复：main.py 最开头注册 atexit + SIGTERM 信号处理器，程序退出（正常/Ctrl+C/kill）时兜底发出 `\033[?25h` 恢复光标
+
+- **--reset-password Ctrl+C 被吞**
+  - `_prompt_and_set_reset_password()` 里 `try/except (EOFError, KeyboardInterrupt): pass` 捕获了中断，用户按 Ctrl+C 退不掉
+  - 修复：删掉 KeyboardInterrupt 捕获，Ctrl+C 直接退出重置流程（EOFError 单独处理）
+
+### 说明
+
+- 更新后请**手动重启**一次服务
+- 若面板显示异常，可用顶栏「强制刷新面板」或浏览器 Ctrl+F5
+- 建议验证：`python main.py --help` 秒出；设置 → 外观 → 登录页壁纸配置后退出登录查看效果；`python main.py --reset-password` 交互式重置
+
+</details>
+
+<details>
 <summary><strong>[4.27.4] — 2026-08-24</strong> — 跟随官方 v4.27.4 全量合入、镜像服务器更新源、人格工具分组弹窗、Shell 会话、群消息历史</summary>
 
 大版本更新。跟随官方 AstrBot v4.27.4（从 v4.26.5–4.26.7 基线跨 6 个 tag 全量合入），同时新增 ldm 镜像服务器更新功能、人格编辑页工具/Skills 分组弹窗、设置页缓存卡片样式统一等多项改进。
@@ -212,7 +274,7 @@
   - 原因：按钮原用主题变量，若浏览器/服务端保存过旧主题色（换肤前紫色系），按钮会显示成紫色而非粉色；现在无论主题色如何覆盖，登录按钮始终是粉色
 - **更新器支持 `--webui-dir`**（修复「传 --webui-dir 启动后，更新 WebUI 仍覆盖默认 data/dist」）
   - 根因：`updator.py` 的 `_应用webui()` 目标目录写死为 `data/dist`，完全不看启动参数；而启动时 `main.py:check_dashboard_files()` 与 `server.py` 都优先用 `--webui-dir` 服务 → 运行时服务和更新目标是两个地方，更新完 WebUI 不生效
-  - 新增 `_resolve_webui_dir()` 解析当前进程的 `--webui-dir`（来源优先级：命令行参数 → `ASTRBOT_WEBUI_DIR` 环境变量，与重启参数保留 `_build_frozen_reboot_args` 同一套来源）；`_应用webui()` 应用更新前先解析：指定且目录存在 → 覆盖到该目录；指定但不存在 → 警告并回退默认 data/dist；未指定 → 默认（行为不变）
+  - 新增 `_resolve_webui_dir()` 解析当前进程的 `--webui-dir`（来源优先级：命令行参数 → `LDMBOT_WEBUI_DIR` 环境变量，与重启参数保留 `_build_frozen_reboot_args` 同一套来源）；`_应用webui()` 应用更新前先解析：指定且目录存在 → 覆盖到该目录；指定但不存在 → 警告并回退默认 data/dist；未指定 → 默认（行为不变）
   - version 兜底逻辑（新包缺 assets/version 时回写旧 version）对自定义目录同样生效；完整更新（`apply_update_package`）与仅更新 WebUI（`apply_webui_only_from_package` / 面板「更新面板」）两条路径都覆盖
   - 重启后 `_build_frozen_reboot_args` 会继续把 `--webui-dir` 带给新进程，更新目标不会丢
 - **修复「点外观后设置页按钮点不了」**：预览提示层（wallpaper-preview__empty）绝对定位逃逸到 .v-main 盖住全屏，已移入预览舞台内部并给容器加 position: relative
@@ -801,7 +863,7 @@
 - **启动横幅动画真正零阻塞**
   - 动画与程序加载并行，主线程不再硬等动画播完
   - 动画期间终端日志先缓冲，结束后再一次性刷出，避免与横幅抢终端
-  - 非交互终端、`--help`、或设置 `ASTRBOT_NO_BANNER` 时仍自动跳过
+  - 非交互终端、`--help`、或设置 `LDMBOT_NO_BANNER` 时仍自动跳过
 
 - **`/plugin` 指令体验优化**
   - 列表：启用 / 未启用分组；字段分行（插件名 / 显示名 / 作者 / 简介）；空字段不显示
@@ -909,7 +971,7 @@
 - **启动横幅动画**
   - 终端启动时后台播放彩色 ASCII 艺术字动画，不阻塞主程序加载
   - 动画结束后再开始打启动日志，避免光标/输出互相抢占
-  - 非交互终端、`--help`、或设置 `ASTRBOT_NO_BANNER` 时自动跳过
+  - 非交互终端、`--help`、或设置 `LDMBOT_NO_BANNER` 时自动跳过
 
 - **工具状态文案**
   - 流式工具状态提示：`🔨 调用工具` → `🔨 使用工具`
@@ -1586,7 +1648,7 @@
   - 安装方式：下载源码 zip → 校验 → 解压 → 覆盖安装目录
   - WebUI：从包内 `dashboard/dist` 或 `data/dist` 同步到本地 `data/dist`
   - 保护运行态：不整目录覆盖 `data` / `.venv` / `venv` / `node_modules` / `.git` 等；`data` 仅同步 `data/dist`
-- **GitHub 限流兜底**：REST API 失败时依次回退 Atom 源、`git ls-remote`；支持 `LDM_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` / `ASTRBOT_GITHUB_TOKEN` 提高配额；结果缓存（默认 300s，可用 `LDM_ASTRBOT_UPDATE_CACHE_TTL`）
+- **GitHub 限流兜底**：REST API 失败时依次回退 Atom 源、`git ls-remote`；支持 `LDMBOT_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` / `LDMBOT_GITHUB_TOKEN` 提高配额；结果缓存（默认 300s，可用 `LDMBOT_UPDATE_CACHE_TTL`）
 - **tag 排序**：支持 `v4.26.5-v2` / `v4.26.5-v3` 这类后缀，保证 `-v3 > -v2 > 基线 tag`
 - **欢迎页「反馈交流」**：替换原爱发电入口
   - QQ 群：`1103659691` → https://qm.qq.com/q/c7Nc3Tl1Je
@@ -1602,10 +1664,10 @@
 
 | 变量 | 含义 | 默认 |
 |------|------|------|
-| `LDM_ASTRBOT_REPO_OWNER` | 更新仓库所有者 | `landamao` |
-| `LDM_ASTRBOT_REPO_NAME` | 更新仓库名 | `ldm_AstrBot` |
-| `LDM_ASTRBOT_UPDATE_CACHE_TTL` | 远端信息缓存秒数 | `300` |
-| `LDM_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` / `ASTRBOT_GITHUB_TOKEN` | GitHub API Token（提高限额） | 无 |
+| `LDMBOT_REPO_OWNER` | 更新仓库所有者 | `landamao` |
+| `LDMBOT_REPO_NAME` | 更新仓库名 | `ldm_AstrBot` |
+| `LDMBOT_UPDATE_CACHE_TTL` | 远端信息缓存秒数 | `300` |
+| `LDMBOT_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` / `LDMBOT_GITHUB_TOKEN` | GitHub API Token（提高限额） | 无 |
 
 ### 相关文件
 

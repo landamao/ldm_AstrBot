@@ -3,14 +3,14 @@
 Project path:
 - Fixed to the source tree location.
 
-Root path:
-- Defaults to the current working directory.
-- Can be overridden with the ``ASTRBOT_ROOT`` environment variable.
+Data path:
+- Can be overridden with the ``LDMBOT_DATA_DIR`` environment variable.
 
-Data subdirectories:
-- Most runtime data lives under ``<root>/data``.
-- A few tool-runtime files intentionally live under the system temporary
-  directory as ``.astrbot``.
+Root path:
+- Derived from the data path's parent.
+- Can be overridden with the ``LDMBOT_ROOT`` environment variable
+  (data directory = ``<root>/data``).
+- ``LDMBOT_DATA_DIR`` takes precedence over ``LDMBOT_ROOT``.
 """
 
 import os
@@ -26,18 +26,23 @@ def get_astrbot_path() -> str:
     )
 
 
+def get_astrbot_data_path() -> str:
+    """Return the AstrBot data directory path.
+
+    Priority: LDMBOT_DATA_DIR env var > <LDMBOT_ROOT>/data > <cwd>/data.
+    """
+    if data_dir := os.environ.get("LDMBOT_DATA_DIR"):
+        return os.path.realpath(data_dir)
+    return os.path.realpath(os.path.join(get_astrbot_root(), "data"))
+
+
 def get_astrbot_root() -> str:
-    """Return the AstrBot root directory."""
-    if path := os.environ.get("ASTRBOT_ROOT"):
+    """Return the AstrBot root directory (parent of data)."""
+    if path := os.environ.get("LDMBOT_ROOT"):
         return os.path.realpath(path)
     if is_packaged_desktop_runtime():
         return os.path.realpath(os.path.join(os.path.expanduser("~"), ".astrbot"))
     return os.path.realpath(os.getcwd())
-
-
-def get_astrbot_data_path() -> str:
-    """Return the AstrBot data directory path."""
-    return os.path.realpath(os.path.join(get_astrbot_root(), "data"))
 
 
 def get_astrbot_config_path() -> str:

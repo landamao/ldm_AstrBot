@@ -21,7 +21,7 @@ CACHED_SIZE = 500
 # 启动横幅期间控制台缓冲，防止极端情况下内存膨胀
 _CONSOLE_BUFFER_MAX = 2000
 # main 启动横幅时置位；LogManager 初始化时读取，避免 import 窗口日志打穿动画
-_CONSOLE_PAUSE_ENV = "ASTRBOT_PAUSE_CONSOLE"
+_CONSOLE_PAUSE_ENV = "LDMBOT_PAUSE_CONSOLE"
 # 插件日志级别系统 (#9342)
 PLUGIN_LOGGER_PREFIX = "astrbot.plugin."
 PLUGIN_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")

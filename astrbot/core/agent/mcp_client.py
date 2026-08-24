@@ -92,7 +92,7 @@ _DENIED_DOCKER_ARGS = frozenset(
         "--ipc=host",
     }
 )
-_STDIO_ALLOWLIST_ENV = "ASTRBOT_MCP_STDIO_ALLOWED_COMMANDS"
+_STDIO_ALLOWLIST_ENV = "LDMBOT_MCP_STDIO_ALLOWED_COMMANDS"
 
 try:
     import anyio

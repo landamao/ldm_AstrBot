@@ -57,7 +57,7 @@ from .updator import PLUGIN_METADATA_FILENAMES, PluginUpdator
 try:
     from watchfiles import PythonFilter, awatch
 except ImportError:
-    if os.getenv("ASTRBOT_RELOAD", "0") == "1":
+    if os.getenv("LDMBOT_RELOAD", "0") == "1":
         logger.warning("未安装 watchfiles，无法实现插件的热重载。")
 
 
@@ -208,7 +208,7 @@ class PluginManager:
 
         self.failed_plugin_info = ""
         self._watcher_task: asyncio.Task | None = None
-        if os.getenv("ASTRBOT_RELOAD", "0") == "1":
+        if os.getenv("LDMBOT_RELOAD", "0") == "1":
             self._watcher_task = asyncio.create_task(
                 self._watch_plugins_changes(),
                 name="plugin_file_watcher",

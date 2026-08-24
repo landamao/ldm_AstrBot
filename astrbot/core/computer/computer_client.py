@@ -136,7 +136,7 @@ def _discover_bay_credentials(endpoint: str) -> str:
     """Try to auto-discover Bay API key from credentials.json.
 
     Search order:
-    1. BAY_DATA_DIR env var
+    1. LDMBOT_BAY_DATA_DIR env var
     2. Mono-repo relative path: ../pkgs/bay/ (dev layout)
     3. Current working directory
 
@@ -145,8 +145,8 @@ def _discover_bay_credentials(endpoint: str) -> str:
     """
     candidates: list[Path] = []
 
-    # 1. BAY_DATA_DIR env var
-    bay_data_dir = os.environ.get("BAY_DATA_DIR")
+    # 1. LDMBOT_BAY_DATA_DIR env var
+    bay_data_dir = os.environ.get("LDMBOT_BAY_DATA_DIR")
     if bay_data_dir:
         candidates.append(Path(bay_data_dir) / "credentials.json")
 

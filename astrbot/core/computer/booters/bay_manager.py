@@ -95,7 +95,7 @@ class BayContainerManager:
             "Env": [
                 "BAY_SERVER__HOST=0.0.0.0",
                 f"BAY_SERVER__PORT={BAY_PORT}",
-                "BAY_DATA_DIR=/app/data",
+                "LDMBOT_BAY_DATA_DIR=/app/data",
                 # allow_anonymous=false → auto-provisions API key
                 "BAY_SECURITY__ALLOW_ANONYMOUS=false",
             ],

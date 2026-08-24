@@ -26,7 +26,7 @@ class Metric:
     @staticmethod
     def _is_disabled() -> bool:
         """检查是否禁用指标上传（配置或环境变量）"""
-        if os.environ.get("ASTRBOT_DISABLE_METRICS", "0") == "1":
+        if os.environ.get("LDMBOT_DISABLE_METRICS", "0") == "1":
             return True
         try:
             from astrbot.core import astrbot_config

@@ -154,7 +154,7 @@ class UpdateService:
                     status="success",
                     message=(
                         f"暂时无法检查更新：{exc}。"
-                        "可稍后重试，或设置 GITHUB_TOKEN/LDM_GITHUB_TOKEN 提高限额。"
+                        "可稍后重试，或设置 GITHUB_TOKEN/LDMBOT_GITHUB_TOKEN 提高限额。"
                     ),
                     data={
                         "version": f"v{VERSION}",

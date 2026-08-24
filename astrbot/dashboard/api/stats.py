@@ -77,6 +77,7 @@ async def get_version(
 @router.get("/stats/versions")
 async def get_public_versions(
     request: Request,
+    _auth: AuthContext = Depends(require_system_scope),
     service: StatService = Depends(get_service),
 ):
     return ok(
@@ -123,6 +124,7 @@ async def get_changelog(
 
 @router.get("/stats/start-time")
 async def get_start_time(
+    _auth: AuthContext = Depends(require_system_scope),
     service: StatService = Depends(get_service),
 ):
     return await _run(service.get_start_time)
@@ -182,6 +184,7 @@ async def get_dashboard_version(
 @legacy_router.get("/versions")
 async def get_dashboard_public_versions(
     request: Request,
+    _username: str = Depends(require_dashboard_user),
     service: StatService = Depends(get_service),
 ):
     return ok(
@@ -193,6 +196,7 @@ async def get_dashboard_public_versions(
 
 @legacy_router.get("/start-time")
 async def get_dashboard_start_time(
+    _username: str = Depends(require_dashboard_user),
     service: StatService = Depends(get_service),
 ):
     return await _run(service.get_start_time)

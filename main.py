@@ -1,4 +1,37 @@
+print("正在加载...")
+import atexit
+import signal
 import os, sys, time, random, threading
+
+# ========== 终端光标兜底恢复 ==========
+# 横幅动画在 daemon 线程里隐藏光标（\033[?25l），程序退出时 daemon 线程被强杀，
+# finally 里的 \033[?25h 可能来不及执行，导致终端光标永久消失。
+# 注册 atexit + signal 兜底，确保无论怎么退出都恢复光标。
+_ORIG_CURSOR_HANDLER = None
+
+
+def _restore_terminal_cursor(*_args: object) -> None:
+    try:
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+atexit.register(_restore_terminal_cursor)
+
+
+def _install_cursor_signal_handler() -> None:
+    global _ORIG_CURSOR_HANDLER
+    for sig in (signal.SIGTERM,):
+        try:
+            _ORIG_CURSOR_HANDLER = signal.getsignal(sig)
+            signal.signal(sig, _restore_terminal_cursor)
+        except (ValueError, OSError):
+            pass  # 非主线程或信号不可用
+
+
+_install_cursor_signal_handler()
 
 
 # ========== 原始艺术字与颜色定义 ==========
@@ -177,10 +210,12 @@ def _should_show_startup_banner(argv: list[str] | None = None) -> bool:
     """判断是否需要播放启动横幅动画。"""
     if not sys.stdout.isatty():
         return False
-    if os.environ.get("ASTRBOT_NO_BANNER"):
+    if os.environ.get("LDMBOT_NO_BANNER"):
         return False
     argv = sys.argv[1:] if argv is None else argv
     if "-h" in argv or "--help" in argv:
+        return False
+    if "--reset-password" in argv or "--重置密码" in argv:
         return False
     return True
 
@@ -265,7 +300,7 @@ def start_startup_banner_async() -> None:
         _startup_banner_thread = None
         return
     # 横幅一启动就置位：LogManager 初始化时会读到并挂起控制台
-    os.environ["ASTRBOT_PAUSE_CONSOLE"] = "1"
+    os.environ["LDMBOT_PAUSE_CONSOLE"] = "1"
     thread = threading.Thread(
         target=_run_startup_banner,
         name="startup-banner",
@@ -285,7 +320,7 @@ def start_startup_banner_async() -> None:
                 LogManager.resume_console()
             except Exception:
                 # LogManager 尚未导入时，清掉环境位即可
-                os.environ.pop("ASTRBOT_PAUSE_CONSOLE", None)
+                os.environ.pop("LDMBOT_PAUSE_CONSOLE", None)
 
     threading.Thread(
         target=_flush_after_banner,
@@ -325,14 +360,118 @@ def arm_startup_banner_console_release() -> None:
 # 尽早启动横幅，后续 import / bootstrap 与动画并行
 start_startup_banner_async()
 
-import runtime_bootstrap  # noqa: E402
 import argparse
+
+# --help/-h：提前处理，跳过所有重模块加载
+if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
+    _parser = argparse.ArgumentParser(
+        prog="python main.py",
+        description="LDMBot — 基于 AstrBot 的聊天机器人框架",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+启动参数:
+  --data-dir <路径>        指定 data 目录路径（等价 LDMBOT_DATA_DIR）
+  --webui-dir <路径>       指定 WebUI 静态文件目录路径（默认 data/dist）
+  --reset-password, --重置密码  重置管理面板密码（交互式输入新密码，留空用默认 "ldm"）
+                           改完直接退出，需重新启动
+  -h, --help               显示本帮助信息
+
+环境变量:
+
+  路径与运行模式:
+    LDMBOT_DATA_DIR=<路径>              直接指定 data 目录路径
+    LDMBOT_ROOT=<路径>                  根目录，data 目录 = $LDMBOT_ROOT/data
+                                        （LDMBOT_DATA_DIR 优先级更高）
+    LDMBOT_CLI=1                      标记由 CLI 启动（内部使用）
+    LDMBOT_RELOAD=1                   启用插件热重载
+    LDMBOT_LAUNCHER=1                 标记由 Launcher 启动（内部使用）
+    LDMBOT_WEBUI_DIR=<路径>           自定义 WebUI dist 目录
+
+  Dashboard / WebUI:
+    LDMBOT_DASHBOARD_PORT=<端口>      监听端口（默认 6185）
+    LDMBOT_DASHBOARD_HOST=<地址>      监听地址（默认 0.0.0.0）
+    LDMBOT_DASHBOARD_SSL_ENABLE=1     启用 HTTPS
+    LDMBOT_DASHBOARD_SSL_CERT=<路径>  SSL 证书文件
+    LDMBOT_DASHBOARD_SSL_KEY=<路径>   SSL 私钥文件
+    LDMBOT_DASHBOARD_SSL_CA_CERTS=<路径>  SSL CA 证书
+    LDMBOT_DASHBOARD_INITIAL_PASSWORD=<密码>  重置密码时使用的密码（配合 RESET 使用，不设默认 "ldm"）
+    LDMBOT_RESET_DASHBOARD_PASSWORD=1  触发重置 Dashboard 密码（配合 INITIAL_PASSWORD 使用）
+    LDMBOT_DASHBOARD_SKIP_DEFAULT_PASSWORD_AUTH=1  跳过默认密码认证（仅本地）
+    LDMBOT_TEST_MODE=true             测试模式（跳过部分初始化）
+
+  Desktop 客户端:
+    LDMBOT_DESKTOP_CLIENT=1           打包 Desktop 运行时
+    LDMBOT_DESKTOP_MANAGED=1          Desktop 托管模式
+    LDMBOT_DESKTOP_CORE_LOCK_PATH=<路径>  Desktop 核心锁文件
+
+  MCP:
+    LDMBOT_MCP_INIT_TIMEOUT=<秒>     MCP 初始化超时（默认 180，上限 300）
+    LDMBOT_MCP_ENABLE_TIMEOUT=<秒>    MCP 动态启用超时（默认 180）
+    LDMBOT_MCP_STDIO_ALLOWED_COMMANDS=<cmd1,cmd2,...>  MCP stdio 命令白名单
+
+  启动行为:
+    LDMBOT_NO_BANNER=1                跳过启动横幅动画
+    LDMBOT_PAUSE_CONSOLE=1            暂停控制台日志输出（内部使用）
+
+  更新器:
+    LDMBOT_REPO_OWNER=<所有者>        GitHub 仓库所有者（默认 landamao）
+    LDMBOT_REPO_NAME=<仓库名>         GitHub 仓库名（默认 ldm_AstrBot）
+    LDMBOT_UPDATE_CACHE_TTL=<秒>      远端信息缓存秒数（默认 300）
+    LDMBOT_GITHUB_TOKEN=<token>       GitHub API Token，提高限流配额
+    LDMBOT_CORE_PACKAGE_BASE_URL=<URL>  核心包下载基础 URL
+
+  Provider / 代理:
+    LDMBOT_DASHSCOPE_API_KEY=<key>    阿里云百炼 API Key（Embedding/Rerank 回退）
+    https_proxy / http_proxy          标准 HTTP 代理（Provider 默认读取）
+
+  第三方平台:
+    LDMBOT_COZE_API_KEY=<key>         Coze API 密钥
+    LDMBOT_COZE_BOT_ID=<id>           Coze Bot ID
+    LDMBOT_DINGTALK_REGISTRATION_BASE_URL=<URL>  钉钉注册基础 URL
+    LDMBOT_DINGTALK_REGISTRATION_SOURCE=<来源>    钉钉注册来源标识
+
+  其他:
+    LDMBOT_DEMO_MODE=true             演示模式
+    LDMBOT_BAY_DATA_DIR=<路径>        Bay 凭据目录
+    LDMBOT_DISABLE_METRICS=1          禁用指标上传
+    LDMBOT_PLATFORM_STATS_INVALID_COUNT_WARN_LIMIT=<数>  备份导入告警阈值（默认 5）
+    LDMBOT_BUILD_DASHBOARD=1          构建时编译 Dashboard 前端
+
+用法示例:
+  python main.py                                  正常启动
+  python main.py --data-dir /path/to/data         指定 data 目录
+  python main.py --webui-dir /path/to/dist        指定 WebUI 目录
+  python main.py --reset-password                 重置管理面板密码
+  LDMBOT_DASHBOARD_PORT=8080 python main.py       指定端口启动
+  LDMBOT_NO_BANNER=1 python main.py               跳过横幅动画
+""",
+    )
+    _parser.add_argument(
+        "--data-dir",
+        type=str,
+        help="指定 data 目录路径（等价 LDMBOT_DATA_DIR 环境变量）",
+        default=None,
+    )
+    _parser.add_argument(
+        "--webui-dir",
+        type=str,
+        help="指定 WebUI 静态文件目录路径（默认 data/dist）",
+        default=None,
+    )
+    _parser.add_argument(
+        "--reset-password",
+        "--重置密码",
+        action="store_true",
+        help="重置管理面板密码（交互式输入，留空用默认 ldm），改完退出需重启",
+    )
+    _parser.parse_args()
+    sys.exit(0)
+
+import runtime_bootstrap  # noqa: E402
 import asyncio
 import mimetypes
 from pathlib import Path
 runtime_bootstrap.initialize_runtime_bootstrap()
-
-DASHBOARD_RESET_PASSWORD_ENV = "ASTRBOT_RESET_DASHBOARD_PASSWORD"
 
 
 def _apply_startup_env_flags(argv: list[str]) -> None:
@@ -346,10 +485,60 @@ def _apply_startup_env_flags(argv: list[str]) -> None:
         return
 
     startup_parser = argparse.ArgumentParser(add_help=False)
-    startup_parser.add_argument("--reset-password", action="store_true")
+    startup_parser.add_argument("--reset-password", "--重置密码", action="store_true", dest="reset_password")
+    startup_parser.add_argument("--data-dir", type=str, default=None)
     startup_args, _ = startup_parser.parse_known_args(argv)
+    if startup_args.data_dir:
+        os.environ["LDMBOT_DATA_DIR"] = startup_args.data_dir
     if startup_args.reset_password:
-        os.environ[DASHBOARD_RESET_PASSWORD_ENV] = "1"
+        _prompt_and_set_reset_password()
+
+
+def _prompt_and_set_reset_password() -> None:
+    """交互式输入新密码并直接写入配置文件，完成后退出提示重启。
+
+    交互式：提示输入新密码，留空使用默认 "ldm"；
+    非交互式：直接使用 "ldm"。
+    两种情况都写完配置后退出，不继续启动。
+    """
+    password = "ldm"
+    if sys.stdin and sys.stdin.isatty():
+        raw = input('请输入新的管理面板密码（留空使用默认 "ldm"）: ').strip()
+        if raw:
+            password = raw
+
+    # 直接写入配置文件
+    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+    from astrbot.core.utils.auth_password import (
+        hash_dashboard_password,
+        hash_md5_dashboard_password,
+    )
+    import json
+
+    data_path = get_astrbot_data_path()
+    config_path = os.path.join(data_path, "cmd_config.json")
+
+    if not os.path.exists(config_path):
+        print("配置文件不存在，请先正常启动一次生成配置。")
+        sys.exit(1)
+
+    with open(config_path, "r", encoding="utf-8-sig") as f:
+        conf = json.load(f)
+
+    if "dashboard" not in conf or not isinstance(conf["dashboard"], dict):
+        conf["dashboard"] = {}
+
+    conf["dashboard"]["pbkdf2_password"] = hash_dashboard_password(password)
+    conf["dashboard"]["password"] = hash_md5_dashboard_password(password)
+    conf["dashboard"]["password_storage_upgraded"] = True
+    conf["dashboard"]["password_change_required"] = True
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(conf, f, indent=4, ensure_ascii=False)
+
+    print(f"管理面板密码已重置为: {password}")
+    print("请重新启动 ldm 生效。")
+    sys.exit(0)
 
 
 _apply_startup_env_flags(sys.argv[1:])
@@ -490,19 +679,31 @@ async def main_async(webui_dir_arg: str | None) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AstrBot")
-    parser.add_argument(
-        "--webui-dir",
+    # argparse 在前面 --help 拦截处已定义，这里只解析实际启动参数
+    _parser = argparse.ArgumentParser(
+        prog="python main.py",
+        description="LDMBot — 基于 AstrBot 的聊天机器人框架",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _parser.add_argument(
+        "--data-dir",
         type=str,
-        help="指定 WebUI 静态文件目录路径",
+        help="指定 data 目录路径（等价 LDMBOT_DATA_DIR 环境变量）",
         default=None,
     )
-    parser.add_argument(
-        "--reset-password",
-        action="store_true",
-        help="启动时重置管理面板初始密码，并在启动日志中打印",
+    _parser.add_argument(
+        "--webui-dir",
+        type=str,
+        help="指定 WebUI 静态文件目录路径（默认 data/dist）",
+        default=None,
     )
-    args = parser.parse_args()
+    _parser.add_argument(
+        "--reset-password",
+        "--重置密码",
+        action="store_true",
+        help="重置管理面板密码（交互式输入，留空用默认 ldm），改完退出需重启",
+    )
+    args = _parser.parse_args()
 
     # 零阻塞：不 join 横幅；挂起控制台日志，动画结束后再冲刷
     arm_startup_banner_console_release()
