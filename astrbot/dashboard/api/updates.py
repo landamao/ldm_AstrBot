@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from astrbot.core import logger
@@ -39,6 +39,12 @@ def _result_payload(result: UpdateServiceResult) -> dict:
     if result.status == "success":
         return {
             "status": "success",
+            "message": result.message,
+            "data": result.data,
+        }
+    if result.status == "warning":
+        return {
+            "status": "warning",
             "message": result.message,
             "data": result.data,
         }
@@ -212,3 +218,105 @@ async def install_dashboard_pip_package(
     service: UpdateService = Depends(get_service),
 ):
     return await _run(lambda: service.install_pip_package(_model_dict(payload)))
+
+
+@router.post("/updates/upload")
+async def upload_update_package(
+    file: UploadFile = File(...),
+    reboot: bool = Query(default=True),
+    _auth: AuthContext = Depends(require_system_scope),
+    service: UpdateService = Depends(get_service),
+):
+    """从用户上传的 zip 压缩包应用更新。"""
+    try:
+        file_bytes = await file.read()
+        result = await service.update_from_upload(
+            file_bytes=file_bytes,
+            filename=file.filename or "upload.zip",
+            reboot=reboot,
+        )
+        return _service_response(result)
+    except UpdateServiceError as exc:
+        return _service_error(exc)
+    except Exception as exc:
+        logger.error(f"上传更新包失败: {exc}", exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": str(exc), "data": None},
+            status_code=200,
+        )
+
+
+@legacy_router.post("/upload")
+async def upload_update_package_legacy(
+    file: UploadFile = File(...),
+    reboot: bool = Query(default=True),
+    _username: str = Depends(require_dashboard_user),
+    service: UpdateService = Depends(get_service),
+):
+    """从用户上传的 zip 压缩包校验（legacy 路由）。"""
+    try:
+        file_bytes = await file.read()
+        result = await service.update_from_upload(
+            file_bytes=file_bytes,
+            filename=file.filename or "upload.zip",
+            reboot=reboot,
+        )
+        return _service_response(result)
+    except UpdateServiceError as exc:
+        return _service_error(exc)
+    except Exception as exc:
+        logger.error(f"上传更新包失败: {exc}", exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": str(exc), "data": None},
+            status_code=200,
+        )
+
+
+@router.post("/updates/upload/apply")
+async def apply_uploaded_package(
+    payload: dict,
+    _auth: AuthContext = Depends(require_system_scope),
+    service: UpdateService = Depends(get_service),
+):
+    """应用已校验通过的上传压缩包。"""
+    try:
+        zip_path = payload.get("zip_path", "")
+        reboot = payload.get("reboot", True)
+        result = await service.apply_uploaded_package(
+            zip_path_str=zip_path,
+            reboot=reboot,
+        )
+        return _service_response(result)
+    except UpdateServiceError as exc:
+        return _service_error(exc)
+    except Exception as exc:
+        logger.error(f"应用上传更新包失败: {exc}", exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": str(exc), "data": None},
+            status_code=200,
+        )
+
+
+@legacy_router.post("/upload/apply")
+async def apply_uploaded_package_legacy(
+    payload: dict,
+    _username: str = Depends(require_dashboard_user),
+    service: UpdateService = Depends(get_service),
+):
+    """应用已校验通过的上传压缩包（legacy 路由）。"""
+    try:
+        zip_path = payload.get("zip_path", "")
+        reboot = payload.get("reboot", True)
+        result = await service.apply_uploaded_package(
+            zip_path_str=zip_path,
+            reboot=reboot,
+        )
+        return _service_response(result)
+    except UpdateServiceError as exc:
+        return _service_error(exc)
+    except Exception as exc:
+        logger.error(f"应用上传更新包失败: {exc}", exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": str(exc), "data": None},
+            status_code=200,
+        )

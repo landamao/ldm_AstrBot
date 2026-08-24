@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import tempfile
 import traceback
 import uuid
@@ -463,6 +464,249 @@ class UpdateService:
             message="已禁用 WebUI 任意 pip 安装；请通过项目更新流程安装 requirements。",
             headers={},
         )
+
+    # 上传压缩包校验所需的一级文件/目录
+    _上传校验_根文件 = {"main.py"}
+    _上传校验_astrbot子项 = {
+        "__init__.py", "api", "builtin_stars", "cli", "core", "dashboard", "utils",
+    }
+    _上传校验_webui文件 = {"index.html", "version"}
+    _上传校验_webui目录 = {"assets"}
+
+    async def update_from_upload(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        reboot: bool = True,
+    ) -> UpdateServiceResult:
+        """从用户上传的 zip 压缩包应用更新（核心 + WebUI）。
+
+        用户通过 WebUI 手动上传从 ldm 官方下载的更新包，
+        后端校验 zip 完整性后复用 apply_update_package 应用。
+        """
+        if is_desktop_managed_backend():
+            raise UpdateServiceError(
+                DESKTOP_MANAGED_RESTART_MESSAGE,
+                code="desktop_managed",
+            )
+
+        if not file_bytes:
+            raise UpdateServiceError("上传文件为空。")
+
+        if not filename.lower().endswith(".zip"):
+            raise UpdateServiceError("请上传 .zip 格式的压缩包。")
+
+        update_temp_parent = Path(get_astrbot_temp_path()) / "updates"
+        try:
+            if update_temp_parent.is_symlink():
+                update_temp_parent.unlink()
+            update_temp_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            update_temp_parent.chmod(0o700)
+        except Exception as exc:
+            raise UpdateServiceError(f"创建临时目录失败: {exc}") from exc
+
+        # 持久目录：校验通过后仍需保留文件供 confirm 步骤使用
+        persist_dir = update_temp_parent / f"upload-{uuid.uuid4().hex}"
+        persist_dir.mkdir(mode=0o700, exist_ok=True)
+        token = uuid.uuid4().hex
+        zip_path = persist_dir / f"{token}-{filename}"
+
+        await asyncio.to_thread(lambda: zip_path.write_bytes(file_bytes))
+
+        # zip 完整性校验
+        def _verify_zip() -> None:
+            if not zipfile.is_zipfile(zip_path):
+                raise UpdateServiceError("文件不是有效的 zip 压缩包。")
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                corrupt = archive.testzip()
+            if corrupt:
+                raise UpdateServiceError(f"压缩包校验失败: {corrupt}")
+
+        await asyncio.to_thread(_verify_zip)
+
+        # 文件结构完整性校验 + 版本提取
+        missing_items: list[str] = []
+        found_items: list[str] = []
+        core_version: str = ""
+        dashboard_version: str = ""
+
+        def _check_structure() -> None:
+            nonlocal core_version, dashboard_version, found_items
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                entries = archive.namelist()
+                normalized = [os.path.normpath(e).replace("\\", "/") for e in entries]
+
+                # 判断根目录：所有路径的公共前缀
+                root = self.astrbot_updator._resolve_archive_root_dir(entries)
+                root_norm = os.path.normpath(root).replace("\\", "/") if root else ""
+
+                def _full(path_parts: str) -> str:
+                    return f"{root_norm}/{path_parts}" if root_norm else path_parts
+
+                def _has(path_parts: str) -> bool:
+                    full = _full(path_parts)
+                    if full in normalized:
+                        return True
+                    prefix = full + "/"
+                    return any(e.startswith(prefix) for e in normalized)
+
+                # 根文件
+                for f in self._上传校验_根文件:
+                    if _has(f):
+                        found_items.append(f"根文件 {f}")
+                    else:
+                        missing_items.append(f"根文件 {f}")
+
+                # astrbot 子项
+                for item in self._上传校验_astrbot子项:
+                    label = f"astrbot/{item}"
+                    if _has(label):
+                        found_items.append(label)
+                    else:
+                        missing_items.append(label)
+
+                # WebUI dist（data/dist 或 dashboard/dist）
+                webui_found = False
+                for dist_path in ("data/dist", "dashboard/dist"):
+                    dist_prefix = _full(f"{dist_path}/")
+                    has_dist = any(e.startswith(dist_prefix) for e in normalized)
+                    if not has_dist:
+                        continue
+                    # 检查 dist 内的关键文件/目录
+                    dist_items_ok = True
+                    for f in self._上传校验_webui文件:
+                        check = _full(f"{dist_path}/{f}")
+                        if check not in normalized:
+                            dist_items_ok = False
+                            missing_items.append(f"{dist_path}/{f}")
+                        else:
+                            found_items.append(f"{dist_path}/{f}")
+                    for d in self._上传校验_webui目录:
+                        check_prefix = _full(f"{dist_path}/{d}/")
+                        if not any(e.startswith(check_prefix) for e in normalized):
+                            dist_items_ok = False
+                            missing_items.append(f"{dist_path}/{d}")
+                        else:
+                            found_items.append(f"{dist_path}/{d}")
+                    if dist_items_ok:
+                        webui_found = True
+                        found_items.append(f"{dist_path}/ (完整)")
+                        # 读取 WebUI 版本
+                        for vf in ("version", "assets/version"):
+                            vf_path = _full(f"{dist_path}/{vf}")
+                            if vf_path in normalized:
+                                try:
+                                    raw = archive.read(vf_path).decode("utf-8").strip()
+                                    if raw:
+                                        dashboard_version = raw
+                                        break
+                                except Exception:
+                                    pass
+                        break
+
+                if not webui_found and not missing_items:
+                    missing_items.append("data/dist 或 dashboard/dist (含 index.html/version/assets)")
+                elif not webui_found:
+                    missing_items.append("data/dist 或 dashboard/dist (含 index.html/version/assets)")
+
+                # 读取程序代码版本：astrbot/__init__.py 里的 __version__
+                init_path = _full("astrbot/__init__.py")
+                if init_path in normalized:
+                    try:
+                        content = archive.read(init_path).decode("utf-8")
+                        import re
+                        m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+                        if m:
+                            core_version = m.group(1)
+                    except Exception:
+                        pass
+
+        await asyncio.to_thread(_check_structure)
+
+        if missing_items:
+            return UpdateServiceResult(
+                status="warning",
+                message="该更新包内文件不完整，缺失部分文件，如从 ldm 官方下载的压缩包，一定是完整的，该压缩包可能不是 ldm 官方的，或已损坏或已被修改。",
+                data={
+                    "missing": missing_items,
+                    "found": found_items,
+                    "core_version": core_version or "未知",
+                    "dashboard_version": dashboard_version or "未知",
+                    "zip_path": str(zip_path),
+                    "persist_dir": str(persist_dir),
+                },
+            )
+
+        return UpdateServiceResult(
+            status="ok",
+            message="校验通过，请确认更新包安全后继续。",
+            data={
+                "found": found_items,
+                "core_version": core_version or "未知",
+                "dashboard_version": dashboard_version or "未知",
+                "zip_path": str(zip_path),
+                "persist_dir": str(persist_dir),
+            },
+        )
+
+    async def apply_uploaded_package(
+        self,
+        zip_path_str: str,
+        reboot: bool = True,
+    ) -> UpdateServiceResult:
+        """应用已校验通过的上传压缩包。"""
+        if is_desktop_managed_backend():
+            raise UpdateServiceError(
+                DESKTOP_MANAGED_RESTART_MESSAGE,
+                code="desktop_managed",
+            )
+
+        zip_path = Path(zip_path_str)
+        if not zip_path.is_file():
+            raise UpdateServiceError("上传的压缩包文件已过期，请重新上传。")
+
+        # 应用更新包
+        await asyncio.to_thread(
+            self.astrbot_updator.apply_update_package,
+            zip_path,
+        )
+
+        # 更新依赖
+        logger.info("正在更新依赖（来自上传压缩包）...")
+        try:
+            await self.pip_install(requirements_path="requirements.txt")
+        except Exception as exc:
+            logger.error(f"更新依赖失败: {exc}")
+
+        # 清理临时目录
+        try:
+            zip_path.parent.rmdir()
+        except Exception:
+            pass
+
+        if reboot:
+            message = "上传压缩包更新成功，ldm 将在重启后应用新的代码。"
+            self._schedule_restart()
+        else:
+            message = "上传压缩包更新成功，ldm 将在下次启动时应用新的代码。"
+
+        result = UpdateServiceResult(
+            message=message,
+            headers=self.clear_site_data_headers,
+        )
+        if reboot:
+            result.data = {"reboot": True}
+        return result
+
+    def _schedule_restart(self) -> None:
+        """在后台安排重启，避免 HTTP 请求阻塞。"""
+        async def _do_restart():
+            await self.core_lifecycle.restart()
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_do_restart())
+        except RuntimeError:
+            pass
 
     def _init_update_progress(self, progress_id: str, version: str) -> None:
         self.update_progress[progress_id] = {

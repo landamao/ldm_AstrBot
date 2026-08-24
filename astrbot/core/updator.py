@@ -1010,22 +1010,7 @@ class AstrBotUpdator(RepoZipUpdator):
                     f"指定的 --webui-dir 目录不存在: {webui_dir}，回退覆盖 data/dist。"
                 )
         logger.info(f"正在覆盖 WebUI: {webui_dist} -> {目标}")
-        # 尽量保留 assets/version：若新包没有 version 而旧包有，写回旧 version 仅作兜底
-        旧version文件 = 目标 / "assets" / "version"
-        旧version内容 = None
-        if 旧version文件.is_file():
-            try:
-                旧version内容 = 旧version文件.read_text(encoding="utf-8")
-            except Exception:
-                旧version内容 = None
-
         self._安全覆盖目录(webui_dist, 目标)
-
-        新version文件 = 目标 / "assets" / "version"
-        if not 新version文件.is_file() and 旧version内容 is not None:
-            ensure_dir(新version文件.parent)
-            新version文件.write_text(旧version内容, encoding="utf-8")
-            logger.info("新 WebUI 缺少 assets/version，已回写旧 version 文件。")
         return True
 
     def apply_update_package(self, zip_path: str | Path) -> None:
