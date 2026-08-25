@@ -59,7 +59,7 @@ def _redirect_background_stdout_command(
 @builtin_tool(config=_COMPUTER_RUNTIME_TOOL_CONFIG)
 @dataclass
 class ExecuteShellTool(FunctionTool):
-    name: str = "astrbot_execute_shell"
+    name: str = "ldmbot_execute_shell"
     description: str = "Execute a command in the shell."
     parameters: dict = field(
         default_factory=lambda: {
@@ -171,7 +171,7 @@ class ExecuteShellTool(FunctionTool):
             if stdout_file:
                 result["stdout"] = (
                     f"Command is running in the background. stdout/stderr is being "
-                    f"written to `{stdout_file}`. Use astrbot_file_read_tool to read it."
+                    f"written to `{stdout_file}`. Use ldmbot_file_read to read it."
                 )
             return json.dumps(result, ensure_ascii=False)
         except Exception as e:
@@ -253,7 +253,7 @@ class LocalExecuteShellTool(ExecuteShellTool):
 class ShellSessionTool(FunctionTool):
     """Manage shell sessions created by the local shell execution tool."""
 
-    name: str = "astrbot_shell_session"
+    name: str = "ldmbot_shell_session"
     description: str = (
         "List, poll, write raw text or complete lines to, interrupt, or terminate "
         "managed shell sessions. "

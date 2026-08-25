@@ -6,6 +6,41 @@
 ---
 
 <details>
+<summary><strong>[4.27.9] — 2026-08-25</strong> — 移除指标遥测、内置工具名品牌化、NO_PLUGINS 调试模式</summary>
+
+本次更新包含 1 项新增、1 项优化、1 项系统精简。
+
+### 新增
+
+- **LDMBOT_NO_PLUGINS 环境变量（跳过第三方插件加载）**
+  - 用途：启动时跳过所有第三方插件，只加载内置插件，用于排除插件故障调试
+  - 用法：`LDMBOT_NO_PLUGINS=true python main.py`
+  - 启用后后端打印 warning 提示，WebUI 插件页面顶部显示蓝色提示条「已关闭第三方插件加载（LDMBOT_NO_PLUGINS），当前仅加载内置插件」
+  - `--help` 帮助文本已补充环境变量说明
+
+### 优化
+
+- **内置 LLM 工具名品牌化（astrbot_ → ldmbot_）**
+  - 将所有喂给 LLM 的内置工具名从 `astrbot_` 前缀改为 `ldmbot_`，并去掉冗余 `_tool` 后缀
+  - 涉及 27 个工具名，如 `astrbot_execute_python` → `ldmbot_execute_python`、`astrbot_file_read_tool` → `ldmbot_file_read`、`astr_kb_search` → `ldmbot_kb_search` 等
+  - 工具描述和错误信息中的 AstrBot 品牌名同步替换为 ldmbot
+  - 不涉及代码层类名/模块路径/数据格式标识，仅改用户和 LLM 可见的工具名
+
+### 系统精简
+
+- **移除指标遥测**
+  - 问题：内置匿名遥测模块每 10 分钟向 tickstats.soulter.top 上传非敏感指标（平台适配器名称、LLM 调用次数、消息事件计数、版本号、操作系统、主机名等），并在 `~/.astrbot` 生成安装标识
+  - 改动：清空 `metrics.py` 为空类（保留接口防第三方插件引用报错），删除 8 个文件共 12 处 `Metric.upload` 调用点和 import
+  - 之后不再生成 `~/.astrbot` 目录，不再上传任何遥测数据
+
+### 说明
+
+- 更新后请**手动重启**一次服务
+- 若面板显示异常，可用顶栏「强制刷新面板」或浏览器 Ctrl+F5
+
+</details>
+
+<details>
 <summary><strong>[4.27.8] — 2026-08-25</strong> — /reset 清群聊上下文、流式输出日志优化、WebChat 流式开关体验改进</summary>
 
 本次更新包含 2 项修复、2 项体验优化、1 项版本信息获取日志修复。

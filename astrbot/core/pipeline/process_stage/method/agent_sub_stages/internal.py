@@ -38,7 +38,6 @@ from astrbot.core.provider.entities import (
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.star.star_handler import EventType
 from astrbot.core.utils.active_event_registry import active_event_registry
-from astrbot.core.utils.metrics import Metric
 from astrbot.core.utils.session_lock import session_lock_manager
 
 from .....astr_agent_run_util import AgentRunner, run_agent, run_live_agent
@@ -559,13 +558,6 @@ class InternalAgentSubStage(Stage):
                             runner_aborted=agent_runner.was_aborted(),
                         )
 
-                    asyncio.create_task(
-                        Metric.upload(
-                            llm_tick=1,
-                            model_name=agent_runner.provider.get_model(),
-                            provider_type=agent_runner.provider.meta().type,
-                        ),
-                    )
                 finally:
                     if runner_registered and agent_runner is not None:
                         unregister_active_runner(event.unified_msg_origin, agent_runner)

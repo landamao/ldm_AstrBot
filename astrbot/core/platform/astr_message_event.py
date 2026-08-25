@@ -24,7 +24,6 @@ from astrbot.core.message.components import (
 from astrbot.core.message.message_event_result import MessageChain, MessageEventResult
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import ProviderRequest
-from astrbot.core.utils.metrics import Metric
 from astrbot.core.utils.trace import TraceSpan
 
 from .astrbot_message import AstrBotMessage, Group
@@ -291,9 +290,6 @@ class AstrMessageEvent(abc.ABC):
         目前仅支持: telegram，qq official 私聊。
         Fallback仅支持 aiocqhttp。
         """
-        asyncio.create_task(
-            Metric.upload(msg_event_tick=1, adapter_name=self.platform_meta.name),
-        )
         self._has_send_oper = True
 
     async def send_typing(self) -> None:
@@ -488,13 +484,6 @@ class AstrMessageEvent(abc.ABC):
         # Leverage BLAKE2 hash function to generate a non-reversible hash of the sender ID for privacy.
         hash_obj = hashlib.blake2b(self.get_sender_id().encode("utf-8"), digest_size=16)
         sid = str(uuid.UUID(bytes=hash_obj.digest()))
-        asyncio.create_task(
-            Metric.upload(
-                msg_event_tick=1,
-                adapter_name=self.platform_meta.name,
-                sid=sid,
-            ),
-        )
         self._has_send_oper = True
 
         # 实时 INFO 日志 + 累计本事件实际发出的纯文本（供打断后历史对齐）

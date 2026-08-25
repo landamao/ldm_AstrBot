@@ -1,11 +1,11 @@
 """Filesystem tool audit.
 
 Tool exposure from the main agent:
-- Local runtime exposes `astrbot_read_file_tool`, `astrbot_file_write_tool`,
-  `astrbot_file_edit_tool`, and `astrbot_grep_tool`.
-- Sandbox runtime exposes `astrbot_upload_file`, `astrbot_download_file`,
-  `astrbot_read_file_tool`, `astrbot_file_write_tool`,
-  `astrbot_file_edit_tool`, and `astrbot_grep_tool`.
+- Local runtime exposes `ldmbot_file_read`, `ldmbot_file_write`,
+  `ldmbot_file_edit`, and `ldmbot_grep`.
+- Sandbox runtime exposes `ldmbot_upload_file`, `ldmbot_download_file`,
+  `ldmbot_file_read`, `ldmbot_file_write`,
+  `ldmbot_file_edit`, and `ldmbot_grep`.
 
 Behavior when `provider_settings.computer_use_require_admin=True`:
 - Admin + local: read/write/edit/grep are not path-restricted by this module;
@@ -295,7 +295,7 @@ def _decode_escaped_text(value: str) -> str:
 @builtin_tool(config=_COMPUTER_RUNTIME_TOOL_CONFIG)
 @dataclass
 class FileReadTool(FunctionTool):
-    name: str = "astrbot_file_read_tool"
+    name: str = "ldmbot_file_read"
     description: str = "read file content. Supports text, image, and PDF (text extraction), docx and epub files."
     parameters: dict = field(
         default_factory=lambda: {
@@ -360,7 +360,7 @@ class FileReadTool(FunctionTool):
             if local_env and os.path.isdir(normalized_path):
                 return (
                     f"Error: '{normalized_path}' is a directory, not a file. "
-                    "Use a file path instead, or use 'astrbot_execute_shell' to list directory contents."
+                    "Use a file path instead, or use 'ldmbot_execute_shell' to list directory contents."
                 )
             offset, limit = self._validate_read_window(offset, limit)
             sb = await get_booter(
@@ -392,7 +392,7 @@ class FileReadTool(FunctionTool):
 @builtin_tool(config=_COMPUTER_RUNTIME_TOOL_CONFIG)
 @dataclass
 class FileWriteTool(FunctionTool):
-    name: str = "astrbot_file_write_tool"
+    name: str = "ldmbot_file_write"
     description: str = "Write UTF-8 text content to a file."
     parameters: dict = field(
         default_factory=lambda: {
@@ -464,7 +464,7 @@ class FileWriteTool(FunctionTool):
 @builtin_tool(config=_COMPUTER_RUNTIME_TOOL_CONFIG)
 @dataclass
 class FileEditTool(FunctionTool):
-    name: str = "astrbot_file_edit_tool"
+    name: str = "ldmbot_file_edit"
     description: str = "Editing files."
     parameters: dict = field(
         default_factory=lambda: {
@@ -555,7 +555,7 @@ class FileEditTool(FunctionTool):
 @builtin_tool(config=_COMPUTER_RUNTIME_TOOL_CONFIG)
 @dataclass
 class GrepTool(FunctionTool):
-    name: str = "astrbot_grep_tool"
+    name: str = "ldmbot_grep"
     description: str = "Search and read file contents using ripgrep."
     parameters: dict = field(
         default_factory=lambda: {
@@ -791,7 +791,7 @@ class GrepTool(FunctionTool):
 @builtin_tool(config=_SANDBOX_RUNTIME_TOOL_CONFIG)
 @dataclass
 class FileUploadTool(FunctionTool):
-    name: str = "astrbot_upload_file"
+    name: str = "ldmbot_upload_file"
     description: str = (
         "Transfer a file FROM the host machine INTO the sandbox so that sandbox "
         "code can access it. Use this when the user sends/attaches a file and you "
@@ -857,7 +857,7 @@ class FileUploadTool(FunctionTool):
 @builtin_tool(config=_SANDBOX_RUNTIME_TOOL_CONFIG)
 @dataclass
 class FileDownloadTool(FunctionTool):
-    name: str = "astrbot_download_file"
+    name: str = "ldmbot_download_file"
     description: str = (
         "Transfer a file FROM the sandbox OUT to the host and optionally send it "
         "to the user. Use this ONLY when the user asks to retrieve/export a file "

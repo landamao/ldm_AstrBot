@@ -80,7 +80,7 @@ async def handle_result(result: dict, event: AstrMessageEvent) -> ToolExecResult
 @builtin_tool(config=_SANDBOX_PYTHON_TOOL_CONFIG)
 @dataclass
 class PythonTool(FunctionTool):
-    name: str = "astrbot_execute_ipython"
+    name: str = "ldmbot_execute_ipython"
     description: str = f"Run codes in an IPython shell. Current OS: {_OS_NAME}."
     parameters: dict = field(default_factory=lambda: param_schema)
 
@@ -116,7 +116,7 @@ class PythonTool(FunctionTool):
 @builtin_tool(config=_LOCAL_PYTHON_TOOL_CONFIG)
 @dataclass
 class LocalPythonTool(FunctionTool):
-    name: str = "astrbot_execute_python"
+    name: str = "ldmbot_execute_python"
     description: str = (
         f"Execute codes in a Python environment. Current OS: {_OS_NAME}. "
         "Use system-compatible commands."

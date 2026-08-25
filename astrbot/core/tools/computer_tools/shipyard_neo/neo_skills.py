@@ -72,7 +72,7 @@ class NeoSkillToolBase(FunctionTool):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class GetExecutionHistoryTool(NeoSkillToolBase):
-    name: str = "astrbot_get_execution_history"
+    name: str = "ldmbot_get_execution_history"
     description: str = "Get execution history from current sandbox."
     parameters: dict = field(
         default_factory=lambda: {
@@ -119,7 +119,7 @@ class GetExecutionHistoryTool(NeoSkillToolBase):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class AnnotateExecutionTool(NeoSkillToolBase):
-    name: str = "astrbot_annotate_execution"
+    name: str = "ldmbot_annotate_execution"
     description: str = "Annotate one execution history record."
     parameters: dict = field(
         default_factory=lambda: {
@@ -157,7 +157,7 @@ class AnnotateExecutionTool(NeoSkillToolBase):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class CreateSkillPayloadTool(NeoSkillToolBase):
-    name: str = "astrbot_create_skill_payload"
+    name: str = "ldmbot_create_skill_payload"
     description: str = (
         "Step 1/3 for Neo skill authoring: create immutable payload content and return payload_ref. "
         "Use this to store skill_markdown and structured metadata; do NOT write local skill folders directly."
@@ -205,7 +205,7 @@ class CreateSkillPayloadTool(NeoSkillToolBase):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class GetSkillPayloadTool(NeoSkillToolBase):
-    name: str = "astrbot_get_skill_payload"
+    name: str = "ldmbot_get_skill_payload"
     description: str = "Get one skill payload by payload_ref."
     parameters: dict = field(
         default_factory=lambda: {
@@ -232,7 +232,7 @@ class GetSkillPayloadTool(NeoSkillToolBase):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class CreateSkillCandidateTool(NeoSkillToolBase):
-    name: str = "astrbot_create_skill_candidate"
+    name: str = "ldmbot_create_skill_candidate"
     description: str = (
         "Step 2/3 for Neo skill authoring: create a candidate by binding execution evidence "
         "(source_execution_ids) with skill identity (skill_key) and optional payload_ref."
@@ -256,7 +256,7 @@ class CreateSkillCandidateTool(NeoSkillToolBase):
                 },
                 "payload_ref": {
                     "type": "string",
-                    "description": "Optional payload reference created by astrbot_create_skill_payload.",
+                    "description": "Optional payload reference created by ldmbot_create_skill_payload.",
                 },
             },
             "required": ["skill_key", "source_execution_ids"],
@@ -286,7 +286,7 @@ class CreateSkillCandidateTool(NeoSkillToolBase):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class ListSkillCandidatesTool(NeoSkillToolBase):
-    name: str = "astrbot_list_skill_candidates"
+    name: str = "ldmbot_list_skill_candidates"
     description: str = "List skill candidates."
     parameters: dict = field(
         default_factory=lambda: {
@@ -324,7 +324,7 @@ class ListSkillCandidatesTool(NeoSkillToolBase):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class EvaluateSkillCandidateTool(NeoSkillToolBase):
-    name: str = "astrbot_evaluate_skill_candidate"
+    name: str = "ldmbot_evaluate_skill_candidate"
     description: str = "Evaluate a skill candidate."
     parameters: dict = field(
         default_factory=lambda: {
@@ -365,7 +365,7 @@ class EvaluateSkillCandidateTool(NeoSkillToolBase):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class PromoteSkillCandidateTool(NeoSkillToolBase):
-    name: str = "astrbot_promote_skill_candidate"
+    name: str = "ldmbot_promote_skill_candidate"
     description: str = (
         "Step 3/3 for Neo skill authoring: promote candidate to canary/stable release. "
         "If stage=stable and sync_to_local=true, payload.skill_markdown is synced to local SKILL.md automatically."
@@ -436,7 +436,7 @@ class PromoteSkillCandidateTool(NeoSkillToolBase):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class ListSkillReleasesTool(NeoSkillToolBase):
-    name: str = "astrbot_list_skill_releases"
+    name: str = "ldmbot_list_skill_releases"
     description: str = "List skill releases."
     parameters: dict = field(
         default_factory=lambda: {
@@ -477,7 +477,7 @@ class ListSkillReleasesTool(NeoSkillToolBase):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class RollbackSkillReleaseTool(NeoSkillToolBase):
-    name: str = "astrbot_rollback_skill_release"
+    name: str = "ldmbot_rollback_skill_release"
     description: str = "Rollback one skill release."
     parameters: dict = field(
         default_factory=lambda: {
@@ -504,7 +504,7 @@ class RollbackSkillReleaseTool(NeoSkillToolBase):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class SyncSkillReleaseTool(NeoSkillToolBase):
-    name: str = "astrbot_sync_skill_release"
+    name: str = "ldmbot_sync_skill_release"
     description: str = (
         "Sync stable Neo release payload to local SKILL.md and update mapping metadata."
     )

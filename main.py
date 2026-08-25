@@ -432,6 +432,7 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
 
   其他:
     LDMBOT_DEMO_MODE=true             演示模式
+    LDMBOT_NO_PLUGINS=true            跳过第三方插件加载（仅内置插件，可用于排除插件故障调试）
     LDMBOT_BAY_DATA_DIR=<路径>        Bay 凭据目录
     LDMBOT_DISABLE_METRICS=1          禁用指标上传
     LDMBOT_PLATFORM_STATS_INVALID_COUNT_WARN_LIMIT=<数>  备份导入告警阈值（默认 5）

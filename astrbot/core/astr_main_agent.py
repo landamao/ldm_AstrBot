@@ -571,7 +571,7 @@ async def _ensure_persona_and_skills(
                 req.system_prompt += (
                     "User has not enabled the Computer Use feature. "
                     "You cannot use shell or Python to perform skills. "
-                    "If you need to use these capabilities, ask the user to enable Computer Use in the AstrBot WebUI -> Config."
+                    "If you need to use these capabilities, ask the user to enable Computer Use in the ldmbot WebUI -> Config."
                 )
     tmgr = plugin_context.get_llm_tool_manager()
 
@@ -1209,9 +1209,9 @@ def _apply_sandbox_tools(
             "\n[Neo Skill Lifecycle Workflow]\n"
             "When user asks to create/update a reusable skill in Neo mode, use lifecycle tools instead of directly writing local skill folders.\n"
             "Preferred sequence:\n"
-            "1) Use `astrbot_create_skill_payload` to store canonical payload content and get `payload_ref`.\n"
-            "2) Use `astrbot_create_skill_candidate` with `skill_key` + `source_execution_ids` (and optional `payload_ref`) to create a candidate.\n"
-            "3) Use `astrbot_promote_skill_candidate` to release: `stage=canary` for trial; `stage=stable` for production.\n"
+            "1) Use `ldmbot_create_skill_payload` to store canonical payload content and get `payload_ref`.\n"
+            "2) Use `ldmbot_create_skill_candidate` with `skill_key` + `source_execution_ids` (and optional `payload_ref`) to create a candidate.\n"
+            "3) Use `ldmbot_promote_skill_candidate` to release: `stage=canary` for trial; `stage=stable` for production.\n"
             "For stable release, set `sync_to_local=true` to sync `payload.skill_markdown` into local `SKILL.md`.\n"
             "Do not treat ad-hoc generated files as reusable Neo skills unless they are captured via payload/candidate/release.\n"
             "To update an existing skill, create a new payload/candidate and promote a new release version; avoid patching old local folders directly.\n"
@@ -1250,13 +1250,13 @@ def _apply_sandbox_tools(
     if booter == "cua":
         req.system_prompt += (
             "\n[CUA Desktop Control]\n"
-            "Use `astrbot_execute_shell` with `background=true` to launch GUI apps. "
+            "Use `ldmbot_execute_shell` with `background=true` to launch GUI apps. "
             'Use Firefox for browser tasks, for example `firefox "https://example.com"`. '
-            "After each visible step, call `astrbot_cua_screenshot` with "
+            "After each visible step, call `ldmbot_cua_screenshot` with "
             "`send_to_user=true` and `return_image_to_llm=true` so the user can "
             "monitor progress. When typing, inspect the screenshot first and confirm "
             "the target field is focused and empty or safe to append to. Use "
-            "`astrbot_cua_mouse_click` for coordinates and `astrbot_cua_keyboard_type` "
+            "`ldmbot_cua_mouse_click` for coordinates and `ldmbot_cua_keyboard_type` "
             "for text input; use text=`\\n` for Enter.\n"
         )
         req.func_tool.add_tool(tool_mgr.get_builtin_tool(CuaScreenshotTool))
@@ -1768,11 +1768,11 @@ async def build_main_agent(
         request_max_retries=config.provider_settings.get("request_max_retries", 5),
         tool_result_overflow_dir=(
             get_astrbot_system_tmp_path()
-            if req.func_tool and req.func_tool.get_tool("astrbot_file_read_tool")
+            if req.func_tool and req.func_tool.get_tool("ldmbot_file_read")
             else None
         ),
         read_tool=(
-            req.func_tool.get_tool("astrbot_file_read_tool") if req.func_tool else None
+            req.func_tool.get_tool("ldmbot_file_read") if req.func_tool else None
         ),
     )
 

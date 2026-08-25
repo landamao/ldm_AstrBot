@@ -50,7 +50,7 @@ async def _get_gui_component(context: ContextWrapper[AstrAgentContext]) -> Any:
 @builtin_tool(config=_CUA_TOOL_CONFIG)
 @dataclass
 class CuaScreenshotTool(FunctionTool):
-    name: str = "astrbot_cua_screenshot"
+    name: str = "ldmbot_cua_screenshot"
     description: str = (
         "Capture a screenshot from the CUA sandbox and optionally send it to the user."
     )
@@ -108,7 +108,7 @@ class CuaScreenshotTool(FunctionTool):
 @builtin_tool(config=_CUA_TOOL_CONFIG)
 @dataclass
 class CuaMouseClickTool(FunctionTool):
-    name: str = "astrbot_cua_mouse_click"
+    name: str = "ldmbot_cua_mouse_click"
     description: str = "Click a coordinate in the CUA sandbox desktop."
     parameters: dict = field(
         default_factory=lambda: {
@@ -145,7 +145,7 @@ class CuaMouseClickTool(FunctionTool):
 @builtin_tool(config=_CUA_TOOL_CONFIG)
 @dataclass
 class CuaKeyboardTypeTool(FunctionTool):
-    name: str = "astrbot_cua_keyboard_type"
+    name: str = "ldmbot_cua_keyboard_type"
     description: str = "Type text into the CUA sandbox desktop."
     parameters: dict = field(
         default_factory=lambda: {

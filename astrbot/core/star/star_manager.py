@@ -27,6 +27,7 @@ from astrbot.core import (
     pip_installer,
     sp,
 )
+from astrbot.core import NO_PLUGINS_MODE
 from astrbot.core.agent.handoff import FunctionTool, HandoffTool
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.config.default import VERSION
@@ -39,7 +40,6 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_temp_path,
 )
 from astrbot.core.utils.io import remove_dir
-from astrbot.core.utils.metrics import Metric
 from astrbot.core.utils.requirements_utils import (
     MissingRequirementsPlan,
     plan_missing_requirements_install,
@@ -314,7 +314,9 @@ class PluginManager:
 
     def _get_plugin_modules(self) -> list[dict]:
         plugins = []
-        if os.path.exists(self.plugin_store_path):
+        if NO_PLUGINS_MODE:
+            logger.warning("已启用 LDMBOT_NO_PLUGINS，跳过第三方插件目录，仅加载内置插件。")
+        elif os.path.exists(self.plugin_store_path):
             plugins.extend(self._get_modules(self.plugin_store_path))
         if os.path.exists(self.reserved_plugin_path):
             _p = self._get_modules(self.reserved_plugin_path)
@@ -1611,14 +1613,6 @@ class PluginManager:
                 如果找不到插件元数据则返回 None。
 
         """
-        # this metric is for displaying plugins installation count in pages
-        asyncio.create_task(
-            Metric.upload(
-                et="install_star",
-                repo=repo_url,
-            ),
-        )
-
         async with self._pm_lock:
             plugin_path = ""
             dir_name = ""
@@ -2152,14 +2146,6 @@ class PluginManager:
                     "readme": readme_content,
                     "name": plugin.name,
                 }
-
-                if plugin.repo:
-                    asyncio.create_task(
-                        Metric.upload(
-                            et="install_star_f",  # install star
-                            repo=plugin.repo,
-                        ),
-                    )
 
             return plugin_info
         except Exception as e:

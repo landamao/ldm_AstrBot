@@ -37,7 +37,7 @@ async def _get_browser_component(context: ContextWrapper[AstrAgentContext]) -> A
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class BrowserExecTool(FunctionTool):
-    name: str = "astrbot_execute_browser"
+    name: str = "ldmbot_execute_browser"
     description: str = "Execute one browser automation command in the sandbox."
     parameters: dict = field(
         default_factory=lambda: {
@@ -95,7 +95,7 @@ class BrowserExecTool(FunctionTool):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class BrowserBatchExecTool(FunctionTool):
-    name: str = "astrbot_execute_browser_batch"
+    name: str = "ldmbot_execute_browser_batch"
     description: str = "Execute a browser command batch in the sandbox."
     parameters: dict = field(
         default_factory=lambda: {
@@ -160,7 +160,7 @@ class BrowserBatchExecTool(FunctionTool):
 @builtin_tool(config=_SHIPYARD_NEO_TOOL_CONFIG)
 @dataclass
 class RunBrowserSkillTool(FunctionTool):
-    name: str = "astrbot_run_browser_skill"
+    name: str = "ldmbot_run_browser_skill"
     description: str = "Run a released browser skill in the sandbox by skill_key."
     parameters: dict = field(
         default_factory=lambda: {

@@ -218,7 +218,7 @@ class SendMessageToUserTool(FunctionTool[AstrAgentContext]):
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        # Security: only AstrBot admins can send messages to other sessions.
+        # Security: only ldmbot admins can send messages to other sessions.
         # Non-admin users are always restricted to their own session.
         # See https://github.com/AstrBotDevs/AstrBot/issues/7822
         current_session = context.context.event.unified_msg_origin

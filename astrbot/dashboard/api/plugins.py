@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from astrbot.api.web import PluginRequest, bind_request_context
 from astrbot.core import logger
+from astrbot.core import NO_PLUGINS_MODE
 from astrbot.core.log import LogManager
 from astrbot.dashboard.asgi_runtime import (
     DashboardRequestState,
@@ -349,7 +350,7 @@ async def _list_plugins(
     service: PluginService,
     page_service: PluginPageService,
 ):
-    return await _run_service(
+    result = await _run_service(
         service.list_plugins_from_dashboard_query(
             plugin_name=request.query_params.get("name")
             or request.query_params.get("plugin_id"),
@@ -359,6 +360,8 @@ async def _list_plugins(
         ),
         log_label="/api/plugin/get",
     )
+    result["no_plugins"] = NO_PLUGINS_MODE
+    return result
 
 
 async def _get_plugin_detail(

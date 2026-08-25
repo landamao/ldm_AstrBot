@@ -40,7 +40,6 @@ from astrbot.core.provider.entities import (
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.star.star_handler import EventType
 from astrbot.core.utils.config_number import coerce_int_config
-from astrbot.core.utils.metrics import Metric
 
 from .....astr_agent_context import AgentContextWrapper, AstrAgentContext
 from ....context import PipelineContext, call_event_hook
@@ -429,11 +428,3 @@ class ThirdPartyAgentSubStage(Stage):
                 stream_watchdog_task.cancel()
             if not streaming_used:
                 await close_runner_once()
-
-        asyncio.create_task(
-            Metric.upload(
-                llm_tick=1,
-                model_name=self.runner_type,
-                provider_type=self.runner_type,
-            ),
-        )
