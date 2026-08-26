@@ -392,6 +392,7 @@ class OpenApiService:
         selected_provider = post_data.get("selected_provider")
         selected_model = post_data.get("selected_model")
         enable_streaming = post_data.get("enable_streaming", True)
+        show_reasoning = post_data.get("show_reasoning", True)
 
         back_queue = webchat_queue_mgr.get_or_create_back_queue(message_id, session_id)
         try:
@@ -405,6 +406,7 @@ class OpenApiService:
                         "selected_provider": selected_provider,
                         "selected_model": selected_model,
                         "enable_streaming": enable_streaming,
+                        "show_reasoning": show_reasoning,
                         "message_id": message_id,
                         "_api_key_allow_admin_role": allow_admin_username,
                     },

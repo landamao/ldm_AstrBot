@@ -25,6 +25,11 @@ PANEL_OPACITY_MIN = 0
 PANEL_OPACITY_MAX = 90
 # 板块透明度默认值（50=半透明，2026-08 用户要求默认 50%）
 PANEL_OPACITY_DEFAULT = 50
+# 窗口模糊度范围（0-60px，0=无模糊，用于弹窗/临时侧边栏 backdrop-filter）
+WINDOW_BLUR_MIN = 0
+WINDOW_BLUR_MAX = 41
+# 窗口模糊度默认值（20px，保证弹窗半透明时下层文字不混杂）
+WINDOW_BLUR_DEFAULT = 20
 
 # 壁纸图片上传
 WALLPAPER_UPLOAD_DIR_NAME = "wallpapers"
@@ -269,6 +274,12 @@ class DashboardPreferenceService:
             PANEL_OPACITY_MIN,
             PANEL_OPACITY_MAX,
         )
+        window_blur = _clamp_number(
+            value.get("windowBlur", value.get("window_blur")),
+            WINDOW_BLUR_DEFAULT,
+            WINDOW_BLUR_MIN,
+            WINDOW_BLUR_MAX,
+        )
 
         def _slot(raw: object) -> dict[str, str] | None:
             """规范化单个方向的壁纸槽：{url} 或 None。"""
@@ -297,6 +308,7 @@ class DashboardPreferenceService:
             and portrait is None
             and opacity == WALLPAPER_OPACITY_DEFAULT
             and panel_opacity == PANEL_OPACITY_DEFAULT
+            and window_blur == WINDOW_BLUR_DEFAULT
         ):
             # 启用中且无壁纸 + 全默认透明度 = 未设置
             return None
@@ -314,6 +326,8 @@ class DashboardPreferenceService:
             result["opacity"] = opacity
         if panel_opacity != PANEL_OPACITY_DEFAULT:
             result["panelOpacity"] = panel_opacity
+        if window_blur != WINDOW_BLUR_DEFAULT:
+            result["windowBlur"] = window_blur
         return result or None
 
     async def get_wallpaper(self) -> dict[str, object] | None:

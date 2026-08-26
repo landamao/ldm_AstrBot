@@ -114,6 +114,13 @@ class ResultDecorateStage(Stage):
         provider_cfg = ctx.astrbot_config.get("provider_settings", {})
         self.show_reasoning = provider_cfg.get("display_reasoning_text", False)
 
+    def _resolve_show_reasoning(self, event: AstrMessageEvent) -> bool:
+        """逐请求覆盖显示思考：WebChat 前端 show_reasoning 开关优先于全局配置。"""
+        override = event.get_extra("show_reasoning")
+        if override is not None:
+            return bool(override)
+        return self.show_reasoning
+
     async def process(
         self,
         event: AstrMessageEvent,
@@ -234,7 +241,7 @@ class ResultDecorateStage(Stage):
 
             if (
                 not should_tts
-                and self.show_reasoning
+                and self._resolve_show_reasoning(event)
                 and event.get_extra("_llm_reasoning_content")
             ):
                 # inject reasoning content to chain

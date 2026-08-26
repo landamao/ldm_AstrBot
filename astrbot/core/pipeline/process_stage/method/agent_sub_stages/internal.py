@@ -286,6 +286,13 @@ class InternalAgentSubStage(Stage):
                 if session_streaming is not None:
                     streaming_response = bool(session_streaming)
 
+            # 逐请求覆盖显示思考：WebChat 前端 show_reasoning 开关
+            show_reasoning_override = event.get_extra("show_reasoning")
+            if show_reasoning_override is not None:
+                show_reasoning = bool(show_reasoning_override)
+            else:
+                show_reasoning = self.show_reasoning
+
             has_provider_request = event.get_extra("provider_request") is not None
             has_valid_message = bool(event.message_str and event.message_str.strip())
             has_media_content = any(
@@ -453,7 +460,7 @@ class InternalAgentSubStage(Stage):
                                     self.max_step,
                                     self.show_tool_use,
                                     self.show_tool_call_result,
-                                    show_reasoning=self.show_reasoning,
+                                    show_reasoning=show_reasoning,
                                     buffer_intermediate_messages=self.buffer_intermediate_messages,
                                 ),
                             ),
@@ -489,7 +496,7 @@ class InternalAgentSubStage(Stage):
                                     self.max_step,
                                     self.show_tool_use,
                                     self.show_tool_call_result,
-                                    show_reasoning=self.show_reasoning,
+                                    show_reasoning=show_reasoning,
                                     buffer_intermediate_messages=self.buffer_intermediate_messages,
                                 ),
                             ),
@@ -520,7 +527,7 @@ class InternalAgentSubStage(Stage):
                             self.show_tool_use,
                             self.show_tool_call_result,
                             stream_to_general,
-                            show_reasoning=self.show_reasoning,
+                            show_reasoning=show_reasoning,
                             buffer_intermediate_messages=self.buffer_intermediate_messages,
                         ):
                             yield

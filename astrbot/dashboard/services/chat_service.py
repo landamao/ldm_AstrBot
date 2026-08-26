@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -137,6 +138,7 @@ class BotMessageAccumulator:
         self.parts: list[dict] = []
         self.pending_text = ""
         self.pending_tool_calls: dict[str, dict] = {}
+        self._think_start_time: float | None = None
 
     def has_content(self) -> bool:
         return bool(self.parts or self.pending_text or self.pending_tool_calls)
@@ -150,11 +152,15 @@ class BotMessageAccumulator:
     ) -> None:
         if chain_type == "tool_call":
             self._flush_pending_text()
+            if self._think_start_time is not None:
+                self._finalize_thinking_duration()
             self._store_tool_call(result_text)
             return
 
         if chain_type == "tool_call_result":
             self._flush_pending_text()
+            if self._think_start_time is not None:
+                self._finalize_thinking_duration()
             self._store_tool_call_result(result_text)
             return
 
@@ -162,6 +168,10 @@ class BotMessageAccumulator:
             self._flush_pending_text()
             self._append_think_part(result_text)
             return
+
+        # 非 reasoning 内容到达，结束思考计时
+        if self._think_start_time is not None:
+            self._finalize_thinking_duration()
 
         if streaming:
             self.pending_text += result_text
@@ -178,6 +188,8 @@ class BotMessageAccumulator:
         self, *, include_pending_tool_calls: bool = False
     ) -> list[dict]:
         self._flush_pending_text()
+        if self._think_start_time is not None:
+            self._finalize_thinking_duration()
         if include_pending_tool_calls and self.pending_tool_calls:
             for tool_call in self.pending_tool_calls.values():
                 self.parts.append({"type": "tool_call", "tool_calls": [tool_call]})
@@ -205,11 +217,25 @@ class BotMessageAccumulator:
         if not text:
             return
 
+        if self._think_start_time is None:
+            self._think_start_time = time.time()
+
         if self.parts and self.parts[-1].get("type") == "think":
             last_text = self.parts[-1].get("think")
             self.parts[-1]["think"] = f"{last_text or ''}{text}"
         else:
             self.parts.append({"type": "think", "think": text})
+
+    def _finalize_thinking_duration(self) -> None:
+        """思考结束：把耗时写入最后一个 think part。"""
+        if self._think_start_time is None:
+            return
+        elapsed = round(time.time() - self._think_start_time, 1)
+        self._think_start_time = None
+        for part in reversed(self.parts):
+            if part.get("type") == "think":
+                part["thinking_duration"] = elapsed
+                break
 
     def _store_tool_call(self, result_text: str) -> None:
         tool_call = self._parse_json_object(result_text)
@@ -805,6 +831,7 @@ class ChatService:
         selected_provider = post_data.get("selected_provider")
         selected_model = post_data.get("selected_model")
         enable_streaming = post_data.get("enable_streaming", True)
+        show_reasoning = post_data.get("show_reasoning", True)
         platform_history_id = post_data.get("_platform_history_id") or "webchat"
         thread_selected_text = post_data.get("_thread_selected_text")
 
@@ -1018,7 +1045,14 @@ class ChatService:
                         if should_save:
                             saved_record = await flush_pending_bot_message()
                             if saved_record and not client_disconnected:
-                                saved_info = {
+                                saved_content = (
+                                    saved_record.content
+                                    if isinstance(saved_record.content, dict)
+                                    else {}
+                                )
+                                saved_parts = saved_content.get("message", [])
+                                saved_refs = saved_content.get("refs")
+                                saved_info: dict = {
                                     "type": "message_saved",
                                     "data": {
                                         "id": saved_record.id,
@@ -1026,8 +1060,11 @@ class ChatService:
                                             saved_record.created_at
                                         ),
                                         "llm_checkpoint_id": llm_checkpoint_id,
+                                        "message_parts": saved_parts,
                                     },
                                 }
+                                if saved_refs:
+                                    saved_info["data"]["refs"] = saved_refs
                                 try:
                                     yield f"data: {json.dumps(saved_info, ensure_ascii=False)}\n\n"
                                 except Exception:
@@ -1058,6 +1095,7 @@ class ChatService:
                     "selected_provider": selected_provider,
                     "selected_model": selected_model,
                     "enable_streaming": enable_streaming,
+                    "show_reasoning": show_reasoning,
                     "message_id": message_id,
                     "llm_checkpoint_id": llm_checkpoint_id,
                     "thread_selected_text": thread_selected_text,
@@ -1459,6 +1497,7 @@ class ChatService:
             "session_id": thread.thread_id,
             "message": data.get("message", []),
             "enable_streaming": data.get("enable_streaming", True),
+            "show_reasoning": data.get("show_reasoning", True),
             "selected_provider": data.get("selected_provider"),
             "selected_model": data.get("selected_model"),
             "_platform_history_id": "webchat_thread",
@@ -1697,6 +1736,7 @@ class ChatService:
             "session_id": session_id,
             "message": source_user_record.content.get("message", []),
             "enable_streaming": data.get("enable_streaming", True),
+            "show_reasoning": data.get("show_reasoning", True),
             "selected_provider": data.get("selected_provider"),
             "selected_model": data.get("selected_model"),
             "_skip_user_history": True,
