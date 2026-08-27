@@ -6,6 +6,64 @@
 ---
 
 <details>
+<summary><strong>[4.27.11] — 2026-08-27</strong> — 聊天界面人格选择、Token统计显示模型、统一toast提示系统、多项移动端修复</summary>
+
+本次更新包含 2 项新增、4 项体验优化、4 项 Bug 修复。全部为 ldmbot 本地改动。
+
+### 新增
+
+- **聊天界面人格选择入口**
+  - WebUI 聊天区 +号菜单新增「人格情景」入口，无需先创建对话即可切换人格
+  - 没有对话时自动创建会话和对话，再设人格；有对话直接更新 persona_id
+  - 选择后菜单项副标题显示当前人格名
+  - 后端新增 `POST /chat/sessions/{session_id}/persona` 和 `GET /chat/sessions/{session_id}/persona` 接口
+
+- **Token 统计弹窗显示模型 ID**
+  - 消息下方感叹号图标的 Token 统计弹窗顶部新增模型行，显示本次回复使用的 provider ID
+  - 后端 AgentStats 新增 provider_id / model_name 字段，fallback 切换 provider 时同步更新
+
+### 体验优化
+
+- **消息重试「使用其他模型」手机端可操作**
+  - 子菜单改为手机端点击展开（桌面端保持 hover），图标换为水平双向箭头，语义更贴合
+
+- **Bot/Chat 切换按钮移动端常驻显示**
+  - 不再折叠进三点菜单，所有屏幕尺寸直接显示
+
+- **插件配置弹窗按钮固定底部**
+  - 弹窗改为 flex 布局 + max-height: 90vh，配置区独立滚动，按钮始终可见
+
+- **统一 toast 提示系统**
+  - 全站 toast 统一行为：error/warning 有 X 可关且不自动消失，success/info 3秒自动消失
+  - 统一显示在顶部居中，多条堆叠；位置下移到 top: 64px 避开顶栏，宽度加宽到 680px
+  - 删除所有页面级 v-snackbar，全部改用全局 toast store
+
+- **设置页保存按钮始终可点 + 离开提示**
+  - 保存按钮不再在有改动时才可点，任何时候都可点
+  - 有未保存改动时离开页面弹窗提示「保存并离开」或「不保存」
+
+### 修复
+
+- **壁纸纯白模式手机端侧边栏不透明**
+  - 模糊度=41 纯白模式下，手机端临时侧边栏仍半透明 → 补充纯白覆盖规则
+
+- **ChatUI 手机端侧边栏被顶栏覆盖**
+  - 侧边栏 z-index 低于顶栏 → .chat-main 改为 z-index: auto 消除 stacking context，临时侧边栏 z-index 提升到 1300
+
+- **纯白模式误覆盖桌面端 ChatUI 侧边栏**
+  - 纯白覆盖规则过于宽泛，桌面端 permanent sidebar 也变白 → 只覆盖 temporary 模式
+
+- **壁纸模糊度覆盖 tooltip 和 toast**
+  - 窗口模糊度覆盖了 v-tooltip 和 v-snackbar 导致内容看不清 → 选择器加 :not 排除
+
+### 说明
+
+- 更新后请**手动重启**一次服务
+- 若面板显示异常，可用顶栏「强制刷新面板」或浏览器 Ctrl+F5
+
+</details>
+
+<details>
 <summary><strong>[4.27.10] — 2026-08-27</strong> — 思考/工具调用显示扁平化、显示思考开关、窗口模糊度</summary>
 
 本次更新包含 2 项新增、1 项体验优化。全部为 ldmbot 本地改动。

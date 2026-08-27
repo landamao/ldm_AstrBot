@@ -23,6 +23,10 @@ class AgentStats:
     start_time: float = 0.0
     end_time: float = 0.0
     time_to_first_token: float = 0.0
+    provider_id: str = ""
+    """实际使用的 chat provider ID。"""
+    model_name: str = ""
+    """实际使用的模型名称。"""
 
     @property
     def duration(self) -> float:
@@ -35,4 +39,6 @@ class AgentStats:
             "start_time": self.start_time,
             "end_time": self.end_time,
             "time_to_first_token": self.time_to_first_token,
+            "provider_id": self.provider_id,
+            "model_name": self.model_name,
         }

@@ -169,6 +169,37 @@ async def delete_chat_session(
     return await _run(lambda: service.delete_webchat_session(auth.username, session_id))
 
 
+@router.post("/chat/sessions/{session_id}/persona")
+async def set_chat_session_persona(
+    session_id: str,
+    request: Request,
+    auth: AuthContext = Depends(require_chat_scope),
+    service: ChatService = Depends(get_service),
+):
+    body = await _json_or_empty(request)
+    persona_id = body.get("persona_id")
+    if persona_id is None:
+        return JSONResponse(error("Missing key: persona_id"))
+    return await _run(
+        lambda: service.set_session_persona(
+            auth.username,
+            session_id,
+            str(persona_id),
+        )
+    )
+
+
+@router.get("/chat/sessions/{session_id}/persona")
+async def get_chat_session_persona(
+    session_id: str,
+    auth: AuthContext = Depends(require_chat_scope),
+    service: ChatService = Depends(get_service),
+):
+    return await _run(
+        lambda: service.get_session_persona(auth.username, session_id)
+    )
+
+
 @router.post("/chat/sessions/{session_id}/stop")
 async def stop_chat_session(
     session_id: str,
@@ -328,6 +359,38 @@ async def dashboard_get_session(
             username,
             request.query_params.get("session_id"),
         )
+    )
+
+
+@legacy_router.post("/set_session_persona")
+async def dashboard_set_session_persona(
+    request: Request,
+    username: str = Depends(require_dashboard_user),
+    service: ChatService = Depends(get_service),
+):
+    body = await _json_or_empty(request)
+    session_id = body.get("session_id")
+    persona_id = body.get("persona_id")
+    if not session_id:
+        return JSONResponse(error("Missing key: session_id"))
+    if persona_id is None:
+        return JSONResponse(error("Missing key: persona_id"))
+    return await _run(
+        lambda: service.set_session_persona(username, str(session_id), str(persona_id))
+    )
+
+
+@legacy_router.get("/get_session_persona")
+async def dashboard_get_session_persona(
+    request: Request,
+    username: str = Depends(require_dashboard_user),
+    service: ChatService = Depends(get_service),
+):
+    session_id = request.query_params.get("session_id")
+    if not session_id:
+        return JSONResponse(error("Missing key: session_id"))
+    return await _run(
+        lambda: service.get_session_persona(username, session_id)
     )
 
 

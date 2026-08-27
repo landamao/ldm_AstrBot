@@ -1116,6 +1116,68 @@ class ChatService:
 
         return stream()
 
+    async def set_session_persona(
+        self,
+        username: str,
+        session_id: str,
+        persona_id: str,
+    ) -> dict:
+        """为 WebChat 会话设置人格情景。
+
+        如果当前会话没有对话，会自动创建一个。
+        persona_id 为 "[%None]" 时表示取消人格。
+        """
+        session = await self.db.get_platform_session_by_id(session_id)
+        if not session:
+            raise ChatServiceError(f"Session {session_id} not found")
+        if session.creator != username:
+            raise ChatServiceError("Permission denied")
+
+        unified_msg_origin = build_webchat_unified_msg_origin(session)
+        conversation_id = await self.conv_mgr.get_curr_conversation_id(
+            unified_msg_origin
+        )
+        if not conversation_id:
+            # 没有对话，自动创建
+            conversation_id = await self.conv_mgr.new_conversation(
+                unified_msg_origin,
+                platform_id=session.platform_id,
+                persona_id=persona_id if persona_id != "[%None]" else None,
+            )
+        else:
+            await self.conv_mgr.update_conversation(
+                unified_msg_origin=unified_msg_origin,
+                conversation_id=conversation_id,
+                persona_id=persona_id,
+            )
+        return {"conversation_id": conversation_id, "persona_id": persona_id}
+
+    async def get_session_persona(
+        self,
+        username: str,
+        session_id: str,
+    ) -> dict:
+        """获取 WebChat 会话当前对话的人格情景。"""
+        session = await self.db.get_platform_session_by_id(session_id)
+        if not session:
+            raise ChatServiceError(f"Session {session_id} not found")
+        if session.creator != username:
+            raise ChatServiceError("Permission denied")
+
+        unified_msg_origin = build_webchat_unified_msg_origin(session)
+        conversation_id = await self.conv_mgr.get_curr_conversation_id(
+            unified_msg_origin
+        )
+        persona_id = None
+        if conversation_id:
+            conv = await self.conv_mgr.get_conversation(
+                unified_msg_origin=unified_msg_origin,
+                conversation_id=conversation_id,
+            )
+            if conv:
+                persona_id = conv.persona_id
+        return {"conversation_id": conversation_id, "persona_id": persona_id}
+
     async def stop_session(self, username: str, session_id: str) -> dict:
         session = await self.db.get_platform_session_by_id(session_id)
         if not session:

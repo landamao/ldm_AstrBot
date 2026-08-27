@@ -326,6 +326,12 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
 
         self.stats = AgentStats()
         self.stats.start_time = time.time()
+        self.stats.provider_id = str(
+            self.provider.provider_config.get("id", "")
+        )
+        self.stats.model_name = str(
+            self.provider.provider_config.get("model", "")
+        )
 
     def _read_tool_hint(self) -> str:
         if self.read_tool is not None:
@@ -569,6 +575,12 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     candidate_id,
                 )
             self.provider = candidate
+            self.stats.provider_id = str(
+                candidate.provider_config.get("id", "")
+            )
+            self.stats.model_name = str(
+                candidate.provider_config.get("model", "")
+            )
             try:
                 retrying = AsyncRetrying(
                     retry=retry_if_exception_type(EmptyModelOutputError),
