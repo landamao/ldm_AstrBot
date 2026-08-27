@@ -14,6 +14,9 @@ from astrbot.core.agent.message import (
     dump_messages_with_checkpoints,
 )
 from astrbot.core.agent.response import AgentStats
+from astrbot.core.agent.runners.tool_loop_agent_runner import (
+    extract_exception_code,
+)
 from astrbot.core.astr_main_agent import (
     LLM_ERROR_MESSAGE_EXTRA_KEY,
     MainAgentBuildConfig,
@@ -40,7 +43,12 @@ from astrbot.core.star.star_handler import EventType
 from astrbot.core.utils.active_event_registry import active_event_registry
 from astrbot.core.utils.session_lock import session_lock_manager
 
-from .....astr_agent_run_util import AgentRunner, run_agent, run_live_agent
+from .....astr_agent_run_util import (
+    AgentRunner,
+    build_llm_error_chain,
+    run_agent,
+    run_live_agent,
+)
 from ....context import PipelineContext, call_event_hook
 from ...follow_up import (
     FollowUpCapture,
@@ -51,6 +59,16 @@ from ...follow_up import (
     try_capture_follow_up,
     unregister_active_runner,
 )
+
+
+def _safe_error_model(agent_runner) -> str | None:
+    """安全获取 agent runner 当前使用的模型名，失败时返回 None。"""
+    try:
+        if agent_runner is not None and agent_runner.provider is not None:
+            return agent_runner.provider.get_model()
+    except Exception:
+        pass
+    return None
 
 
 class InternalAgentSubStage(Stage):
@@ -158,9 +176,15 @@ class InternalAgentSubStage(Stage):
         )
 
     async def _send_llm_error_message(
-        self, event: AstrMessageEvent, message: object
+        self,
+        event: AstrMessageEvent,
+        message: object,
+        model: str | None = None,
+        code: str | None = None,
     ) -> None:
-        await event.send(MessageChain().message(str(message)))
+        await event.send(
+            build_llm_error_chain(event, message, model=model, code=code)
+        )
 
     def _get_interrupt_reply_config(self, event: AstrMessageEvent) -> dict:
         conf = self.ctx.plugin_manager.context.get_config(umo=event.unified_msg_origin)
@@ -370,6 +394,7 @@ class InternalAgentSubStage(Stage):
                             await self._send_llm_error_message(
                                 event,
                                 llm_error_message,
+                                model=event.get_extra("selected_model"),
                             )
                         return
 
@@ -386,7 +411,11 @@ class InternalAgentSubStage(Stage):
                                 "因安全原因被拦截，请更换可用的 AI 提供商。"
                             )
                             logger.error(error_message)
-                            await self._send_llm_error_message(event, error_message)
+                            await self._send_llm_error_message(
+                                event,
+                                error_message,
+                                model=provider.get_model(),
+                            )
                             return
 
                     stream_to_general = (
@@ -504,22 +533,48 @@ class InternalAgentSubStage(Stage):
                         yield
                         if agent_runner.done():
                             if final_llm_resp := agent_runner.get_final_llm_resp():
-                                if final_llm_resp.completion_text:
+                                if final_llm_resp.role == "err":
+                                    # 模型请求出错：发送可展开的折叠错误消息（WebChat），
+                                    # 其他平台保持纯文本。不用 STREAMING_FINISH（会被丢弃）。
+                                    llm_err = getattr(
+                                        agent_runner, "last_llm_error", None
+                                    ) or {}
+                                    err_chain = build_llm_error_chain(
+                                        event,
+                                        final_llm_resp.completion_text
+                                        or "LLM 请求失败。",
+                                        model=llm_err.get("model")
+                                        or _safe_error_model(agent_runner)
+                                        or event.get_extra("selected_model"),
+                                        code=llm_err.get("code"),
+                                    )
+                                    event.set_result(
+                                        MessageEventResult(
+                                            chain=err_chain.chain,
+                                            type=err_chain.type,
+                                            result_content_type=ResultContentType.GENERAL_RESULT,
+                                        ),
+                                    )
+                                elif final_llm_resp.completion_text:
                                     chain = (
                                         MessageChain()
                                         .message(final_llm_resp.completion_text)
                                         .chain
                                     )
+                                    event.set_result(
+                                        MessageEventResult(
+                                            chain=chain,
+                                            result_content_type=ResultContentType.STREAMING_FINISH,
+                                        ),
+                                    )
                                 elif final_llm_resp.result_chain:
                                     chain = final_llm_resp.result_chain.chain
-                                else:
-                                    chain = MessageChain().chain
-                                event.set_result(
-                                    MessageEventResult(
-                                        chain=chain,
-                                        result_content_type=ResultContentType.STREAMING_FINISH,
-                                    ),
-                                )
+                                    event.set_result(
+                                        MessageEventResult(
+                                            chain=chain,
+                                            result_content_type=ResultContentType.STREAMING_FINISH,
+                                        ),
+                                    )
                     else:
                         async for _ in run_agent(
                             agent_runner,
@@ -577,7 +632,16 @@ class InternalAgentSubStage(Stage):
             error_text = custom_error_message or (
                 f"Error occurred while processing agent request: {e}"
             )
-            await event.send(MessageChain().message(error_text))
+            await self._send_llm_error_message(
+                event,
+                error_text,
+                model=(
+                    _safe_error_model(agent_runner)
+                    or str(getattr(locals().get("req"), "model", "") or "")
+                    or None
+                ),
+                code=extract_exception_code(e),
+            )
         finally:
             if typing_requested:
                 try:

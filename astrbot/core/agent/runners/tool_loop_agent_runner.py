@@ -103,6 +103,62 @@ class _ToolExecutionInterrupted(Exception):
     """Raised when a running tool call is interrupted by a stop request."""
 
 
+def extract_exception_code(exc: BaseException | None) -> str | None:
+    """从异常中提取可展示的错误码（HTTP 状态码 / 业务 code）。
+
+    按 异常自身属性(status_code/code/status) → 包装的 HTTP 响应(status_code)
+    → __cause__/__context__ 链 的顺序查找，取第一个非空值。
+    """
+    if exc is None:
+        return None
+    seen: set[int] = set()
+    cursor: BaseException | None = exc
+    while cursor is not None and id(cursor) not in seen:
+        seen.add(id(cursor))
+        for attr in ("status_code", "code", "status", "statusCode"):
+            try:
+                raw = getattr(cursor, attr, None)
+            except Exception:
+                raw = None
+            if raw is None:
+                continue
+            if callable(raw):
+                continue
+            try:
+                raw = int(raw)
+                if raw > 0:
+                    return str(raw)
+            except (TypeError, ValueError):
+                text = str(raw).strip()
+                if text:
+                    return text
+        # 部分异常把状态码包在 HTTP 响应对象上（如 httpx.HTTPStatusError.response）
+        for wrap_attr in ("response", "resp"):
+            try:
+                wrapped = getattr(cursor, wrap_attr, None)
+            except Exception:
+                wrapped = None
+            if wrapped is None:
+                continue
+            try:
+                sc = getattr(wrapped, "status_code", None) or getattr(
+                    wrapped, "status", None
+                )
+            except Exception:
+                sc = None
+            if sc is not None:
+                try:
+                    sc = int(sc)
+                    if sc > 0:
+                        return str(sc)
+                except (TypeError, ValueError):
+                    text = str(sc).strip()
+                    if text:
+                        return text
+        cursor = cursor.__cause__ or cursor.__context__
+    return None
+
+
 ToolExecutorResultT = T.TypeVar("ToolExecutorResultT")
 
 
@@ -274,6 +330,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             if fallback_id:
                 seen_provider_ids.add(fallback_id)
         self.final_llm_resp = None
+        self.last_llm_error: dict | None = None
         self._state = AgentState.IDLE
         self.tool_executor = tool_executor
         self.agent_hooks = agent_hooks
@@ -655,9 +712,24 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 continue
 
         if last_err_response:
+            self.last_llm_error = {
+                "model": self.provider.provider_config.get("model", "")
+                if self.provider
+                else "",
+                "code": None,
+                "detail": last_err_response.completion_text
+                or "LLM 请求失败，未返回可用响应。",
+            }
             yield last_err_response
             return
         if last_exception:
+            self.last_llm_error = {
+                "model": self.provider.provider_config.get("model", "")
+                if self.provider
+                else "",
+                "code": extract_exception_code(last_exception),
+                "detail": f"{type(last_exception).__name__}: {last_exception}",
+            }
             yield LLMResponse(
                 role="err",
                 completion_text=(

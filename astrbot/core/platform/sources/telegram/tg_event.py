@@ -625,6 +625,17 @@ class TelegramPlatformEvent(AstrMessageEvent):
                 message_thread_id,
             )
             await self._send_final_segment(delta, payload)
+        # 流式完成（完整文本在 delta），打发送日志带出内容
+        if delta:
+            try:
+                logger.info(
+                    "发送消息 - 流式输出完成 - %s/%s: %s",
+                    self.get_sender_name() or "-",
+                    self.get_sender_id() or "-",
+                    delta,
+                )
+            except Exception:
+                logger.debug("Telegram 流式日志失败", exc_info=True)
 
     async def _send_streaming_edit(
         self,
@@ -729,3 +740,14 @@ class TelegramPlatformEvent(AstrMessageEvent):
                     )
         except Exception as e:
             logger.warning(f"编辑消息失败(streaming): {e!s}")
+        # 流式完成（完整文本在 delta），打发送日志带出内容
+        if delta:
+            try:
+                logger.info(
+                    "发送消息 - 流式输出完成 - %s/%s: %s",
+                    self.get_sender_name() or "-",
+                    self.get_sender_id() or "-",
+                    delta,
+                )
+            except Exception:
+                logger.debug("Telegram 流式日志失败", exc_info=True)

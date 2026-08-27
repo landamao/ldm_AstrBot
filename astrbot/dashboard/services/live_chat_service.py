@@ -455,6 +455,7 @@ class LiveChatService:
         persona_prompt = message.get("persona_prompt")
         show_reasoning = message.get("show_reasoning")
         enable_streaming = message.get("enable_streaming", True)
+        enable_fallback = message.get("enable_fallback", True)
 
         if not isinstance(payload, list):
             await self.send_chat_payload(
@@ -507,6 +508,7 @@ class LiveChatService:
                         "persona_prompt": persona_prompt,
                         "show_reasoning": show_reasoning,
                         "enable_streaming": enable_streaming,
+                        "enable_fallback": enable_fallback,
                         "message_id": message_id,
                         "llm_checkpoint_id": llm_checkpoint_id,
                     },
@@ -573,6 +575,14 @@ class LiveChatService:
                 message_accumulator = BotMessageAccumulator()
                 agent_stats = {}
                 refs = {}
+                # 落库点打日志：这里已持有完整消息（与“发送消息”日志对齐，WebChat 不走 send()）
+                if plain_text:
+                    logger.info(
+                        "发送消息 - 流式输出完成 - %s/%s: %s",
+                        session.username or "-",
+                        session_id or "-",
+                        plain_text,
+                    )
                 return saved_record
 
             pending_bot_message_flusher = flush_pending_bot_message

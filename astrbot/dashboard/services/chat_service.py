@@ -169,6 +169,14 @@ class BotMessageAccumulator:
             self._append_think_part(result_text)
             return
 
+        if chain_type == "llm_error":
+            # 模型请求错误：持久化为结构化错误 part（前端折叠块展示）
+            self._flush_pending_text()
+            if self._think_start_time is not None:
+                self._finalize_thinking_duration()
+            self._store_llm_error(result_text)
+            return
+
         # 非 reasoning 内容到达，结束思考计时
         if self._think_start_time is not None:
             self._finalize_thinking_duration()
@@ -261,6 +269,19 @@ class BotMessageAccumulator:
         tool_call["result"] = tool_result.get("result")
         tool_call["finished_ts"] = tool_result.get("ts")
         self.parts.append({"type": "tool_call", "tool_calls": [tool_call]})
+
+    def _store_llm_error(self, result_text: str) -> None:
+        payload = self._parse_json_object(result_text)
+        if not payload:
+            return
+        self.parts.append(
+            {
+                "type": "llm_error",
+                "model": str(payload.get("model") or ""),
+                "code": str(payload.get("code") or ""),
+                "detail": str(payload.get("detail") or ""),
+            }
+        )
 
     @staticmethod
     def _parse_json_object(raw_text: str) -> dict | None:
@@ -832,6 +853,7 @@ class ChatService:
         selected_model = post_data.get("selected_model")
         enable_streaming = post_data.get("enable_streaming", True)
         show_reasoning = post_data.get("show_reasoning", True)
+        enable_fallback = post_data.get("enable_fallback", True)
         platform_history_id = post_data.get("_platform_history_id") or "webchat"
         thread_selected_text = post_data.get("_thread_selected_text")
 
@@ -895,6 +917,14 @@ class ChatService:
                 message_accumulator = BotMessageAccumulator()
                 agent_stats = {}
                 refs = {}
+                # 落库点打日志：这里已持有完整消息（与“发送消息”日志对齐，WebChat 不走 send()）
+                if plain_text:
+                    logger.info(
+                        "发送消息 - 流式输出完成 - %s/%s: %s",
+                        username or "-",
+                        webchat_conv_id or "-",
+                        plain_text,
+                    )
                 return saved_record
 
             def build_attachment_saved_event(part: dict | None) -> str | None:
@@ -1096,6 +1126,7 @@ class ChatService:
                     "selected_model": selected_model,
                     "enable_streaming": enable_streaming,
                     "show_reasoning": show_reasoning,
+                    "enable_fallback": enable_fallback,
                     "message_id": message_id,
                     "llm_checkpoint_id": llm_checkpoint_id,
                     "thread_selected_text": thread_selected_text,

@@ -51,7 +51,6 @@ class AstrBotExporter:
     - 配置目录（data/config）
     - T2I 模板目录（data/t2i_templates）
     - WebChat 数据目录（data/webchat）
-    - 临时文件目录（data/temp）
     """
 
     def __init__(
@@ -86,7 +85,7 @@ class AstrBotExporter:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        zip_filename = f"astrbot_backup_{timestamp}.zip"
+        zip_filename = f"ldmbot_backup_{timestamp}.zip"
         zip_path = os.path.join(output_dir, zip_filename)
 
         logger.info(f"开始导出备份到 {zip_path}")

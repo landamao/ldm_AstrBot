@@ -1618,6 +1618,9 @@ class ProviderConfigService:
         try:
             models = await inst.get_models()
             models = models or []
+            logger.info(
+                f"获取模型列表: 提供商源「{source_id}」获取到 {len(models)} 个模型"
+            )
             return {
                 "models": models,
                 "provider_source_id": source_id,
@@ -1654,6 +1657,9 @@ class ProviderConfigService:
 
         models = await provider.get_models()
         models = models or []
+        logger.info(
+            f"获取模型列表: 提供商「{provider_id}」获取到 {len(models)} 个模型"
+        )
         return {
             "models": models,
             "provider_id": provider_id,
@@ -1880,8 +1886,10 @@ class ProviderConfigService:
         try:
             await target.test()
             result["status"] = "available"
+            logger.info(f"测试提供商「{provider_id}」成功（模型: {result.get('model', '未知')}）")
         except Exception as exc:
             result["error"] = str(exc)
+            logger.warning(f"测试提供商「{provider_id}」失败: {exc}")
         return result
 
     async def test_provider_from_dashboard_args(self, args) -> dict:

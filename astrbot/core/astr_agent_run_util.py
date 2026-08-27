@@ -7,7 +7,10 @@ from typing import Any
 
 from astrbot.core import logger
 from astrbot.core.agent.message import Message
-from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
+from astrbot.core.agent.runners.tool_loop_agent_runner import (
+    ToolLoopAgentRunner,
+    extract_exception_code,
+)
 from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.message.components import BaseMessageComponent, Json, Plain
 from astrbot.core.message.message_event_result import (
@@ -31,6 +34,42 @@ def _should_stop_agent(astr_event) -> bool:
         or bool(astr_event.get_extra("agent_stop_requested"))
         or bool(astr_event.get_extra("agent_force_stop"))
     )
+
+
+def build_llm_error_chain(
+    astr_event,
+    message: object,
+    model: str | None = None,
+    code: str | None = None,
+) -> MessageChain:
+    """构造模型请求错误的发送链。
+
+    WebChat：发送结构化折叠错误消息（chain_type=llm_error，前端以可展开折叠块展示，
+    标题显示模型名与错误码，展开可查看完整错误）；其他平台保持普通文本。
+    """
+    text = str(message)
+    if astr_event.get_platform_name() == "webchat":
+        return MessageChain(
+            type="llm_error",
+            chain=[
+                Json(
+                    {
+                        "model": model or "",
+                        "code": code or "",
+                        "detail": text,
+                    }
+                )
+            ],
+        )
+    return MessageChain().message(text)
+
+
+def _agent_runner_error_info(agent_runner) -> tuple[str | None, str | None]:
+    """取最后一次 LLM 请求错误的 (模型名, 错误码)。"""
+    llm_err = getattr(agent_runner, "last_llm_error", None) or {}
+    model = llm_err.get("model") or ""
+    code = llm_err.get("code") or ""
+    return (model or None), (code or None)
 
 
 def _truncate_tool_result(text: str, limit: int = 70) -> str:
@@ -266,6 +305,16 @@ async def run_agent(
                         buffered_llm_chains.append(resp.data["chain"])
                         continue
 
+                    chain = resp.data["chain"]
+                    if resp.type == "err":
+                        model, code = _agent_runner_error_info(agent_runner)
+                        chain = build_llm_error_chain(
+                            astr_event,
+                            chain.get_plain_text() or "LLM 请求失败。",
+                            model=model,
+                            code=code,
+                        )
+
                     content_typ = (
                         ResultContentType.LLM_RESULT
                         if resp.type == "llm_result"
@@ -273,11 +322,12 @@ async def run_agent(
                     )
                     astr_event.set_result(
                         MessageEventResult(
-                            chain=resp.data["chain"].chain,
+                            chain=chain.chain,
+                            type=chain.type,
                             result_content_type=content_typ,
                         ),
                     )
-                    yield resp.data["chain"]
+                    yield chain
                     astr_event.clear_result()
                 elif resp.type == "streaming_delta":
                     chain = resp.data["chain"]
@@ -348,10 +398,23 @@ async def run_agent(
             except Exception:
                 logger.exception("Error in on_agent_done hook")
 
+            model, code = _agent_runner_error_info(agent_runner)
+            err_chain = build_llm_error_chain(
+                astr_event,
+                err_msg,
+                model=model or str(getattr(e, "model", "") or "") or None,
+                code=code or extract_exception_code(e),
+            )
             if agent_runner.streaming:
-                yield MessageChain().message(err_msg)
+                yield err_chain
             else:
-                astr_event.set_result(MessageEventResult().message(err_msg))
+                astr_event.set_result(
+                    MessageEventResult(
+                        chain=err_chain.chain,
+                        type=err_chain.type,
+                        result_content_type=ResultContentType.GENERAL_RESULT,
+                    )
+                )
             return
 
 

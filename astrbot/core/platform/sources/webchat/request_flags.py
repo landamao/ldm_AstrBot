@@ -5,6 +5,7 @@ WEBCHAT_REQUEST_FLAG_DEFAULTS = {
     "enable_default_system_prompt": True,
     "enable_streaming": True,
     "show_reasoning": True,
+    "enable_fallback": True,
 }
 
 

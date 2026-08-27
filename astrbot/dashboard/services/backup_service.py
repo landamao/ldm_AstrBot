@@ -271,6 +271,7 @@ class BackupService:
             "total": len(backup_files),
             "page": page,
             "page_size": page_size,
+            "backup_dir": self.backup_dir,
         }
 
     def export_backup(self) -> dict:

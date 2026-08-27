@@ -1690,6 +1690,11 @@ async def build_main_agent(
     fallback_providers = _get_fallback_chat_providers(
         provider, plugin_context, config.provider_settings
     )
+    # WebChat 主模型失败回退开关：关闭时仅使用主模型，不再尝试备用提供商
+    if event.get_extra("enable_fallback") is False:
+        if fallback_providers:
+            logger.info("主模型失败回退已关闭（WebChat 开关），本次请求仅使用主模型。")
+        fallback_providers = []
     selected_provider = _select_image_chat_provider(provider, req, fallback_providers)
     if selected_provider is not provider:
         provider = selected_provider

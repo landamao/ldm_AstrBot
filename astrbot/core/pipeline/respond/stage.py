@@ -1,6 +1,4 @@
 import asyncio
-import math
-import random
 from collections.abc import AsyncGenerator
 
 import astrbot.core.message.components as Comp
@@ -354,13 +352,6 @@ class RespondStage(Stage):
                 event.clear_result()
                 return
             await event.send_streaming(result.async_stream, realtime_segmenting)
-            # 流式输出完成后打日志；如果 send() 已经打过（如 aiocqhttp 非fallback），则跳过
-            if not event.get_extra("_delivered_plain_text"):
-                logger.info(
-                    "发送消息 - 流式输出 - %s/%s",
-                    event.get_sender_name() or "-",
-                    event.get_sender_id() or "-",
-                )
             return
         if len(result.chain) > 0:
             # 检查路径映射
