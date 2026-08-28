@@ -20,6 +20,7 @@ from astrbot.core.desktop_runtime import (
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_path
 from astrbot.core.utils.io import ensure_dir, on_error
 from astrbot.core.utils.github_proxy import normalize_ldm_mirror
+from astrbot.core.utils.update_rollback import backup_current_version, clear_dir_contents
 
 from .zip_updator import ReleaseInfo, RepoZipUpdator
 
@@ -948,9 +949,10 @@ class AstrBotUpdator(RepoZipUpdator):
 
     def _安全覆盖目录(self, 源目录: Path, 目标目录: Path) -> None:
         ensure_dir(目标目录.parent)
-        if 目标目录.exists():
-            shutil.rmtree(目标目录, onerror=on_error)
-        shutil.copytree(源目录, 目标目录)
+        if 目标目录.exists() or 目标目录.is_symlink():
+            # 只清空内容、保留目录节点（目录若是软链接则保留软链接、只更新其指向内容）
+            clear_dir_contents(目标目录)
+        shutil.copytree(源目录, 目标目录, dirs_exist_ok=True)
 
     def _应用源码包内容(self, 包根目录: Path) -> Path | None:
         """把更新包内容同步到本地。
@@ -979,17 +981,16 @@ class AstrBotUpdator(RepoZipUpdator):
             目标路径 = 目标根 / 名称
 
             if 源路径.is_dir():
-                # 目录：先删后整棵拷贝，确保与更新包一致
-                if 目标路径.exists():
-                    if 目标路径.is_dir():
-                        shutil.rmtree(目标路径, onerror=on_error)
-                    else:
-                        目标路径.unlink()
-                shutil.copytree(源路径, 目标路径)
+                # 目录：只清空目标内容（保留目录节点，软链接安全），再拷入新内容
+                if 目标路径.exists() or 目标路径.is_symlink():
+                    clear_dir_contents(目标路径)
+                shutil.copytree(源路径, 目标路径, dirs_exist_ok=True)
             else:
                 # 根文件：直接覆盖 main.py / README / pyproject.toml 等
                 ensure_dir(目标路径.parent)
-                if 目标路径.exists():
+                if 目标路径.is_symlink():
+                    目标路径.unlink()
+                elif 目标路径.exists():
                     if 目标路径.is_dir():
                         shutil.rmtree(目标路径, onerror=on_error)
                     else:
@@ -1074,6 +1075,18 @@ class AstrBotUpdator(RepoZipUpdator):
                 if not children:
                     raise RuntimeError("更新包内容为空，无法应用。")
                 包根目录 = children[0]
+
+            # 更新前备份当前版本（失败则中断更新，防止旧版本丢失后无法回滚）
+            try:
+                backup_path = backup_current_version(
+                    project_root=self.MAIN_PATH,
+                    version=VERSION,
+                    webui_dir=self._resolve_webui_dir(),
+                    data_dir=get_astrbot_data_path(),
+                )
+            except Exception as exc:
+                raise RuntimeError(f"更新前备份旧版本失败，已中断更新（避免旧版本丢失）: {exc}") from exc
+            logger.info(f"更新前已备份当前版本 {VERSION} -> {backup_path}")
 
             webui_dist = self._应用源码包内容(包根目录)
             webui_applied = self._应用webui(webui_dist)

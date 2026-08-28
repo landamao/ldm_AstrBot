@@ -217,6 +217,8 @@ def _should_show_startup_banner(argv: list[str] | None = None) -> bool:
         return False
     if "--reset-password" in argv or "--重置密码" in argv:
         return False
+    if "--rollback" in argv or "--回滚" in argv:
+        return False
     return True
 
 
@@ -372,6 +374,8 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
 启动参数:
   --data-dir <路径>        指定 data 目录路径（等价 LDMBOT_DATA_DIR）
   --webui-dir <路径>       指定 WebUI 静态文件目录路径（默认 data/dist）
+  --rollback, --回滚 [版本号]  回滚到旧版本备份（不带版本号=最近一次备份，
+                           如 --rollback 4.26.26；备份在 data/ldmbot_rollback/）
   --reset-password, --重置密码  重置管理面板密码（交互式输入新密码，留空用默认 "ldm"）
                            改完直接退出，需重新启动
   -h, --help               显示本帮助信息
@@ -442,6 +446,8 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
   python main.py                                  正常启动
   python main.py --data-dir /path/to/data         指定 data 目录
   python main.py --webui-dir /path/to/dist        指定 WebUI 目录
+  python main.py --rollback                       回滚到最近一次备份
+  python main.py --rollback 4.26.26               回滚到指定版本备份
   python main.py --reset-password                 重置管理面板密码
   LDMBOT_DASHBOARD_PORT=8080 python main.py       指定端口启动
   LDMBOT_NO_BANNER=1 python main.py               跳过横幅动画
@@ -464,6 +470,14 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
         "--重置密码",
         action="store_true",
         help="重置管理面板密码（交互式输入，留空用默认 ldm），改完退出需重启",
+    )
+    _parser.add_argument(
+        "--rollback",
+        "--回滚",
+        nargs="?",
+        const="",
+        default=None,
+        help="回滚到旧版本备份（不带版本号=最近一次备份，如 --rollback 4.26.26）",
     )
     _parser.parse_args()
     sys.exit(0)
@@ -488,11 +502,54 @@ def _apply_startup_env_flags(argv: list[str]) -> None:
     startup_parser = argparse.ArgumentParser(add_help=False)
     startup_parser.add_argument("--reset-password", "--重置密码", action="store_true", dest="reset_password")
     startup_parser.add_argument("--data-dir", type=str, default=None)
+    startup_parser.add_argument("--webui-dir", type=str, default=None)
+    startup_parser.add_argument("--rollback", "--回滚", nargs="?", const="", default=None)
     startup_args, _ = startup_parser.parse_known_args(argv)
     if startup_args.data_dir:
         os.environ["LDMBOT_DATA_DIR"] = startup_args.data_dir
+    if startup_args.rollback is not None:
+        _do_rollback(startup_args.rollback or None, webui_dir=startup_args.webui_dir)
     if startup_args.reset_password:
         _prompt_and_set_reset_password()
+
+
+def _do_rollback(version: str | None, webui_dir: str | None = None) -> None:
+    """执行启动参数 --rollback：解压备份 zip → 清空 astrbot/dist → 复制回去。
+
+    在本阶段不能 import astrbot 包（会加载重模块），因此用 importlib
+    按文件路径加载纯标准库的回滚模块。回滚无论成功或失败都直接退出，
+    不继续启动服务：成功时提示重启生效，失败时提示检查后重启。
+    """
+    try:
+        import importlib.util
+
+        模块路径 = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "astrbot",
+            "core",
+            "utils",
+            "update_rollback.py",
+        )
+        spec = importlib.util.spec_from_file_location("ldmbot_update_rollback", 模块路径)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"无法加载回滚模块: {模块路径}")
+        回滚模块 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(回滚模块)
+
+        回滚成功 = 回滚模块.rollback(
+            version=version,
+            project_root=os.path.dirname(os.path.abspath(__file__)),
+            webui_dir=webui_dir,
+        )
+    except Exception as exc:
+        print(f"{red}回滚失败: {exc}。{reset}")
+        sys.exit(1)
+
+    if 回滚成功:
+        print(f"{green}回滚完成，请重新启动 ldm 生效。{reset}")
+        sys.exit(0)
+    # 失败原因已由回滚模块打印（找不到备份 / 指定版本不存在 / 备份损坏等）
+    sys.exit(1)
 
 
 def _prompt_and_set_reset_password() -> None:
@@ -703,6 +760,14 @@ if __name__ == "__main__":
         "--重置密码",
         action="store_true",
         help="重置管理面板密码（交互式输入，留空用默认 ldm），改完退出需重启",
+    )
+    _parser.add_argument(
+        "--rollback",
+        "--回滚",
+        nargs="?",
+        const="",
+        default=None,
+        help="回滚到旧版本备份（不带版本号=最近一次备份，如 --rollback 4.26.26）",
     )
     args = _parser.parse_args()
 
