@@ -161,7 +161,7 @@ def backup_current_version(
 ) -> Path:
     """更新前备份当前版本到 data/ldmbot_rollback/ldmbot_<版本>.zip。
 
-    包内只含两样：astrbot/ 目录 + dist/ 目录
+    包内含三样：astrbot/ 目录 + dist/ 目录 + 根目录 main.py
     （dist = 实际生效 WebUI 目录，默认 data/dist，跟随 --webui-dir/LDMBOT_WEBUI_DIR）。
     多个版本可同时保留，重名则覆盖。备份失败抛出异常，由调用方中断更新
     （防止旧版本丢失后无法回滚）。
@@ -189,6 +189,10 @@ def backup_current_version(
             _zip_tree(zf, 源码目录, "astrbot")
             if dist目录 is not None:
                 _zip_tree(zf, dist目录, "dist")
+            # 根目录 main.py 也备份（入口脚本，回滚时一并恢复）
+            main_py = project_root / "main.py"
+            if main_py.is_file():
+                zf.write(main_py, "main.py")
     except OSError as exc:
         raise RuntimeError(f"备份失败: 写入备份文件出错: {exc}") from exc
 
@@ -232,7 +236,8 @@ def rollback(
 
     流程：解压备份 zip 到临时目录 → 清空当前 astrbot/、dist/ 内容
     （保留目录节点，软链接安全）→ 把包内内容复制回去（复制而非重命名）→
-    清理临时目录 → 继续正常启动（用旧版代码跑起来）。
+    根目录 main.py 备份中有则一并恢复 → 清理临时目录 → 继续正常启动
+    （用旧版代码跑起来）。
     备份目录保留不删，用户确认新版没问题后手动删。
     找不到备份 / 指定版本不存在 → 打印中文提示并返回 False，继续正常启动。
     """
@@ -284,7 +289,15 @@ def rollback(
         clear_dir_contents(当前astrbot)
         shutil.copytree(包astrbot, 当前astrbot, dirs_exist_ok=True)
 
-        # 2. 恢复 dist/（备份中有才恢复；无则保持现状并提示）
+        # 2. 恢复根目录 main.py（备份中有才恢复；无则保持现状并提示）
+        包main = tmp_root / "main.py"
+        if 包main.is_file():
+            当前main = project_root / "main.py"
+            shutil.copy2(包main, 当前main)
+        else:
+            print(f"{_黄}备份中无 main.py（旧备份），入口脚本保持现状。{_重置}")
+
+        # 3. 恢复 dist/（备份中有才恢复；无则保持现状并提示）
         包dist = tmp_root / "dist"
         if 包dist.is_dir():
             显式webui = _resolve_webui_dir(webui_dir)

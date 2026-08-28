@@ -43,6 +43,17 @@
 
 ---
 
+## 📱 安卓客户端
+
+手机端 App（arm64-v8a），自带浏览器 + 真 Linux 终端，内置 ldmbot 安装脚本：
+
+- 下载：https://github.com/landamao/ldmbot_apk/releases/latest
+- 仓库：https://github.com/landamao/ldmbot_apk
+
+首次安装后进入「终端」，点击快捷栏中的「安装」即可自动部署 ldmbot。
+
+---
+
 
 # ✨ 功能特性
 ## 1. /help指令回归旧版，再也不是新版本后的英文版，仅几个指令
