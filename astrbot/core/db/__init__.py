@@ -771,6 +771,7 @@ class BaseDatabase(abc.ABC):
         session_id: str | None = None,
         display_name: str | None = None,
         is_group: int = 0,
+        session_type: str = "chat",
     ) -> PlatformSession:
         """Create a new Platform session."""
         ...

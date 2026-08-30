@@ -52,10 +52,11 @@ if not _支持颜色():
 
 
 def resolve_data_dir(data_dir: str | None = None) -> str:
-    """数据目录：显式指定 > LDMBOT_DATA_DIR > LDMBOT_ROOT/data > cwd/data。
+    """数据目录：显式指定 > LDMBOT_DATA_DIR > LDMBOT_ROOT/data > 源码根/data。
 
     与 astrbot/core/utils/astrbot_path.py 的 get_astrbot_data_path() 同规则，
     纯标准库实现（本模块可能在加载 astrbot 包之前被调用）。
+    默认跟随项目源码自身位置而非启动时的 cwd。
     """
     if data_dir:
         return os.path.realpath(data_dir)
@@ -63,6 +64,9 @@ def resolve_data_dir(data_dir: str | None = None) -> str:
         return os.path.realpath(env)
     if root := os.environ.get("LDMBOT_ROOT"):
         return os.path.realpath(os.path.join(root, "data"))
+    源码根 = _默认项目根()
+    if os.path.isfile(os.path.join(源码根, "main.py")):
+        return os.path.realpath(os.path.join(源码根, "data"))
     return os.path.realpath(os.path.join(os.getcwd(), "data"))
 
 

@@ -103,6 +103,14 @@ def _validate_template_list(value, meta, path_key, errors, validate_fn) -> None:
         )
 
 
+def _model_list_error(exc: Exception) -> str:
+    """把底层 get_models 异常转成给前端的报错；源自身已带前缀时不重复。"""
+    message = str(exc).strip() or exc.__class__.__name__
+    if message.startswith("获取模型列表失败"):
+        return message
+    return f"获取模型列表失败：{message}"
+
+
 def sanitize_path_segment(segment: str) -> str:
     cleaned = []
     for ch in segment:
@@ -812,8 +820,16 @@ class ConfigDisplayService:
             "config_template"
         ]
         for provider in provider_registry:
-            if provider.default_config_tmpl:
-                provider_default_tmpl[provider.type] = provider.default_config_tmpl
+            if not provider.default_config_tmpl:
+                continue
+            # 默认配置里已有同 type 的模板（友好命名条目）时跳过，
+            # 避免新增下拉里出现原始类型名的重复入口
+            if any(
+                isinstance(t, dict) and t.get("type") == provider.type
+                for t in provider_default_tmpl.values()
+            ):
+                continue
+            provider_default_tmpl[provider.type] = provider.default_config_tmpl
 
         return {
             "metadata": metadata,
@@ -1478,8 +1494,14 @@ class ProviderConfigService:
         }
         provider_default_tmpl = config_schema["provider"]["config_template"]
         for provider in provider_registry:
-            if provider.default_config_tmpl:
-                provider_default_tmpl[provider.type] = provider.default_config_tmpl
+            if not provider.default_config_tmpl:
+                continue
+            if any(
+                isinstance(t, dict) and t.get("type") == provider.type
+                for t in provider_default_tmpl.values()
+            ):
+                continue
+            provider_default_tmpl[provider.type] = provider.default_config_tmpl
         providers = copy.deepcopy(self.config.get("provider", []))
         from astrbot.core.utils.llm_metadata import LLM_METADATAS
 
@@ -1504,14 +1526,14 @@ class ProviderConfigService:
     def get_provider_source(self, source_id: str) -> dict:
         source = self._find_provider_source(source_id)
         if source is None:
-            raise ValueError(f"Provider source {source_id} not found")
+            raise ValueError(f"提供商源 {source_id} 不存在")
         return {"provider_source": copy.deepcopy(source)}
 
     async def upsert_provider_source(self, source_id: str, config: dict) -> None:
         config = copy.deepcopy(config)
         next_source_id = str(config.get("id") or source_id).strip()
         if not next_source_id:
-            raise ValueError("Provider source config must have an 'id' field")
+            raise ValueError("提供商源配置缺少 id 字段")
         config["id"] = next_source_id
         # 自动清理 api_base 前后空字符
         if isinstance(config.get("api_base"), str):
@@ -1524,7 +1546,7 @@ class ProviderConfigService:
         for source in sources:
             if source.get("id") == next_source_id and next_source_id != source_id:
                 raise ValueError(
-                    f"Provider source ID '{next_source_id}' exists already, please try another ID."
+                    f"提供商源 ID「{next_source_id}」已存在，请换一个 ID"
                 )
 
         for idx, source in enumerate(sources):
@@ -1548,7 +1570,7 @@ class ProviderConfigService:
         sources = self.config.get("provider_sources", [])
         next_sources = [source for source in sources if source.get("id") != source_id]
         if len(next_sources) == len(sources):
-            raise ValueError(f"Provider source {source_id} not found")
+            raise ValueError(f"提供商源 {source_id} 不存在")
         self.config["provider_sources"] = next_sources
         await self.provider_manager.delete_provider(provider_source_id=source_id)
         save_config(self.config, self.config, is_core=True)
@@ -1585,7 +1607,7 @@ class ProviderConfigService:
         try:
             await self.delete_provider_source(str(provider_source_id))
         except ValueError as exc:
-            if "not found" in str(exc):
+            if "不存在" in str(exc):
                 raise ValueError("未找到对应的 provider source") from exc
             raise
         return "删除 provider source 成功"
@@ -1593,7 +1615,7 @@ class ProviderConfigService:
     async def list_provider_source_models(self, source_id: str) -> dict:
         source = self._find_provider_source(source_id)
         if source is None:
-            raise ValueError(f"Provider source {source_id} not found")
+            raise ValueError(f"提供商源 {source_id} 不存在")
 
         from astrbot.core.provider import Provider
         from astrbot.core.provider.register import provider_cls_map
@@ -1601,7 +1623,7 @@ class ProviderConfigService:
 
         provider_type = source.get("type")
         if not provider_type:
-            raise ValueError("Provider source missing type")
+            raise ValueError("提供商源配置缺少 type 字段")
         try:
             self.provider_manager.dynamic_import_provider(provider_type)
         except ImportError as exc:
@@ -1609,14 +1631,20 @@ class ProviderConfigService:
         provider_metadata = provider_cls_map.get(provider_type)
         cls_type = provider_metadata.cls_type if provider_metadata else None
         if cls_type is None or not issubclass(cls_type, Provider):
-            raise ValueError(f"Provider source {source_id} does not support model list")
+            raise ValueError(f"提供商源 {source_id} 不支持获取模型列表")
 
         inst = cls_type(source, {})
         init_fn = getattr(inst, "initialize", None)
         if callable(init_fn):
             await run_maybe_async(init_fn)
         try:
-            models = await inst.get_models()
+            try:
+                models = await inst.get_models()
+            except Exception as exc:
+                logger.error(
+                    f"获取模型列表失败: 提供商源「{source_id}」({provider_type}) - {exc}"
+                )
+                raise ValueError(_model_list_error(exc)) from exc
             models = models or []
             logger.info(
                 f"获取模型列表: 提供商源「{source_id}」获取到 {len(models)} 个模型"
@@ -1655,7 +1683,11 @@ class ProviderConfigService:
         if not isinstance(provider, Provider):
             raise ValueError(f"提供商 {provider_id} 类型不支持获取模型列表")
 
-        models = await provider.get_models()
+        try:
+            models = await provider.get_models()
+        except Exception as exc:
+            logger.error(f"获取模型列表失败: 提供商「{provider_id}」- {exc}")
+            raise ValueError(_model_list_error(exc)) from exc
         models = models or []
         logger.info(
             f"获取模型列表: 提供商「{provider_id}」获取到 {len(models)} 个模型"

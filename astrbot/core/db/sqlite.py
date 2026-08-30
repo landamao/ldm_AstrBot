@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import CursorResult, Row, not_
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 from sqlmodel import col, delete, desc, func, or_, select, text, update
@@ -69,9 +70,23 @@ class SQLiteDatabase(BaseDatabase):
             await self._ensure_persona_system_prompt_stored_at_column(conn)
             await self._ensure_platform_message_history_checkpoint_column(conn)
             await self._ensure_chatui_project_workspace_columns(conn)
+            await self._ensure_platform_session_type_column(conn)
             await self._ensure_conversation_indexes(conn)
             await conn.commit()
 
+
+    async def _ensure_platform_session_type_column(self, conn) -> None:
+        """确保 platform_sessions 表有 session_type 列（生图会话等模式标记）。"""
+        result = await conn.execute(text("PRAGMA table_info(platform_sessions)"))
+        columns = {row[1] for row in result.fetchall()}
+
+        if "session_type" not in columns:
+            await conn.execute(
+                text(
+                    "ALTER TABLE platform_sessions "
+                    "ADD COLUMN session_type VARCHAR(32) NOT NULL DEFAULT 'chat'"
+                )
+            )
 
     async def _ensure_conversation_indexes(self, conn) -> None:
         """创建仪表盘会话列表用索引。"""
@@ -1371,24 +1386,34 @@ class SQLiteDatabase(BaseDatabase):
         async with self.get_db() as session:
             session: AsyncSession
             async with session.begin():
+                # 原子 upsert：并发写同一 key 时 SELECT-then-INSERT 会撞
+                # uix_preference_scope_scope_id_key 唯一约束，改用
+                # ON CONFLICT DO UPDATE 保证不抛 IntegrityError。
+                stmt = sqlite_insert(Preference).values(
+                    scope=scope,
+                    scope_id=scope_id,
+                    key=key,
+                    value=value,
+                )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[
+                        Preference.scope,
+                        Preference.scope_id,
+                        Preference.key,
+                    ],
+                    set_={
+                        "value": value,
+                        "updated_at": datetime.now(timezone.utc),
+                    },
+                )
+                await session.execute(stmt)
                 query = select(Preference).where(
                     Preference.scope == scope,
                     Preference.scope_id == scope_id,
                     Preference.key == key,
                 )
                 result = await session.execute(query)
-                existing_preference = result.scalar_one_or_none()
-                if existing_preference:
-                    existing_preference.value = value
-                else:
-                    new_preference = Preference(
-                        scope=scope,
-                        scope_id=scope_id,
-                        key=key,
-                        value=value,
-                    )
-                    session.add(new_preference)
-                return existing_preference or new_preference
+                return result.scalar_one_or_none()
 
     async def get_preference(self, scope, scope_id, key):
         """Get a preference by key."""
@@ -1784,6 +1809,7 @@ class SQLiteDatabase(BaseDatabase):
         session_id: str | None = None,
         display_name: str | None = None,
         is_group: int = 0,
+        session_type: str = "chat",
     ) -> PlatformSession:
         """Create a new Platform session."""
         kwargs = {}
@@ -1798,6 +1824,7 @@ class SQLiteDatabase(BaseDatabase):
                     platform_id=platform_id,
                     display_name=display_name,
                     is_group=is_group,
+                    session_type=session_type or "chat",
                     **kwargs,
                 )
                 session.add(new_session)

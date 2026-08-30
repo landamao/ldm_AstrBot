@@ -691,11 +691,13 @@ class LiveChatService:
                         message_accumulator.has_content() or refs or agent_stats
                     )
                 elif (streaming and result_type == "complete") or not streaming:
+                    # 有未完成工具调用时推迟落库，等结果合并后统一保存
+                    # （避免工具直发内容把 pending 卡片冲成无结果中间记录）
                     if chain_type not in (
                         "tool_call",
                         "tool_call_result",
                         "agent_stats",
-                    ):
+                    ) and not message_accumulator.has_pending_tool_calls():
                         should_save = True
 
                 if should_save:

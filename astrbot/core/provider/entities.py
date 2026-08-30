@@ -30,6 +30,7 @@ class ProviderType(enum.Enum):
     TEXT_TO_SPEECH = "text_to_speech"
     EMBEDDING = "embedding"
     RERANK = "rerank"
+    IMAGE_GENERATION = "image_generation"
 
 
 def format_provider_display_id(
@@ -310,6 +311,21 @@ class TokenUsage:
 
 
 @dataclass
+class GeneratedImage:
+    """生图提供商返回的一张图片。
+
+    统一以 base64 数据承载：当 API 返回 URL 时由提供商实现负责下载。
+    """
+
+    base64_data: str
+    """图片二进制内容的 base64 编码。"""
+    mime_type: str = "image/png"
+    """图片的 MIME 类型。"""
+    revised_prompt: str | None = None
+    """部分生图 API 会返回改写后的提示词，未提供时为 None。"""
+
+
+@dataclass
 class LLMResponse:
     role: str
     """The role of the message, e.g., assistant, tool, err"""
@@ -426,7 +442,7 @@ class LLMResponse:
                 "id": self.tools_call_ids[idx],
                 "function": {
                     "name": self.tools_call_name[idx],
-                    "arguments": json.dumps(tool_call_arg),
+                    "arguments": json.dumps(tool_call_arg, ensure_ascii=False),
                 },
                 "type": "function",
             }
@@ -446,7 +462,7 @@ class LLMResponse:
                     id=self.tools_call_ids[idx],
                     function=ToolCall.FunctionBody(
                         name=self.tools_call_name[idx],
-                        arguments=json.dumps(tool_call_arg),
+                        arguments=json.dumps(tool_call_arg, ensure_ascii=False),
                     ),
                     # the extra_content will not serialize if it's None when calling ToolCall.model_dump()
                     extra_content=self.tools_call_extra_content.get(

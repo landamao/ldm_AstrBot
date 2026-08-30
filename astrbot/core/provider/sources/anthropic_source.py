@@ -1018,15 +1018,24 @@ class ProviderAnthropic(Provider):
         return self.chosen_api_key
 
     async def get_models(self) -> list[str]:
-        models_str = []
-        models = await retry_provider_request(
-            f"Anthropic/{self.display_provider_id()}",
-            lambda: self.client.models.list(),
-        )
-        models = sorted(models.data, key=lambda x: x.id)
-        for model in models:
-            models_str.append(model.id)
-        return models_str
+        try:
+            models_str = []
+            models = await retry_provider_request(
+                f"Anthropic/{self.display_provider_id()}",
+                lambda: self.client.models.list(),
+            )
+            models = sorted(models.data, key=lambda x: x.id)
+            for model in models:
+                models_str.append(model.id)
+            return models_str
+        except Exception as e:
+            logger.error(
+                "获取模型列表失败({}, {})：{}",
+                self.display_provider_id(),
+                self.provider_config.get("api_base", ""),
+                e,
+            )
+            raise Exception(f"获取模型列表失败：{e}") from e
 
     def set_key(self, key: str) -> None:
         self.chosen_api_key = key

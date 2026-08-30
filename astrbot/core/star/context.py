@@ -427,6 +427,38 @@ class Context:
         """获取所有用于 Embedding 任务的 Provider。"""
         return self.provider_manager.embedding_provider_insts
 
+    def get_all_image_generation_providers(self) -> list[Provider]:
+        """获取所有用于生图任务的 Provider(Image_Generation 类型)。"""
+        return self.provider_manager.image_generation_provider_insts
+
+    def get_using_image_generation_provider(self) -> Provider | None:
+        """获取默认的生图 Provider。
+
+        优先返回用户在 provider_settings.default_image_generation_provider_id
+        中指定的提供商，未配置时回退到第一个加载的生图提供商。
+
+        Returns:
+            默认生图 Provider，没有可用的生图提供商时返回 None。
+        """
+        default_id = str(
+            self.provider_manager.provider_settings.get(
+                "default_image_generation_provider_id"
+            )
+            or ""
+        ).strip()
+        if default_id:
+            prov = self.provider_manager.inst_map.get(default_id)
+            if isinstance(prov, Provider) and prov in (
+                self.provider_manager.image_generation_provider_insts
+            ):
+                return prov
+            logger.warning(
+                "配置的默认生图模型 %s 不可用，回退到第一个可用的生图提供商。",
+                default_id,
+            )
+        insts = self.provider_manager.image_generation_provider_insts
+        return insts[0] if insts else None
+
     def get_using_provider(self, umo: str | None = None) -> Provider | None:
         """获取当前使用的用于文本生成任务的 LLM Provider(Chat_Completion 类型)。
 

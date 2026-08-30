@@ -214,6 +214,22 @@ _register_builtin_tool_config_rule(
     ),
 )
 
+_register_builtin_tool_config_rule(
+    ("ldmbot_generate_image", "ldmbot_list_image_generation_models"),
+    BuiltinToolConfigRule(
+        conditions=(
+            BuiltinToolConfigCondition(
+                key="provider_settings.enable_image_generation_tool",
+                operator="truthy",
+                message=(
+                    "需开启 provider_settings.enable_image_generation_tool"
+                    "（启用生图工具）后才会注入此工具"
+                ),
+            ),
+        )
+    ),
+)
+
 
 def _resolve_builtin_tool_name(tool_cls: type[FunctionTool]) -> str:
     tool_name = getattr(tool_cls, "name", None)

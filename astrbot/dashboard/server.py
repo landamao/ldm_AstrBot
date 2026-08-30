@@ -482,21 +482,24 @@ class AstrBotDashboard:
     def get_process_using_port(self, port: int) -> str:
         """获取占用端口的进程详细信息"""
         try:
+            # 只匹配 LISTEN 连接：残留的 TIME_WAIT 等内核连接不属于任何存活进程
             for conn in psutil.net_connections(kind="inet"):
-                if cast(_AddrWithPort, conn.laddr).port == port:
-                    try:
-                        process = psutil.Process(conn.pid)
-                        # 获取详细信息
-                        proc_info = [
-                            f"进程名: {process.name()}",
-                            f"PID: {process.pid}",
-                            f"执行路径: {process.exe()}",
-                            f"工作目录: {process.cwd()}",
-                            f"启动命令: {' '.join(process.cmdline())}",
-                        ]
-                        return "\n           ".join(proc_info)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-                        return f"无法获取进程详细信息(可能需要管理员权限): {e!s}"
+                if conn.status != psutil.CONN_LISTEN:
+                    continue
+                if cast(_AddrWithPort, conn.laddr).port != port:
+                    continue
+                try:
+                    process = psutil.Process(conn.pid)
+                    proc_info = [
+                        f"进程名: {process.name()}",
+                        f"PID: {process.pid}",
+                        f"执行路径: {process.exe()}",
+                        f"工作目录: {process.cwd()}",
+                        f"启动命令: {' '.join(process.cmdline())}",
+                    ]
+                    return "\n           ".join(proc_info)
+                except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                    return f"无法获取进程详细信息(可能需要管理员权限): {e!s}"
             return "未找到占用进程"
         except Exception as e:
             return f"获取进程信息失败: {e!s}"

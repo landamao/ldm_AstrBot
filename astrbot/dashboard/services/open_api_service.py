@@ -199,14 +199,14 @@ class OpenApiService:
 
     async def authenticate_api_key(
         self, raw_key: str | None
-    ) -> tuple[bool, str | None]:
+    ) -> tuple[bool, str | None, list[str]]:
         if not raw_key:
-            return False, "Missing API key"
+            return False, "Missing API key", []
 
         key_hash = ApiKeyService.hash_key(raw_key)
         api_key = await self.db.get_active_api_key_by_hash(key_hash)
         if not api_key:
-            return False, "Invalid API key"
+            return False, "Invalid API key", []
 
         if isinstance(api_key.scopes, list):
             scopes = api_key.scopes
@@ -214,10 +214,10 @@ class OpenApiService:
             scopes = list(DEFAULT_OPEN_API_SCOPES)
 
         if "*" not in scopes and "chat" not in scopes:
-            return False, "Insufficient API key scope"
+            return False, "Insufficient API key scope", scopes
 
         await self.db.touch_api_key(api_key.key_id)
-        return True, None
+        return True, None, scopes
 
     @staticmethod
     async def send_chat_ws_error(
@@ -243,12 +243,15 @@ class OpenApiService:
         conf_list: list[dict],
         chat_bridge: OpenApiWebSocketChatBridge,
     ) -> None:
-        authed, auth_err = await self.authenticate_api_key(raw_api_key)
+        authed, auth_err, api_key_scopes = await self.authenticate_api_key(raw_api_key)
         if not authed:
             message = auth_err or "Unauthorized"
             await self.send_chat_ws_error(send_json, message, "UNAUTHORIZED")
             await close(1008, message)
             return
+        allow_admin_username = (
+            "*" in api_key_scopes or CHAT_ADMIN_SCOPE in api_key_scopes
+        )
 
         async def send_error(message: str, code: str) -> None:
             await self.send_chat_ws_error(send_json, message, code)
@@ -280,7 +283,7 @@ class OpenApiService:
                     chat_bridge=chat_bridge,
                     send_json=send_json,
                     send_error=send_error,
-                    allow_admin_username=("*" in scopes or CHAT_ADMIN_SCOPE in scopes),
+                    allow_admin_username=allow_admin_username,
                 )
         except Exception as exc:
             logger.debug("Open API WS connection closed: %s", exc)
@@ -484,7 +487,11 @@ class OpenApiService:
                         message_accumulator.has_content() or refs or agent_stats
                     )
                 elif (streaming and msg_type == "complete") or not streaming:
-                    if chain_type not in ("tool_call", "tool_call_result"):
+                    # 有未完成工具调用时推迟落库，等结果合并后统一保存
+                    if chain_type not in (
+                        "tool_call",
+                        "tool_call_result",
+                    ) and not message_accumulator.has_pending_tool_calls():
                         should_save = True
 
                 if should_save:

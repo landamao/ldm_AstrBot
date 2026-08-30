@@ -3,6 +3,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.core.star.filter.command import GreedyStr
 
 from .commands import (
+    AboutCommand,
     AdminCommands,
     AlterCmdCommands,
     ConversationCommands,
@@ -39,6 +40,7 @@ class Main(star.Star):
         self.tts_c = TTSCommand(self.context)
         self.flow_c = FlowCommand(self.context)
         self.sid_c = SIDCommand(self.context)
+        self.about_c = AboutCommand(self.context)
 
     @filter.command("help")
     async def help(self, event: AstrMessageEvent) -> None:
@@ -125,6 +127,11 @@ class Main(star.Star):
     async def sid(self, event: AstrMessageEvent) -> None:
         """获取会话 ID 信息"""
         await self.sid_c.sid(event)
+
+    @filter.command("about")
+    async def about(self, event: AstrMessageEvent) -> None:
+        """查看 ldm 版本与运行环境信息"""
+        await self.about_c.about(event)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("name")

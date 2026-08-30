@@ -7,7 +7,9 @@ Data path:
 - Can be overridden with the ``LDMBOT_DATA_DIR`` environment variable.
 
 Root path:
-- Derived from the data path's parent.
+- Defaults to the project source root (derived from this file's location,
+  verified by the presence of main.py), so the bot can be started from any
+  working directory without scattering data elsewhere.
 - Can be overridden with the ``LDMBOT_ROOT`` environment variable
   (data directory = ``<root>/data``).
 - ``LDMBOT_DATA_DIR`` takes precedence over ``LDMBOT_ROOT``.
@@ -26,10 +28,15 @@ def get_astrbot_path() -> str:
     )
 
 
+def _is_source_tree_root(path: str) -> bool:
+    """Whether path looks like the ldm source tree (contains main.py)."""
+    return os.path.isfile(os.path.join(path, "main.py"))
+
+
 def get_astrbot_data_path() -> str:
     """Return the AstrBot data directory path.
 
-    Priority: LDMBOT_DATA_DIR env var > <LDMBOT_ROOT>/data > <cwd>/data.
+    Priority: LDMBOT_DATA_DIR env var > <LDMBOT_ROOT>/data > <source root>/data.
     """
     if data_dir := os.environ.get("LDMBOT_DATA_DIR"):
         return os.path.realpath(data_dir)
@@ -42,6 +49,11 @@ def get_astrbot_root() -> str:
         return os.path.realpath(path)
     if is_packaged_desktop_runtime():
         return os.path.realpath(os.path.join(os.path.expanduser("~"), ".astrbot"))
+    # 默认跟随项目源码自身位置而非启动时的 cwd，避免在其他目录启动时
+    # 把 data 建到别处。非源码树（如 pip 装进 site-packages）时回退 cwd。
+    source_root = get_astrbot_path()
+    if _is_source_tree_root(source_root):
+        return source_root
     return os.path.realpath(os.getcwd())
 
 

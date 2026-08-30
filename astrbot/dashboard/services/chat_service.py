@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -24,6 +25,9 @@ from astrbot.core.platform.sources.webchat.message_parts_helper import (
     webchat_message_parts_have_content,
 )
 from astrbot.core.platform.sources.webchat.webchat_queue_mgr import webchat_queue_mgr
+from astrbot.core.provider.sources.openai_image_generation_source import (
+    ProviderOpenAIImageGeneration,
+)
 from astrbot.core.utils.active_event_registry import active_event_registry
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.datetime_utils import to_utc_isoformat
@@ -138,10 +142,23 @@ class BotMessageAccumulator:
         self.parts: list[dict] = []
         self.pending_text = ""
         self.pending_tool_calls: dict[str, dict] = {}
+        # 工具调用事件到达时 parts 的长度。工具执行期间可能夹带 image 等附件
+        # part（如 send_message_to_user 发图），结果到达时按锚点插回原位，
+        # 保证持久化顺序与实际执行顺序一致（工具卡片在它发出的图片之前）。
+        self.pending_tool_call_anchors: dict[str, int] = {}
         self._think_start_time: float | None = None
 
     def has_content(self) -> bool:
         return bool(self.parts or self.pending_text or self.pending_tool_calls)
+
+    def has_pending_tool_calls(self) -> bool:
+        """是否还有未收到结果的工具调用。
+
+        工具执行期间，send_message_to_user 等直发内容（plain/image）会触发
+        should_save；若此时落库，pending 的工具卡片会被无结果的中间记录冲掉，
+        稍后到达的 tool_call_result 只能变成无名孤儿卡。落库点需据此推迟。
+        """
+        return bool(self.pending_tool_calls)
 
     def add_plain(
         self,
@@ -199,9 +216,9 @@ class BotMessageAccumulator:
         if self._think_start_time is not None:
             self._finalize_thinking_duration()
         if include_pending_tool_calls and self.pending_tool_calls:
-            for tool_call in self.pending_tool_calls.values():
-                self.parts.append({"type": "tool_call", "tool_calls": [tool_call]})
+            self._insert_finished_tool_calls(list(self.pending_tool_calls.values()))
             self.pending_tool_calls = {}
+            self.pending_tool_call_anchors = {}
         return self.parts
 
     def plain_text(self) -> str:
@@ -253,6 +270,7 @@ class BotMessageAccumulator:
         if not tool_call_id:
             return
         self.pending_tool_calls[tool_call_id] = tool_call
+        self.pending_tool_call_anchors[tool_call_id] = len(self.parts)
 
     def _store_tool_call_result(self, result_text: str) -> None:
         tool_result = self._parse_json_object(result_text)
@@ -263,12 +281,61 @@ class BotMessageAccumulator:
         if not tool_call_id:
             return
 
-        tool_call = self.pending_tool_calls.pop(tool_call_id, None) or {
-            "id": tool_call_id
-        }
-        tool_call["result"] = tool_result.get("result")
-        tool_call["finished_ts"] = tool_result.get("ts")
-        self.parts.append({"type": "tool_call", "tool_calls": [tool_call]})
+        tool_call = self.pending_tool_calls.pop(tool_call_id, None)
+        anchor = self.pending_tool_call_anchors.pop(tool_call_id, None)
+        if tool_call is not None:
+            tool_call["result"] = tool_result.get("result")
+            tool_call["finished_ts"] = tool_result.get("ts")
+            part = {"type": "tool_call", "tool_calls": [tool_call]}
+            if anchor is not None:
+                # 插回工具调用事件到达时的位置，保持与执行顺序一致
+                self.parts.insert(min(anchor, len(self.parts)), part)
+            else:
+                self.parts.append(part)
+            return
+
+        # 兜底：若中间落库已把 pending 卡片冲进 parts（无 finished_ts），
+        # 原地回填结果，避免产生无名孤儿卡
+        for part in reversed(self.parts):
+            if part.get("type") != "tool_call" or not part.get("tool_calls"):
+                continue
+            target = part["tool_calls"][0]
+            if (
+                str(target.get("id") or "") == tool_call_id
+                and not target.get("finished_ts")
+            ):
+                target["result"] = tool_result.get("result")
+                target["finished_ts"] = tool_result.get("ts")
+                return
+
+        # 完全未知的结果（跨请求迟到等）：维持原行为追加
+        self.parts.append(
+            {
+                "type": "tool_call",
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "result": tool_result.get("result"),
+                        "finished_ts": tool_result.get("ts"),
+                    }
+                ],
+            }
+        )
+
+    def _insert_finished_tool_calls(self, tool_calls: list[dict]) -> None:
+        """把未收到结果的工具调用按各自锚点插入 parts（dict 保持到达顺序）。"""
+        inserted_at: dict[int, int] = {}
+        for tool_call in tool_calls:
+            tool_call_id = str(tool_call.get("id") or "")
+            anchor = self.pending_tool_call_anchors.get(tool_call_id)
+            if anchor is None:
+                anchor = len(self.parts)
+            base = inserted_at.get(anchor, anchor)
+            self.parts.insert(min(base, len(self.parts)), {
+                "type": "tool_call",
+                "tool_calls": [tool_call],
+            })
+            inserted_at[anchor] = base + 1
 
     def _store_llm_error(self, result_text: str) -> None:
         payload = self._parse_json_object(result_text)
@@ -777,11 +844,19 @@ class ChatService:
         result: list = []
         for _, items in entries:
             user_items = sorted(
-                [i for i in items if isinstance(i.content, dict) and i.content.get("type") == "user"],
+                [
+                    i
+                    for i in items
+                    if isinstance(i.content, dict) and i.content.get("type") == "user"
+                ],
                 key=lambda x: (x.created_at, x.id or 0),
             )
             bot_items = sorted(
-                [i for i in items if isinstance(i.content, dict) and i.content.get("type") == "bot"],
+                [
+                    i
+                    for i in items
+                    if isinstance(i.content, dict) and i.content.get("type") == "bot"
+                ],
                 key=lambda x: (x.created_at, x.id or 0),
             )
             other_items = sorted(
@@ -836,6 +911,253 @@ class ChatService:
             sender_name="bot",
             llm_checkpoint_id=llm_checkpoint_id,
         )
+
+    _IMAGE_MIME_EXTENSIONS = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+
+    async def _save_generated_image_attachment(
+        self,
+        image,
+    ) -> dict | None:
+        """把生图结果写入附件目录并注册为附件，返回图片消息 part。"""
+        ext = self._IMAGE_MIME_EXTENSIONS.get(image.mime_type, ".png")
+        filename = f"gen_{uuid.uuid4().hex}{ext}"
+        file_path = os.path.join(self.attachments_dir, filename)
+        image_bytes = base64.b64decode(image.base64_data)
+        with open(file_path, "wb") as f:
+            f.write(image_bytes)
+        return await self.create_attachment_from_file(filename, "image")
+
+    async def generate_image_in_session(
+        self,
+        username: str,
+        data: dict,
+    ) -> dict:
+        """在指定会话中直接调用生图模型生成图片（ChatUI 生图会话）。
+
+        用户提示词与生成结果都会写入会话历史，返回两条序列化后的消息记录。
+        从用户消息入库开始的任何失败都会以错误文本 bot 消息持久化（正常 200 返回），
+        保证错误信息刷新后仍可见；retry_message_id 用于重试最后一条 bot 消息：
+        删除该消息后，取其前面最近一条用户消息的提示词与参考图重新生成。
+        """
+        prompt = str(data.get("prompt") or "").strip()
+        session_id = str(data.get("session_id") or "").strip()
+        if not session_id:
+            raise ChatServiceError("Missing key: session_id")
+
+        session = await self.db.get_platform_session_by_id(session_id)
+        if not session:
+            raise ChatServiceError(f"Session {session_id} not found")
+        if session.creator != username:
+            raise ChatServiceError("Permission denied")
+
+        retry_message_id = data.get("retry_message_id")
+        if retry_message_id is not None:
+            try:
+                retry_message_id = int(retry_message_id)
+            except (TypeError, ValueError) as exc:
+                raise ChatServiceError("Invalid key: retry_message_id") from exc
+        if retry_message_id is None and not prompt:
+            raise ChatServiceError("Missing key: prompt")
+
+        provider_id = str(data.get("provider_id") or "").strip()
+        size = str(data.get("size") or "").strip() or None
+        try:
+            count = int(data.get("count") or 1)
+        except (TypeError, ValueError):
+            count = 1
+        count = max(1, min(count, 4))
+
+        raw_image_ids = data.get("image_ids")
+        if not isinstance(raw_image_ids, list):
+            raw_image_ids = []
+        image_ids = [str(item).strip() for item in raw_image_ids if str(item).strip()]
+        image_ids = list(dict.fromkeys(image_ids))[:4]
+
+        saved_user_record = None
+        retry_target = None
+        if retry_message_id is not None:
+            platform_history = await self.get_sorted_platform_history(session)
+            target_index = next(
+                (
+                    index
+                    for index, item in enumerate(platform_history)
+                    if item.id == retry_message_id
+                ),
+                -1,
+            )
+            if target_index < 0:
+                raise ChatServiceError(f"Message {retry_message_id} not found")
+            target = platform_history[target_index]
+            if (
+                not isinstance(target.content, dict)
+                or target.content.get("type") != "bot"
+            ):
+                raise ChatServiceError("只能重试 bot 消息")
+            if target_index != len(platform_history) - 1:
+                raise ChatServiceError("只能重试最后一条消息")
+            source_user_record = next(
+                (
+                    item
+                    for item in reversed(platform_history[:target_index])
+                    if isinstance(item.content, dict)
+                    and item.content.get("type") == "user"
+                ),
+                None,
+            )
+            if source_user_record is None:
+                raise ChatServiceError("找不到要重试的用户消息")
+            source_parts = source_user_record.content.get("message") or []
+            prompt = next(
+                (
+                    str(part.get("text") or "").strip()
+                    for part in source_parts
+                    if isinstance(part, dict) and part.get("type") == "plain"
+                ),
+                "",
+            )
+            image_ids = [
+                str(part.get("attachment_id")).strip()
+                for part in source_parts
+                if isinstance(part, dict)
+                and part.get("type") == "image"
+                and part.get("attachment_id")
+            ]
+            retry_target = target
+            saved_user_record = source_user_record
+
+        reference_images: list[tuple[bytes, str]] = []
+        user_parts: list[dict] = [{"type": "plain", "text": prompt}]
+        if image_ids:
+            attachments = {
+                att.attachment_id: att
+                for att in await self.db.get_attachments(image_ids)
+            }
+            for attachment_id in image_ids:
+                attachment = attachments.get(attachment_id)
+                if attachment is None:
+                    raise ChatServiceError(f"参考图片 {attachment_id} 不存在")
+                mime_type = str(attachment.mime_type or "").lower()
+                if not mime_type.startswith("image/"):
+                    raise ChatServiceError("参考图只支持图片文件")
+                file_path = str(attachment.path or "")
+                if not file_path or not os.path.isfile(file_path):
+                    raise ChatServiceError(f"参考图片 {attachment_id} 文件已丢失")
+                with open(file_path, "rb") as f:
+                    reference_images.append((f.read(), mime_type))
+                if retry_target is None:
+                    user_parts.append(
+                        {
+                            "type": "image",
+                            "attachment_id": attachment_id,
+                            "filename": os.path.basename(file_path),
+                        }
+                    )
+
+        if retry_target is not None:
+            thread_ids = await self.db.delete_webchat_threads_by_parent_message_ids(
+                session_id,
+                [retry_target.id],
+            )
+            await self.delete_threads_by_ids(thread_ids, username)
+            await self.platform_history_mgr.delete_by_id(retry_target.id)
+        else:
+            saved_user_record = await self.platform_history_mgr.insert(
+                platform_id=session.platform_id,
+                user_id=session_id,
+                content={"type": "user", "message": user_parts},
+                sender_id=username,
+                sender_name=username,
+            )
+
+        used_provider_id = provider_id
+        used_model = ""
+        try:
+            provider_manager = self.core_lifecycle.provider_manager
+            provider = None
+            if provider_id:
+                candidate = provider_manager.inst_map.get(provider_id)
+                if isinstance(candidate, ProviderOpenAIImageGeneration):
+                    provider = candidate
+                else:
+                    raise ChatServiceError(f"生图模型 {provider_id} 不可用")
+            elif isinstance(
+                provider_manager.curr_image_generation_provider_inst,
+                ProviderOpenAIImageGeneration,
+            ):
+                provider = provider_manager.curr_image_generation_provider_inst
+            elif provider_manager.image_generation_provider_insts:
+                provider = provider_manager.image_generation_provider_insts[0]
+            if provider is None:
+                raise ChatServiceError(
+                    "没有可用的生图模型，请先在「模型提供商-生图」中配置并启用。"
+                )
+
+            used_provider_id = provider.provider_config.get("id", "")
+            used_model = provider.provider_config.get("model", "")
+            logger.info(
+                "生图会话生成：%s/%s provider=%s model=%s count=%s retry=%s",
+                username,
+                session_id,
+                used_provider_id,
+                used_model,
+                count,
+                retry_message_id is not None,
+            )
+            images = await provider.generate_image(
+                prompt,
+                n=count,
+                size=size,
+                image=reference_images or None,
+            )
+
+            bot_parts: list[dict] = []
+            for image in images:
+                part = await self._save_generated_image_attachment(image)
+                if part:
+                    bot_parts.append(part)
+            if not bot_parts:
+                raise RuntimeError("没有生成任何图片附件。")
+            bot_parts.insert(
+                0,
+                {
+                    "type": "plain",
+                    "text": f"{used_provider_id}（{used_model}）生成 {len(images)} 张图片：",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            exc_text = str(exc).strip() or exc.__class__.__name__
+            logger.error("生图会话生成失败: %s", exc_text)
+            saved_bot_record = await self.save_bot_message(
+                session_id,
+                [{"type": "plain", "text": f"生图失败：{exc_text}"}],
+                {},
+                {},
+            )
+            return {
+                "provider_id": used_provider_id,
+                "model": used_model,
+                "user_message": serialize_history_entry(saved_user_record),
+                "bot_message": serialize_history_entry(saved_bot_record),
+            }
+
+        saved_bot_record = await self.save_bot_message(
+            session_id,
+            bot_parts,
+            {},
+            {},
+        )
+
+        return {
+            "provider_id": used_provider_id,
+            "model": used_model,
+            "user_message": serialize_history_entry(saved_user_record),
+            "bot_message": serialize_history_entry(saved_bot_record),
+        }
 
     async def build_chat_stream(
         self,
@@ -1069,7 +1391,12 @@ class ChatService:
                                 refs or agent_stats
                             )
                         elif (streaming and msg_type == "complete") or not streaming:
-                            if chain_type not in ("tool_call", "tool_call_result"):
+                            # 有未完成工具调用时推迟落库：工具直发内容（plain/image）
+                            # 不再冲掉 pending 卡片，等结果合并后由后续事件统一保存
+                            if chain_type not in (
+                                "tool_call",
+                                "tool_call_result",
+                            ) and not message_accumulator.has_pending_tool_calls():
                                 should_save = True
 
                         if should_save:
@@ -1372,23 +1699,35 @@ class ChatService:
         except Exception as e:
             logger.warning(f"Failed to delete attachments: {e}")
 
-    async def new_session(self, username: str, platform_id: str) -> dict:
+    async def new_session(
+        self,
+        username: str,
+        platform_id: str,
+        session_type: str = "chat",
+    ) -> dict:
         session = await self.db.create_platform_session(
             creator=username,
             platform_id=platform_id,
             is_group=0,
+            session_type=session_type or "chat",
         )
         return {
             "session_id": session.session_id,
             "platform_id": session.platform_id,
+            "session_type": session.session_type,
         }
 
     async def new_session_from_dashboard_query(
         self,
         username: str,
         platform_id: str | None,
+        session_type: str = "chat",
     ) -> dict:
-        return await self.new_session(username, platform_id or "webchat")
+        return await self.new_session(
+            username,
+            platform_id or "webchat",
+            session_type=session_type,
+        )
 
     async def get_sessions(self, username: str, platform_id: str | None) -> list[dict]:
         sessions, _ = await self.db.get_platform_sessions_by_creator_paginated(
@@ -1409,6 +1748,7 @@ class ChatService:
                     "creator": session.creator,
                     "display_name": session.display_name,
                     "is_group": session.is_group,
+                    "session_type": getattr(session, "session_type", None) or "chat",
                     "created_at": to_utc_isoformat(session.created_at),
                     "updated_at": to_utc_isoformat(session.updated_at),
                 }

@@ -1,1 +1,0 @@
-import o from"./Tooltip-ChdFSqb-.js";import"./index-PMzZnN1i.js";import"./ThemeAwareMarkdownCodeBlock.vue_vue_type_script_setup_true_lang-C05sN6Pj.js";import"./shiki-CcKxT-6F.js";import"./clipboard-CB4uewcM.js";o.install=t=>{t.component(o.__name,o)};export{o as default};

@@ -27,6 +27,7 @@ from astrbot.core.desktop_runtime import (
     DESKTOP_MANAGED_RESTART_MESSAGE,
     is_desktop_managed_backend,
 )
+from astrbot.core.utils.about_info import get_about_info
 from astrbot.core.utils.astrbot_path import get_astrbot_path
 from astrbot.core.utils.auth_password import (
     is_default_dashboard_password,
@@ -165,6 +166,13 @@ class StatService:
             "astrbot_version": VERSION,
             "astrbot_code_version": code_version,
         }
+
+    async def get_about(
+        self,
+        dashboard_static_folder: str | None = None,
+    ) -> dict:
+        """关于弹窗信息：系统概况 + ldm 运行信息。"""
+        return await get_about_info(dashboard_static_folder)
 
     def get_start_time(self) -> dict:
         return {"start_time": self.core_lifecycle.start_time}

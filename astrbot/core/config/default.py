@@ -149,6 +149,8 @@ DEFAULT_CONFIG = {
         "default_image_caption_provider_id": "",
         "always_use_image_caption_provider": False,
         "image_caption_prompt": "Please describe the image using Chinese.",
+        "enable_image_generation_tool": False,
+        "default_image_generation_provider_id": "",
         "provider_pool": ["*"],  # "*" 表示使用所有可用的提供者
         "wake_prefix": "",
         "web_search": False,
@@ -1286,6 +1288,19 @@ CONFIG_METADATA_2 = {
                         "use_global_proxy": True,
                         "proxy": "",
                         "custom_headers": {},
+                    },
+                    "OpenAI 兼容生图": {
+                        "id": "openai_image",
+                        "provider": "openai",
+                        "type": "openai_image_generation",
+                        "provider_type": "image_generation",
+                        "enable": True,
+                        "key": [],
+                        "api_base": "https://api.openai.com/v1",
+                        "timeout": 300,
+                        "use_global_proxy": True,
+                        "proxy": "",
+                        "custom_extra_body": {},
                     },
                     "OpenAI Responses": {
                         "id": "openai-responses",
@@ -3535,6 +3550,17 @@ CONFIG_METADATA_3 = {
                         "description": "始终使用默认图片转述模型",
                         "type": "bool",
                         "hint": "开启后，即使当前对话模型支持图片识别，也会先用默认图片转述模型描述图片，再把文字结果交给对话模型；可避免把 base64 大图写入对话历史。需同时配置「默认图片转述模型」。",
+                    },
+                    "provider_settings.enable_image_generation_tool": {
+                        "description": "启用生图工具",
+                        "type": "bool",
+                        "hint": "开启后 LLM 可调用内置生图工具生图/列出生图模型，需先在「模型提供商-生图」配置生图模型。不影响 ChatUI 生图会话。",
+                    },
+                    "provider_settings.default_image_generation_provider_id": {
+                        "description": "默认生图模型",
+                        "type": "string",
+                        "_special": "select_provider_image_generation",
+                        "hint": "全局默认生图模型：LLM 生图工具、ChatUI 生图会话等未手动指定模型时使用；留空则用第一个可用的生图模型。",
                     },
                     "provider_stt_settings.enable": {
                         "description": "启用语音转文本",

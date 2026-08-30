@@ -117,8 +117,24 @@ async def create_chat_session(
         lambda: service.new_session(
             auth.username,
             request.query_params.get("platform_id") or "webchat",
+            session_type=request.query_params.get("session_type") or "chat",
         )
     )
+
+
+@router.post("/chat/image-generation")
+async def generate_image_in_session(
+    request: Request,
+    auth: AuthContext = Depends(require_chat_scope),
+    service: ChatService = Depends(get_service),
+):
+    """ChatUI 生图会话：在指定会话中直接调用生图模型生成图片。"""
+    post_data = await _json_or_empty(request)
+    try:
+        result = await service.generate_image_in_session(auth.username, post_data)
+    except ChatServiceError as exc:
+        return JSONResponse(error(str(exc)))
+    return ok(result)
 
 
 @router.post("/chat/sessions/batch-delete")

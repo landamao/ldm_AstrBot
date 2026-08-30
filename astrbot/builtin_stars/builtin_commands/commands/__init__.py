@@ -1,5 +1,6 @@
 # Commands module
 
+from .about import AboutCommand
 from .admin import AdminCommands
 from .alter_cmd import AlterCmdCommands
 from .conversation import ConversationCommands
@@ -16,6 +17,7 @@ from .t2i import T2ICommand
 from .tts import TTSCommand
 
 __all__ = [
+    "AboutCommand",
     "AdminCommands",
     "AlterCmdCommands",
     "ConversationCommands",

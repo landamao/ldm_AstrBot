@@ -1,7 +1,9 @@
 """项目文档接口：读取源码树根目录的 README.md / CHANGELOG.md。
 
-供 WebUI 左下角「官方文档 / 更新日志」按钮在弹窗内渲染本地文档，
+供 WebUI 左下角「官方文档」按钮在弹窗内渲染本地 README，
 替代原来直接外链 GitHub 的 README。
+更新日志已改为官方 AstrBot 方式：changelogs/ 目录按版本一文件，
+由 /api/v1/changelogs 接口提供（见 stat_service.py）。
 """
 
 from __future__ import annotations

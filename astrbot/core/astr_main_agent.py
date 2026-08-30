@@ -80,6 +80,10 @@ from astrbot.core.tools.computer_tools import (
     SyncSkillReleaseTool,
 )
 from astrbot.core.tools.cron_tools import FutureTaskTool
+from astrbot.core.tools.image_generation_tools import (
+    GenerateImageTool,
+    ListImageGenerationModelsTool,
+)
 from astrbot.core.tools.image_tools import ImageCaptionTool
 from astrbot.core.tools.knowledge_base_tools import (
     KnowledgeBaseQueryTool,
@@ -1295,6 +1299,29 @@ def _apply_image_caption_tool(
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(ImageCaptionTool))
 
 
+def _apply_image_generation_tools(
+    event: AstrMessageEvent,
+    req: ProviderRequest,
+    plugin_context: Context,
+) -> None:
+    """开启了启用生图工具开关时，注入生图与生图模型列表工具。"""
+    cfg = plugin_context.get_config(umo=event.unified_msg_origin)
+    provider_settings = cfg.get("provider_settings", {})
+    if not isinstance(provider_settings, dict):
+        return
+    if not provider_settings.get("enable_image_generation_tool", False):
+        return
+
+    if not plugin_context.get_all_image_generation_providers():
+        return
+
+    if req.func_tool is None:
+        req.func_tool = ToolSet()
+    tool_mgr = plugin_context.get_llm_tool_manager()
+    req.func_tool.add_tool(tool_mgr.get_builtin_tool(GenerateImageTool))
+    req.func_tool.add_tool(tool_mgr.get_builtin_tool(ListImageGenerationModelsTool))
+
+
 async def _apply_web_search_tools(
     event: AstrMessageEvent,
     req: ProviderRequest,
@@ -1645,6 +1672,7 @@ async def build_main_agent(
     await _plugin_tool_fix(event, req)
     await _apply_web_search_tools(event, req, plugin_context)
     _apply_image_caption_tool(event, req, plugin_context)
+    _apply_image_generation_tools(event, req, plugin_context)
 
     if config.llm_safety_mode:
         _apply_llm_safety_mode(config, req)

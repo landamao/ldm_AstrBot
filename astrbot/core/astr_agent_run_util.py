@@ -245,7 +245,11 @@ async def run_agent(
                         # tool_direct_result 用于标记 llm tool 需要直接发送给用户的内容
                         await astr_event.send(msg_chain)
                         continue
-                    if astr_event.get_platform_id() == "webchat":
+                    # 注意与下方 tool_call 分支保持一致：用 platform_name（适配器类型）判断，
+                    # 而非 platform_id（实例 ID）。用户可将 WebChat 实例命名为任意 ID
+                    # （如 "ldm"），此时按 ID 判断会导致 tool_call_result 永远不推给
+                    # WebChat 流，前端工具卡片拿不到 finished_ts 而永久计时。
+                    if astr_event.get_platform_name() == "webchat":
                         await astr_event.send(msg_chain)
                     elif show_tool_use and show_tool_call_result:
                         status_msg = _build_tool_result_status_message(

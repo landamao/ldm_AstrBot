@@ -3,6 +3,8 @@
 本文档记录 ldmbot（AstrBot 魔改版）的重要变更。  
 格式大致遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，正文保持中文。
 
+> 新版本的更新内容已不在此次记录，请到 [./changelogs/](./changelogs/) 查看。
+
 ---
 
 <details>

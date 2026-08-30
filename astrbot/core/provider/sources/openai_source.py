@@ -10,7 +10,6 @@ from typing import Any, Literal
 
 import httpx
 from openai import AsyncAzureOpenAI, AsyncOpenAI, AsyncStream
-from openai._exceptions import NotFoundError
 from openai.lib.streaming.chat._completions import ChatCompletionStreamState
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
@@ -29,7 +28,12 @@ from astrbot.core.agent.message import (
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.provider.entities import LLMResponse, TokenUsage, ToolCallsResult, log_llm_response
+from astrbot.core.provider.entities import (
+    LLMResponse,
+    TokenUsage,
+    ToolCallsResult,
+    log_llm_response,
+)
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
     resolve_media_ref_to_base64_data,
@@ -452,8 +456,14 @@ class ProviderOpenAIOfficial(Provider):
             for model in models:
                 models_str.append(model.id)
             return models_str
-        except NotFoundError as e:
-            raise Exception(f"获取模型列表失败：{e}")
+        except Exception as e:
+            logger.error(
+                "获取模型列表失败({}, {})：{}",
+                self.display_provider_id(),
+                self.provider_config.get("api_base", ""),
+                e,
+            )
+            raise Exception(f"获取模型列表失败：{e}") from e
 
     @staticmethod
     def _sanitize_assistant_messages(payloads: dict) -> None:

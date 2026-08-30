@@ -74,6 +74,17 @@ async def get_version(
     return await _run(service.get_version())
 
 
+@router.get("/stats/about")
+async def get_about_info(
+    request: Request,
+    _auth: AuthContext = Depends(require_system_scope),
+    service: StatService = Depends(get_service),
+):
+    return await _run(
+        service.get_about(getattr(request.app.state, "dashboard_static_folder", None))
+    )
+
+
 @router.get("/stats/versions")
 async def get_public_versions(
     request: Request,

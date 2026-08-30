@@ -59,6 +59,8 @@ class ProviderManager:
         """加载的 Embedding Provider 的实例"""
         self.rerank_provider_insts: list[RerankProvider] = []
         """加载的 Rerank Provider 的实例"""
+        self.image_generation_provider_insts: list[Provider] = []
+        """加载的 Image Generation Provider 的实例"""
         self.inst_map: dict[
             str,
             Providers,
@@ -72,6 +74,8 @@ class ProviderManager:
         """默认的 Speech To Text Provider 实例。已弃用，请使用 get_using_provider() 方法获取当前使用的 Provider 实例。"""
         self.curr_tts_provider_inst: TTSProvider | None = None
         """默认的 Text To Speech Provider 实例。已弃用，请使用 get_using_provider() 方法获取当前使用的 Provider 实例。"""
+        self.curr_image_generation_provider_inst: Provider | None = None
+        """默认的 Image Generation Provider 实例。"""
         self.db_helper = db_helper
         self._provider_change_callback: (
             Callable[[str, ProviderType, str | None], None] | None
@@ -361,6 +365,10 @@ class ProviderManager:
                 from .sources.openai_source import (
                     ProviderOpenAIOfficial as ProviderOpenAIOfficial,
                 )
+            case "openai_image_generation":
+                from .sources.openai_image_generation_source import (
+                    ProviderOpenAIImageGeneration as ProviderOpenAIImageGeneration,
+                )
             case "openai_responses":
                 from .sources.openai_responses_source import (
                     ProviderOpenAIResponses as ProviderOpenAIResponses,
@@ -594,7 +602,10 @@ class ProviderManager:
         # 如果 provider_source_id 存在且不为空，则从 provider_sources 中找到对应的配置并合并
         provider_config = self.get_merged_provider_config(provider_config)
 
-        if provider_config.get("provider_type", "") == "chat_completion":
+        if provider_config.get("provider_type", "") in (
+            "chat_completion",
+            "image_generation",
+        ):
             provider_config = self._resolve_env_key_list(provider_config)
 
         if not provider_config["enable"]:
@@ -735,6 +746,28 @@ class ProviderManager:
                     if isinstance(inst, HasInitialize):
                         await inst.initialize()
                     self.rerank_provider_insts.append(inst)
+                case ProviderType.IMAGE_GENERATION:
+                    # 生图任务
+                    if not issubclass(cls_type, Provider):
+                        raise TypeError(
+                            f"Provider class {cls_type} is not a subclass of Provider"
+                        )
+                    inst = cls_type(provider_config, self.provider_settings)
+                    if isinstance(inst, HasInitialize):
+                        await inst.initialize()
+                    self.image_generation_provider_insts.append(inst)
+                    if (
+                        self.provider_settings.get("default_image_generation_provider_id")
+                        == provider_config["id"]
+                    ):
+                        self.curr_image_generation_provider_inst = inst
+                        logger.info(
+                            "已选择 %s(%s) 作为默认生图模型提供商",
+                            provider_config["type"],
+                            format_provider_display_id(provider_config["id"]),
+                        )
+                    if not self.curr_image_generation_provider_inst:
+                        self.curr_image_generation_provider_inst = inst
                 case _:
                     # 未知供应商抛出异常，确保inst初始化
                     # Should be unreachable
@@ -797,6 +830,20 @@ class ProviderManager:
                     self.curr_tts_provider_inst.display_provider_id(),
                 )
 
+            if len(self.image_generation_provider_insts) == 0:
+                self.curr_image_generation_provider_inst = None
+            elif (
+                self.curr_image_generation_provider_inst is None
+                and len(self.image_generation_provider_insts) > 0
+            ):
+                self.curr_image_generation_provider_inst = (
+                    self.image_generation_provider_insts[0]
+                )
+                logger.info(
+                    "自动选择 %s 作为当前生图提供商适配器。",
+                    self.curr_image_generation_provider_inst.display_provider_id(),
+                )
+
     def get_insts(self):
         return self.provider_insts
 
@@ -818,6 +865,10 @@ class ProviderManager:
                 prov_inst = self.inst_map[provider_id]
                 if isinstance(prov_inst, TTSProvider):
                     self.tts_provider_insts.remove(prov_inst)
+            if self.inst_map[provider_id] in self.image_generation_provider_insts:
+                prov_inst = self.inst_map[provider_id]
+                if isinstance(prov_inst, Provider):
+                    self.image_generation_provider_insts.remove(prov_inst)
 
             if self.inst_map[provider_id] == self.curr_provider_inst:
                 self.curr_provider_inst = None
@@ -825,6 +876,8 @@ class ProviderManager:
                 self.curr_stt_provider_inst = None
             if self.inst_map[provider_id] == self.curr_tts_provider_inst:
                 self.curr_tts_provider_inst = None
+            if self.inst_map[provider_id] == self.curr_image_generation_provider_inst:
+                self.curr_image_generation_provider_inst = None
 
             if getattr(self.inst_map[provider_id], "terminate", None):
                 await self.inst_map[provider_id].terminate()  # type: ignore
@@ -861,21 +914,21 @@ class ProviderManager:
         async with self.resource_lock:
             npid = new_config.get("id", None)
             if not npid:
-                raise ValueError("New provider config must have an 'id' field")
+                raise ValueError("新的提供商配置缺少 id 字段")
             config = self.acm.default_conf
             for provider in config["provider"]:
                 if (
                     provider.get("id", None) == npid
                     and provider.get("id", None) != origin_provider_id
                 ):
-                    raise ValueError(f"Provider ID {npid} already exists")
+                    raise ValueError(f"提供商 ID「{npid}」已存在，请换一个 ID")
             # update config
             for idx, provider in enumerate(config["provider"]):
                 if provider.get("id", None) == origin_provider_id:
                     config["provider"][idx] = new_config
                     break
             else:
-                raise ValueError(f"Provider ID {origin_provider_id} not found")
+                raise ValueError(f"提供商 ID「{origin_provider_id}」不存在")
             config.save_config()
             # reload instance
             await self.reload(new_config)
@@ -885,11 +938,11 @@ class ProviderManager:
         async with self.resource_lock:
             npid = new_config.get("id", None)
             if not npid:
-                raise ValueError("New provider config must have an 'id' field")
+                raise ValueError("新的提供商配置缺少 id 字段")
             config = self.acm.default_conf
             for provider in config["provider"]:
                 if provider.get("id", None) == npid:
-                    raise ValueError(f"Provider ID {npid} already exists")
+                    raise ValueError(f"提供商 ID「{npid}」已存在，请换一个 ID")
             # add to config
             config["provider"].append(new_config)
             config.save_config()

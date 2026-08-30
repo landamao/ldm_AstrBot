@@ -992,7 +992,13 @@ class ProviderGoogleGenAI(Provider):
                 and m.name
             ]
         except APIError as e:
-            raise Exception(f"Failed to fetch Gemini model list: {e.message}")
+            logger.error(
+                "获取模型列表失败({}, {})：{}",
+                self.display_provider_id(),
+                self.provider_config.get("api_base", ""),
+                e.message,
+            )
+            raise Exception(f"获取模型列表失败：{e.message}") from e
 
     def get_current_key(self) -> str:
         return self.chosen_api_key
