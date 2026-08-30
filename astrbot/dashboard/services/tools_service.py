@@ -305,16 +305,16 @@ class ToolsService:
 
             if not tool_name or permission not in ("admin", "member"):
                 raise ToolsServiceError(
-                    "name and permission (admin or member) are required"
+                    "缺少必要参数: name 和 permission（admin 或 member）"
                 )
 
             if self.tool_mgr.is_builtin_tool(tool_name):
                 raise ToolsServiceError(
-                    "Builtin tools do not support per-tool permission configuration."
+                    "内置工具不支持单独配置权限。"
                 )
 
             if not any(t.name == tool_name for t in self.tool_mgr.func_list):
-                raise ToolsServiceError(f"Tool '{tool_name}' not found")
+                raise ToolsServiceError(f"工具「{tool_name}」不存在")
 
             perms_store = sp.get(
                 "tool_permissions",
@@ -336,13 +336,15 @@ class ToolsService:
                 scope_id="global",
             )
 
-            return f"Tool '{tool_name}' permission set to {permission}"
+            permission_desc = "管理员" if permission == "admin" else "全部用户"
+            logger.info(f"函数工具「{tool_name}」权限已设为 {permission_desc}")
+            return f"工具「{tool_name}」权限已更新为 {permission_desc}"
         except ToolsServiceError:
             raise
         except Exception as exc:
             logger.error(traceback.format_exc())
             raise ToolsServiceError(
-                f"Failed to update tool permission: {exc!s}"
+                f"工具权限更新失败: {exc!s}"
             ) from exc
 
     def toggle_tool(self, data: Any) -> str:
@@ -351,11 +353,11 @@ class ToolsService:
             action = data.get("activate")
 
             if not tool_name or action is None:
-                raise ToolsServiceError("Missing required parameters: name or activate")
+                raise ToolsServiceError("缺少必要参数: name 或 activate")
 
             if self.tool_mgr.is_builtin_tool(tool_name):
                 raise ToolsServiceError(
-                    "Builtin tools are read-only and cannot be toggled."
+                    "内置工具为只读，无法进行启用或停用操作。"
                 )
 
             if action:
@@ -363,21 +365,23 @@ class ToolsService:
                     ok = self.tool_mgr.activate_llm_tool(tool_name, star_map=star_map)
                 except ValueError as exc:
                     raise ToolsServiceError(
-                        f"Failed to activate tool: {exc!s}"
+                        f"启用工具失败: {exc!s}"
                     ) from exc
             else:
                 ok = self.tool_mgr.deactivate_llm_tool(tool_name)
 
             if ok:
-                return "Operation successful."
+                action_desc = "启用" if action else "停用"
+                logger.info(f"函数工具「{tool_name}」已{action_desc}")
+                return f"工具「{tool_name}」已{action_desc}"
             raise ToolsServiceError(
-                f"Tool {tool_name} does not exist or the operation failed."
+                f"工具「{tool_name}」不存在或操作失败。"
             )
         except ToolsServiceError:
             raise
         except Exception as exc:
             logger.error(traceback.format_exc())
-            raise ToolsServiceError(f"Failed to operate tool: {exc!s}") from exc
+            raise ToolsServiceError(f"工具操作失败: {exc!s}") from exc
 
     async def sync_provider(self, data: Any) -> str:
         try:

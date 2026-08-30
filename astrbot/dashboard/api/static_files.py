@@ -39,6 +39,23 @@ _COMPRESSIBLE_SUFFIXES = {
 _GZIP_LOCK = threading.Lock()
 
 
+# 版本标记文件不通过静态通道对外提供：后端直接读磁盘，前端版本信息走 /api 获取。
+# 否则未登录用户可直接 GET /version、/assets/version 读到版本号。
+_PROTECTED_STATIC_PATHS = ("version", "assets/version")
+
+
+def _is_protected_static_path(static_path: str) -> bool:
+    normalized = static_path.replace("\\", "/").strip("/")
+    # 去掉空段与 "./"，防止 /./version 之类的写法绕过
+    parts = [part for part in normalized.split("/") if part and part != "."]
+    normalized = "/".join(parts)
+    for protected in _PROTECTED_STATIC_PATHS:
+        if normalized == protected or normalized.startswith(protected + "."):
+            # startswith 覆盖 .gz 压缩缓存与 .gz.tmp 临时文件
+            return True
+    return False
+
+
 def _static_folder(request: Request) -> str | None:
     return getattr(request.app.state, "dashboard_static_folder", None)
 
@@ -107,6 +124,10 @@ async def serve_index(request: Request):
 async def serve_static_file(request: Request, static_path: str):
     if request.url.path.startswith("/api"):
         raise HTTPException(status_code=404)
+
+    if _is_protected_static_path(static_path):
+        # 版本标记文件一律 404，不暴露存在性
+        return _not_found_response()
 
     file_path = service.resolve_static_file(_static_folder(request), static_path)
     if file_path is None:

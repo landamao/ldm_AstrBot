@@ -217,17 +217,11 @@ class InternalAgentSubStage(Stage):
         if active_runner is None and not has_other_events:
             return False
 
-        context_text = ""
-        if interrupt_cfg.get("add_to_context", True):
-            context_text = str(
-                interrupt_cfg.get(
-                    "context_text",
-                    "[系统提示]用户发来了新消息导致打断了此条回复，"
-                    "请联系上下文继续做出回复",
-                )
-                or "[系统提示]用户发来了新消息导致打断了此条回复，"
-                "请联系上下文继续做出回复"
-            ).strip()
+        # 固定英文系统提示，不可配置
+        context_text = (
+            "The user sent a new message and interrupted this response. "
+            "Continue the conversation based on the content already sent above."
+        )
 
         # 不向旧任务写 history_note，避免与新请求重复注入
         stopped_count = active_event_registry.request_agent_stop_all(
@@ -309,6 +303,14 @@ class InternalAgentSubStage(Stage):
                 )
                 if session_streaming is not None:
                     streaming_response = bool(session_streaming)
+            logger.debug(
+                "流式诊断 - platform=%s enable_streaming_extra=%s "
+                "global_streaming=%s final_streaming=%s",
+                event.get_platform_name(),
+                enable_streaming,
+                self.streaming_response,
+                streaming_response,
+            )
 
             # 逐请求覆盖显示思考：WebChat 前端 show_reasoning 开关
             show_reasoning_override = event.get_extra("show_reasoning")
@@ -426,12 +428,7 @@ class InternalAgentSubStage(Stage):
                     # 仿 system_reminder：作为 extra_user_content_parts 注入，不污染 prompt，且 _no_save 不落库重复
                     context_hint = event.get_extra("interrupt_reply_context_hint")
                     if isinstance(context_hint, str) and context_hint.strip():
-                        hint = context_hint.strip()
-                        # 若配置已含标签则不再包一层
-                        if "<system_reminder>" in hint:
-                            reminder = hint
-                        else:
-                            reminder = f"<system_reminder>{hint}</system_reminder>"
+                        reminder = f"<system_reminder>{context_hint}</system_reminder>"
                         req.extra_user_content_parts.append(
                             TextPart(text=reminder).mark_as_temp()
                         )
@@ -702,10 +699,8 @@ class InternalAgentSubStage(Stage):
         用于区分：
         - 真截断：生成中 / 分段发送中被软打断
         - 收尾撞车：2/2 已发完，仅写历史/注销阶段被标 abort
-        后者不应再往历史追加打断系统提示。
+        后者不应再往历史追加停止系统提示。
         """
-        if runner_aborted:
-            return False
         if event.get_extra("_llm_reply_send_truncated"):
             return False
         if event.get_extra("_llm_reply_send_completed"):
@@ -724,41 +719,81 @@ class InternalAgentSubStage(Stage):
         messages: list[Message],
         *,
         runner_aborted: bool = False,
+        force_stopped: bool = False,
+        llm_response: LLMResponse | None = None,
     ) -> list[Message]:
-        """打断后：历史仅保留已实际发送内容；真截断时才追加打断提示。
+        """停止/打断后：历史仅保留已实际发送内容；追加固定英文停止标记。
 
         Args:
             event: 被打断的旧事件。
             messages: 待落库的消息列表（会原地修改）。
             runner_aborted: Agent 是否在生成阶段被 abort（流式中断等）。
-                True 时若无发送追踪，则信任 runner 已写入的正文；
-                False 表示生成已完成、发送阶段被打断，未发出内容不得入历史。
+            force_stopped: 用户主动停止（/stop 或 Dashboard 停止按钮）。
+            llm_response: LLM 最终响应，用于在 WebChat 等无 send() 追踪的路径
+                中获取已产出文本。
         """
         delivered = self._get_delivered_llm_plain(event)
 
+        # WebChat 流式路径不走 send()，delivered 始终为空。
+        # 从 LLM 最终响应中取出已产出文本作为已发送内容。
+        if not delivered and runner_aborted and llm_response is not None:
+            completion = (llm_response.completion_text or "").strip()
+            if completion:
+                delivered = completion
+                # 同时回写 extra，让后续日志/判断能取到
+                event.set_extra("_delivered_llm_plain_text", delivered)
+
         if not delivered and runner_aborted:
-            # 生成中被打断且未发出任何内容：本次请求对用户不可见，历史无需裁剪、不写打断提示
-            # （否则 target_idx 会指向上一条已完整发出的回复，误把打断提示挂在它身上）
             logger.info(
-                "打断时未发送任何内容，跳过历史裁剪与打断提示: umo=%s",
+                "停止时未发送任何内容，跳过历史裁剪与停止标记: umo=%s",
                 event.unified_msg_origin,
             )
             return messages
 
-        interrupt_cfg = self._get_interrupt_reply_config(event)
-        note = ""
-        if interrupt_cfg.get("add_to_context", True):
-            note = str(
-                interrupt_cfg.get(
-                    "context_text",
-                    "用户发送了新消息并打断了当前回复。"
-                    "请仅基于已实际发送给用户的内容与新消息继续对话。",
-                )
-                or ""
-            ).strip()
-        # 与超时兜底的临时注入路径保持一致：自动包裹 <system_reminder> 标签，无需用户手写
-        if note and "<system_reminder>" not in note:
-            note = f"<system_reminder>{note}</system_reminder>"
+        # 固定英文系统提示，不可配置，让模型更信任这是系统发出的
+        if force_stopped:
+            note = (
+                "<system_reminder>"
+                "The user manually stopped this response. "
+                "Continue the conversation based on the content already sent above."
+                "</system_reminder>"
+            )
+        else:
+            note = (
+                "<system_reminder>"
+                "The user sent a new message and interrupted this response. "
+                "Continue the conversation based on the content already sent above."
+                "</system_reminder>"
+            )
+
+        # 工具已执行（消息序列中有 role="tool"）时：工具可能已修改文件/状态，
+        # 必须完整保存到上下文，不裁剪 tool_calls 和 tool 结果，只追加停止标记
+        has_tool_results = any(msg.role == "tool" for msg in messages)
+        if has_tool_results:
+            # 找最后一条无 tool_calls 的 assistant（最终回复），追加停止标记
+            target_idx = None
+            for i in range(len(messages) - 1, -1, -1):
+                msg = messages[i]
+                if msg.role == "assistant" and not msg.tool_calls:
+                    target_idx = i
+                    break
+            if target_idx is not None:
+                msg = messages[target_idx]
+                original = self._extract_message_plain(msg.content).strip()
+                if note and note not in (original or ""):
+                    msg.content = (
+                        f"{original}\n{note}" if original else note
+                    )
+            elif not delivered and not any(
+                m.role == "assistant" and m.content for m in messages
+            ):
+                # 没有最终回复且无已发送内容：追加一条仅含停止标记的 assistant
+                messages.append(Message(role="assistant", content=note))
+            logger.info(
+                "工具已执行，完整保存上下文并追加停止标记: umo=%s",
+                event.unified_msg_origin,
+            )
+            return messages
 
         # 优先最后一条无 tool_calls 的 assistant（最终回复）
         target_idx = None
@@ -840,18 +875,11 @@ class InternalAgentSubStage(Stage):
         if not req or not req.conversation:
             return
 
-        # /stop 或 Dashboard 强制停止：整轮作废，不写入对话历史
-        # 与「新消息软打断」区分：软打断会保留已发送内容并可选写入打断提示
-        if event.get_extra("agent_force_stop"):
-            logger.info(
-                "/stop 强制停止，跳过写入对话历史: umo=%s, runner_aborted=%s",
-                event.unified_msg_origin,
-                runner_aborted,
-            )
-            return
-
+        # /stop 或 Dashboard 停止：保存已发送内容并标记用户主动停止
+        force_stopped = bool(event.get_extra("agent_force_stop"))
         interrupted = bool(
             user_aborted
+            or force_stopped
             or event.get_extra("agent_stop_requested")
             or event.get_extra("agent_user_aborted")
         )
@@ -886,7 +914,9 @@ class InternalAgentSubStage(Stage):
                 messages.append(message)
             return messages
 
-        # LLM 失败（无响应 / 非 assistant）时仍尽量保留 checkpoint，便于续写（#9358）
+        # LLM 失败（无响应 / 非 assistant）时仍尽量保留消息，便于续写（#9358）。
+        # 所有平台都必须落库：工具直接发送消息给用户（返回 None 结束循环）或
+        # LLM 出错的轮次，其用户消息与工具调用记录不能静默丢弃。
         if not interrupted and (
             llm_response is None or llm_response.role != "assistant"
         ):
@@ -899,13 +929,13 @@ class InternalAgentSubStage(Stage):
                         content=CheckpointData(id=checkpoint_id),
                     ).model_dump()
                 )
-                await self.conv_manager.update_conversation(
-                    event.unified_msg_origin,
-                    req.conversation.cid,
-                    history=message_to_save,
-                    token_usage=None,
-                    event=event,
-                )
+            await self.conv_manager.update_conversation(
+                event.unified_msg_origin,
+                req.conversation.cid,
+                history=message_to_save,
+                token_usage=None,
+                event=event,
+            )
             return
 
         if llm_response is None:
@@ -926,11 +956,14 @@ class InternalAgentSubStage(Stage):
                 event,
                 messages_to_save,
                 runner_aborted=runner_aborted,
+                force_stopped=force_stopped,
+                llm_response=llm_response,
             )
             logger.info(
-                "打断后按已发送内容裁剪历史: delivered_len=%s, runner_aborted=%s, send_completed=%s",
+                "停止后按已发送内容裁剪历史: delivered_len=%s, runner_aborted=%s, force_stopped=%s, send_completed=%s",
                 len(self._get_delivered_llm_plain(event)),
                 runner_aborted,
+                force_stopped,
                 bool(event.get_extra("_llm_reply_send_completed")),
             )
 

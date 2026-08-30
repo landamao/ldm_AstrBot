@@ -10,6 +10,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -37,6 +38,7 @@ from astrbot.core.utils.media_utils import (
 )
 
 SSE_HEARTBEAT = ": heartbeat\n\n"
+CHAT_RUN_SUBSCRIBER_QUEUE_SIZE = 256
 WEBCHAT_IMAGE_MIME_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -192,6 +194,12 @@ class BotMessageAccumulator:
             if self._think_start_time is not None:
                 self._finalize_thinking_duration()
             self._store_llm_error(result_text)
+            return
+
+        if chain_type == "stopped":
+            # 用户主动停止标记：持久化为 stopped part，前端显示「已停止」提示
+            self._flush_pending_text()
+            self.parts.append({"type": "stopped"})
             return
 
         # 非 reasoning 内容到达，结束思考计时
@@ -609,6 +617,30 @@ def extract_attachment_ids(history_list) -> list[str]:
     return attachment_ids
 
 
+@dataclass(slots=True)
+class ChatRunState:
+    """WebChat 生成任务的状态，独立于订阅者存在。
+
+    断线续流的核心：back_queue 的消费和 SSE 推送解耦，
+    _consume_chat_run 后台任务持续消费 back_queue 并累积落库，
+    订阅者随时可以离开或重新订阅。
+    """
+
+    run_id: str
+    username: str
+    session_id: str
+    llm_checkpoint_id: str
+    platform_history_id: str
+    back_queue: asyncio.Queue
+    subscribers: set[asyncio.Queue] = field(default_factory=set)
+    message_parts: list[dict] = field(default_factory=list)
+    agent_stats: dict = field(default_factory=dict)
+    refs: dict = field(default_factory=dict)
+    revision: int = 0
+    status: str = "running"
+    task: asyncio.Task[None] | None = None
+
+
 class ChatServiceError(Exception):
     pass
 
@@ -629,6 +661,8 @@ class ChatService:
         self.platform_history_mgr = core_lifecycle.platform_message_history_manager
         self.umop_config_router = core_lifecycle.umop_config_router
         self.running_convs: dict[str, bool] = {}
+        self.chat_runs: dict[str, ChatRunState] = {}
+        self.chat_runs_by_session: dict[str, set[str]] = {}
 
     async def build_user_message_parts(self, message: str | list) -> list[dict]:
         return await build_webchat_message_parts(
@@ -1076,6 +1110,7 @@ class ChatService:
 
         used_provider_id = provider_id
         used_model = ""
+        self.running_convs[session_id] = True
         try:
             provider_manager = self.core_lifecycle.provider_manager
             provider = None
@@ -1144,20 +1179,451 @@ class ChatService:
                 "user_message": serialize_history_entry(saved_user_record),
                 "bot_message": serialize_history_entry(saved_bot_record),
             }
+        else:
+            saved_bot_record = await self.save_bot_message(
+                session_id,
+                bot_parts,
+                {},
+                {},
+            )
 
-        saved_bot_record = await self.save_bot_message(
-            session_id,
-            bot_parts,
-            {},
-            {},
+            return {
+                "provider_id": used_provider_id,
+                "model": used_model,
+                "user_message": serialize_history_entry(saved_user_record),
+                "bot_message": serialize_history_entry(saved_bot_record),
+            }
+        finally:
+            self.running_convs.pop(session_id, None)
+
+    def get_active_chat_runs(self, username: str, session_id: str) -> list[dict]:
+        """返回指定用户在指定会话中可恢复的活跃 run 列表。"""
+        snapshots = []
+        for run in self.chat_runs.values():
+            if run.username != username or run.session_id != session_id:
+                continue
+            snapshots.append(
+                {
+                    "run_id": run.run_id,
+                    "session_id": run.session_id,
+                    "llm_checkpoint_id": run.llm_checkpoint_id,
+                    "status": run.status,
+                    "revision": run.revision,
+                    "content": build_bot_history_content(
+                        deepcopy(run.message_parts),
+                        agent_stats=deepcopy(run.agent_stats),
+                        refs=deepcopy(run.refs),
+                    ),
+                }
+            )
+        return snapshots
+
+    @staticmethod
+    def _publish_chat_run(run: ChatRunState, payload: dict) -> None:
+        """向所有订阅者推送一个事件，不把 run 和订阅者耦合。
+
+        慢订阅者会被丢弃并收到 None（断线重连信号）。
+        """
+        run.revision += 1
+        item = (run.revision, payload)
+        for subscriber in list(run.subscribers):
+            try:
+                subscriber.put_nowait(item)
+            except asyncio.QueueFull:
+                # 慢订阅者断开，可以重新从快照续接
+                run.subscribers.discard(subscriber)
+                while not subscriber.empty():
+                    subscriber.get_nowait()
+                subscriber.put_nowait(None)
+
+    def _subscribe_chat_run(
+        self,
+        run: ChatRunState,
+        *,
+        include_snapshot: bool,
+        saved_user_record=None,
+    ) -> AsyncIterator[str]:
+        """为一个活跃 run 创建 SSE 订阅者。
+
+        include_snapshot=True 时先发送已累积的完整快照，再推送增量事件。
+        用于断线续流：离开页面再回来后从快照恢复，然后继续接收实时增量。
+        """
+        subscriber: asyncio.Queue = asyncio.Queue(
+            maxsize=CHAT_RUN_SUBSCRIBER_QUEUE_SIZE
         )
+        run.subscribers.add(subscriber)
+        snapshot = None
+        if include_snapshot:
+            snapshot = {
+                "run_id": run.run_id,
+                "session_id": run.session_id,
+                "llm_checkpoint_id": run.llm_checkpoint_id,
+                "status": run.status,
+                "revision": run.revision,
+                "content": build_bot_history_content(
+                    deepcopy(run.message_parts),
+                    agent_stats=deepcopy(run.agent_stats),
+                    refs=deepcopy(run.refs),
+                ),
+            }
+        snapshot_revision = run.revision
 
-        return {
-            "provider_id": used_provider_id,
-            "model": used_model,
-            "user_message": serialize_history_entry(saved_user_record),
-            "bot_message": serialize_history_entry(saved_bot_record),
-        }
+        async def stream():
+            try:
+                if snapshot is not None:
+                    payload = {"type": "run_snapshot", "data": snapshot}
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                else:
+                    session_info = {
+                        "type": "session_id",
+                        "data": None,
+                        "session_id": run.session_id,
+                    }
+                    yield f"data: {json.dumps(session_info, ensure_ascii=False)}\n\n"
+                    if saved_user_record:
+                        user_saved_info = {
+                            "type": "user_message_saved",
+                            "data": {
+                                "id": saved_user_record.id,
+                                "created_at": to_utc_isoformat(
+                                    saved_user_record.created_at
+                                ),
+                                "llm_checkpoint_id": run.llm_checkpoint_id,
+                            },
+                        }
+                        yield f"data: {json.dumps(user_saved_info, ensure_ascii=False)}\n\n"
+
+                while True:
+                    try:
+                        item = await asyncio.wait_for(subscriber.get(), timeout=1)
+                    except asyncio.TimeoutError:
+                        yield SSE_HEARTBEAT
+                        continue
+                    if item is None:
+                        break
+                    revision, payload = item
+                    if include_snapshot and revision <= snapshot_revision:
+                        continue
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            finally:
+                run.subscribers.discard(subscriber)
+
+        return stream()
+
+    async def build_chat_run_stream(
+        self,
+        username: str,
+        run_id: str,
+    ) -> AsyncIterator[str]:
+        """为活跃 run 附加新的 SSE 订阅者（断线续流入口）。
+
+        Args:
+            username: 认证用户名。
+            run_id: 活跃 run 的 ID。
+
+        Returns:
+            以完整快照开头的 SSE 迭代器。
+
+        Raises:
+            ChatServiceError: run 不存在或不属于该用户。
+        """
+        run = self.chat_runs.get(run_id)
+        if run is None:
+            raise ChatServiceError(f"Chat run {run_id} not found")
+        if run.username != username:
+            raise ChatServiceError("Permission denied")
+        return self._subscribe_chat_run(run, include_snapshot=True)
+
+    async def _consume_chat_run(self, run: ChatRunState) -> None:
+        """消费 back_queue 输出，持久化，并扇出给所有订阅者。
+
+        这是断线续流的核心：独立于订阅者的后台任务，持续从 back_queue
+        取出 LLM 输出 → 累积到 display_accumulator（快照用）和
+        pending_accumulator（落库用）→ 落库 → 通过 _publish_chat_run
+        推给所有当前订阅者。订阅者随时离开或重连都不影响消费。
+        """
+        pending_accumulator = BotMessageAccumulator()
+        display_accumulator = BotMessageAccumulator()
+        pending_agent_stats = {}
+        pending_refs = {}
+
+        async def flush_pending_bot_message():
+            nonlocal pending_accumulator, pending_agent_stats, pending_refs
+            if not (
+                pending_accumulator.has_content() or pending_refs or pending_agent_stats
+            ):
+                return None
+
+            message_parts_to_save = pending_accumulator.build_message_parts(
+                include_pending_tool_calls=True
+            )
+            plain_text = collect_plain_text_from_message_parts(message_parts_to_save)
+            try:
+                extracted_refs = extract_web_search_refs(
+                    plain_text,
+                    message_parts_to_save,
+                )
+            except Exception as e:
+                logger.exception(
+                    f"Failed to extract web search refs: {e}",
+                    exc_info=True,
+                )
+                extracted_refs = pending_refs
+
+            run.refs = extracted_refs
+            saved_record = await self.save_bot_message(
+                run.session_id,
+                message_parts_to_save,
+                pending_agent_stats,
+                extracted_refs,
+                run.llm_checkpoint_id,
+                run.platform_history_id,
+            )
+            pending_accumulator = BotMessageAccumulator()
+            pending_agent_stats = {}
+            pending_refs = {}
+            # 落库点打日志：这里已持有完整消息（与“发送消息”日志对齐，WebChat 不走 send()）
+            if plain_text:
+                logger.info(
+                    "发送消息 - 流式输出完成 - %s/%s: %s",
+                    run.username or "-",
+                    run.session_id or "-",
+                    plain_text,
+                )
+            return saved_record
+
+        self.running_convs[run.session_id] = True
+        try:
+            while True:
+                result = await run.back_queue.get()
+                if not result:
+                    continue
+                if result.get("message_id") and str(result["message_id"]) != run.run_id:
+                    logger.warning("webchat stream message_id mismatch")
+                    continue
+
+                result_text = result.get("data", "")
+                msg_type = result.get("type")
+                streaming = result.get("streaming", False)
+                chain_type = result.get("chain_type")
+
+                if chain_type == "agent_stats":
+                    try:
+                        run.agent_stats = json.loads(result_text)
+                    except (TypeError, json.JSONDecodeError):
+                        run.agent_stats = {}
+                    pending_agent_stats = run.agent_stats
+                    self._publish_chat_run(
+                        run,
+                        {"type": "agent_stats", "data": run.agent_stats},
+                    )
+                    continue
+
+                attachment_saved_payload = None
+                if msg_type == "plain":
+                    for accumulator in (pending_accumulator, display_accumulator):
+                        accumulator.add_plain(
+                            result_text,
+                            chain_type=chain_type,
+                            streaming=streaming,
+                        )
+                elif msg_type in {"image", "record", "file", "video"}:
+                    prefix = {
+                        "image": "[IMAGE]",
+                        "record": "[RECORD]",
+                        "file": "[FILE]",
+                        "video": "[VIDEO]",
+                    }[msg_type]
+                    filename = str(result_text).replace(prefix, "", 1)
+                    display_name = None
+                    if msg_type in {"file", "video"} and "|" in filename:
+                        filename, display_name = filename.split("|", 1)
+                    part = await self.create_attachment_from_file(
+                        filename,
+                        msg_type,
+                        display_name=display_name,
+                    )
+                    for accumulator in (pending_accumulator, display_accumulator):
+                        accumulator.add_attachment(part)
+                    if part and part.get("attachment_id") and part.get("type"):
+                        attachment_saved_payload = {
+                            "type": "attachment_saved",
+                            "data": {
+                                "id": part["attachment_id"],
+                                "type": part["type"],
+                            },
+                        }
+
+                snapshot_accumulator = deepcopy(display_accumulator)
+                run.message_parts = snapshot_accumulator.build_message_parts(
+                    include_pending_tool_calls=True
+                )
+                self._publish_chat_run(run, result)
+                if attachment_saved_payload:
+                    self._publish_chat_run(run, attachment_saved_payload)
+
+                should_save = False
+                if msg_type == "end":
+                    should_save = bool(
+                        pending_accumulator.has_content()
+                        or pending_refs
+                        or pending_agent_stats
+                    )
+                elif (streaming and msg_type == "complete") or not streaming:
+                    # 有未完成工具调用时推迟落库：工具直发内容（plain/image）
+                    # 不再冲掉 pending 卡片，等结果合并后由后续事件统一保存
+                    if chain_type not in (
+                        "tool_call",
+                        "tool_call_result",
+                    ) and not pending_accumulator.has_pending_tool_calls():
+                        should_save = True
+
+                if should_save:
+                    saved_record = await flush_pending_bot_message()
+                    if saved_record:
+                        saved_content = (
+                            saved_record.content
+                            if isinstance(saved_record.content, dict)
+                            else {}
+                        )
+                        saved_parts = saved_content.get("message", [])
+                        saved_refs = saved_content.get("refs")
+                        # 落库后重新加载 conversation history，
+                        # 此时当前轮次的 checkpoint 已写入，能正确判定 can_regenerate
+                        fresh_session = await self.db.get_platform_session_by_id(
+                            run.session_id
+                        )
+                        _, fresh_conv_history = (
+                            await self.load_current_conversation_history(fresh_session)
+                            if fresh_session
+                            else ("", [])
+                        )
+                        saved_can_regenerate = self._can_regenerate_message(
+                            saved_record, fresh_conv_history
+                        )
+                        saved_info: dict = {
+                            "type": "message_saved",
+                            "data": {
+                                "id": saved_record.id,
+                                "created_at": to_utc_isoformat(
+                                    saved_record.created_at
+                                ),
+                                "llm_checkpoint_id": run.llm_checkpoint_id,
+                                "message_parts": saved_parts,
+                                "can_regenerate": saved_can_regenerate,
+                            },
+                        }
+                        if saved_refs:
+                            saved_info["data"]["refs"] = saved_refs
+                        self._publish_chat_run(run, saved_info)
+                if msg_type == "end":
+                    run.status = "completed"
+                    break
+        except asyncio.CancelledError:
+            run.status = "stopped"
+            # 用户主动停止：在已累积内容后追加停止标记 part
+            if pending_accumulator.has_content():
+                pending_accumulator.add_plain(
+                    "",
+                    chain_type="stopped",
+                    streaming=False,
+                )
+            # 立即 flush，不依赖 finally 的 shield（task 被 cancel 时
+            # finally 里的 await 也会被 cancel）
+            try:
+                saved_record = await flush_pending_bot_message()
+                if saved_record:
+                    saved_content = (
+                        saved_record.content
+                        if isinstance(saved_record.content, dict)
+                        else {}
+                    )
+                    saved_parts = saved_content.get("message", [])
+                    saved_refs = saved_content.get("refs")
+                    self._publish_chat_run(
+                        run,
+                        {
+                            "type": "message_saved",
+                            "data": {
+                                "id": saved_record.id,
+                                "created_at": to_utc_isoformat(
+                                    saved_record.created_at
+                                ),
+                                "llm_checkpoint_id": run.llm_checkpoint_id,
+                                "message_parts": saved_parts,
+                                "can_regenerate": False,
+                            },
+                        },
+                    )
+            except Exception as e:
+                logger.exception(
+                    f"Failed to flush stopped webchat message: {e}",
+                    exc_info=True,
+                )
+        except Exception as e:
+            run.status = "failed"
+            logger.exception(f"WebChat run unexpected error: {e}", exc_info=True)
+            self._publish_chat_run(
+                run,
+                {"type": "error", "data": "WebChat run failed"},
+            )
+        finally:
+            try:
+                # stop 时 task 被 cancel，但 finally 里的 flush 必须完成
+                # 才能让前端 loadSessionMessages 读到含 stopped part 的消息
+                saved_record = await flush_pending_bot_message()
+                if saved_record:
+                    saved_content = (
+                        saved_record.content
+                        if isinstance(saved_record.content, dict)
+                        else {}
+                    )
+                    saved_parts = saved_content.get("message", [])
+                    saved_refs = saved_content.get("refs")
+                    fresh_session = await self.db.get_platform_session_by_id(
+                        run.session_id
+                    )
+                    _, fresh_conv_history = (
+                        await self.load_current_conversation_history(fresh_session)
+                        if fresh_session
+                        else ("", [])
+                    )
+                    saved_can_regenerate = self._can_regenerate_message(
+                        saved_record, fresh_conv_history
+                    )
+                    saved_info: dict = {
+                        "type": "message_saved",
+                        "data": {
+                            "id": saved_record.id,
+                            "created_at": to_utc_isoformat(saved_record.created_at),
+                            "llm_checkpoint_id": run.llm_checkpoint_id,
+                            "message_parts": saved_parts,
+                            "can_regenerate": saved_can_regenerate,
+                        },
+                    }
+                    if saved_refs:
+                        saved_info["data"]["refs"] = saved_refs
+                    self._publish_chat_run(run, saved_info)
+            except Exception as e:
+                logger.exception(
+                    f"Failed to persist pending webchat message: {e}",
+                    exc_info=True,
+                )
+
+            webchat_queue_mgr.remove_back_queue(run.run_id)
+            if self.chat_runs.get(run.run_id) is run:
+                self.chat_runs.pop(run.run_id, None)
+            run_ids = self.chat_runs_by_session.get(run.session_id)
+            if run_ids is not None:
+                run_ids.discard(run.run_id)
+                if not run_ids:
+                    self.chat_runs_by_session.pop(run.session_id, None)
+                    self.running_convs.pop(run.session_id, None)
+            for subscriber in list(run.subscribers):
+                while not subscriber.empty():
+                    subscriber.get_nowait()
+                subscriber.put_nowait(None)
+            run.subscribers.clear()
 
     async def build_chat_stream(
         self,
@@ -1189,277 +1655,29 @@ class ChatService:
                 "Message content is empty (reply only is not allowed)"
             )
 
+        if platform_history_id == "webchat":
+            try:
+                platform_session = await self.db.get_platform_session_by_id(
+                    webchat_conv_id
+                )
+                if platform_session is None:
+                    await self.db.create_platform_session(
+                        creator=username,
+                        platform_id="webchat",
+                        session_id=webchat_conv_id,
+                        is_group=0,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to ensure WebChat platform session %s: %s",
+                    webchat_conv_id,
+                    exc,
+                )
+
         message_id = str(uuid.uuid4())
         llm_checkpoint_id = post_data.get("_llm_checkpoint_id") or str(uuid.uuid4())
         skip_user_history = bool(post_data.get("_skip_user_history"))
-        back_queue = webchat_queue_mgr.get_or_create_back_queue(
-            message_id,
-            webchat_conv_id,
-        )
         saved_user_record = None
-
-        async def stream():
-            client_disconnected = False
-            message_accumulator = BotMessageAccumulator()
-            agent_stats = {}
-            refs = {}
-
-            async def flush_pending_bot_message():
-                nonlocal message_accumulator, agent_stats, refs
-                if not (message_accumulator.has_content() or refs or agent_stats):
-                    return None
-
-                message_parts_to_save = message_accumulator.build_message_parts(
-                    include_pending_tool_calls=True
-                )
-                plain_text = collect_plain_text_from_message_parts(
-                    message_parts_to_save
-                )
-
-                try:
-                    extracted_refs = extract_web_search_refs(
-                        plain_text,
-                        message_parts_to_save,
-                    )
-                except Exception as e:
-                    logger.exception(
-                        f"Failed to extract web search refs: {e}",
-                        exc_info=True,
-                    )
-                    extracted_refs = refs
-
-                saved_record = await self.save_bot_message(
-                    webchat_conv_id,
-                    message_parts_to_save,
-                    agent_stats,
-                    extracted_refs,
-                    llm_checkpoint_id,
-                    platform_history_id,
-                )
-                message_accumulator = BotMessageAccumulator()
-                agent_stats = {}
-                refs = {}
-                # 落库点打日志：这里已持有完整消息（与“发送消息”日志对齐，WebChat 不走 send()）
-                if plain_text:
-                    logger.info(
-                        "发送消息 - 流式输出完成 - %s/%s: %s",
-                        username or "-",
-                        webchat_conv_id or "-",
-                        plain_text,
-                    )
-                return saved_record
-
-            def build_attachment_saved_event(part: dict | None) -> str | None:
-                if not part or not part.get("attachment_id") or not part.get("type"):
-                    return None
-
-                payload = {
-                    "type": "attachment_saved",
-                    "data": {
-                        "id": part["attachment_id"],
-                        "type": part["type"],
-                    },
-                }
-                return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-            try:
-                session_info = {
-                    "type": "session_id",
-                    "data": None,
-                    "session_id": webchat_conv_id,
-                }
-                yield f"data: {json.dumps(session_info, ensure_ascii=False)}\n\n"
-                if saved_user_record and not client_disconnected:
-                    user_saved_info = {
-                        "type": "user_message_saved",
-                        "data": {
-                            "id": saved_user_record.id,
-                            "created_at": to_utc_isoformat(
-                                saved_user_record.created_at
-                            ),
-                            "llm_checkpoint_id": llm_checkpoint_id,
-                        },
-                    }
-                    yield f"data: {json.dumps(user_saved_info, ensure_ascii=False)}\n\n"
-
-                async with track_conversation(self.running_convs, webchat_conv_id):
-                    while True:
-                        result, should_break = await poll_webchat_stream_result(
-                            back_queue, username
-                        )
-                        if should_break:
-                            client_disconnected = True
-                            break
-                        if not result:
-                            if not client_disconnected:
-                                yield SSE_HEARTBEAT
-                            continue
-
-                        if (
-                            "message_id" in result
-                            and result["message_id"] != message_id
-                        ):
-                            logger.warning("webchat stream message_id mismatch")
-                            continue
-
-                        result_text = result["data"]
-                        msg_type = result.get("type")
-                        streaming = result.get("streaming", False)
-                        chain_type = result.get("chain_type")
-
-                        if chain_type == "agent_stats":
-                            stats_info = {
-                                "type": "agent_stats",
-                                "data": json.loads(result_text),
-                            }
-                            yield f"data: {json.dumps(stats_info, ensure_ascii=False)}\n\n"
-                            agent_stats = stats_info["data"]
-                            continue
-
-                        try:
-                            if not client_disconnected:
-                                yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
-                        except Exception as e:
-                            if not client_disconnected:
-                                logger.debug(
-                                    f"[WebChat] 用户 {username} 断开聊天长连接。 {e}"
-                                )
-                            client_disconnected = True
-
-                        try:
-                            if not client_disconnected:
-                                await asyncio.sleep(0.05)
-                        except asyncio.CancelledError:
-                            logger.debug(f"[WebChat] 用户 {username} 断开聊天长连接。")
-                            client_disconnected = True
-
-                        if msg_type == "plain":
-                            message_accumulator.add_plain(
-                                result_text,
-                                chain_type=chain_type,
-                                streaming=streaming,
-                            )
-                        elif msg_type == "image":
-                            filename = result_text.replace("[IMAGE]", "")
-                            part = await self.create_attachment_from_file(
-                                filename, "image"
-                            )
-                            message_accumulator.add_attachment(part)
-                            if attachment_saved_event := build_attachment_saved_event(
-                                part
-                            ):
-                                yield attachment_saved_event
-                        elif msg_type == "record":
-                            filename = result_text.replace("[RECORD]", "")
-                            part = await self.create_attachment_from_file(
-                                filename, "record"
-                            )
-                            message_accumulator.add_attachment(part)
-                            if attachment_saved_event := build_attachment_saved_event(
-                                part
-                            ):
-                                yield attachment_saved_event
-                        elif msg_type == "file":
-                            filename = result_text.replace("[FILE]", "", 1)
-                            display_name = None
-                            if "|" in filename:
-                                filename, display_name = filename.split("|", 1)
-                            part = await self.create_attachment_from_file(
-                                filename,
-                                "file",
-                                display_name=display_name,
-                            )
-                            message_accumulator.add_attachment(part)
-                            if attachment_saved_event := build_attachment_saved_event(
-                                part
-                            ):
-                                yield attachment_saved_event
-                        elif msg_type == "video":
-                            filename = result_text.replace("[VIDEO]", "")
-                            part = await self.create_attachment_from_file(
-                                filename, "video"
-                            )
-                            message_accumulator.add_attachment(part)
-                            if attachment_saved_event := build_attachment_saved_event(
-                                part
-                            ):
-                                yield attachment_saved_event
-
-                        should_save = False
-                        if msg_type == "end":
-                            should_save = message_accumulator.has_content() or bool(
-                                refs or agent_stats
-                            )
-                        elif (streaming and msg_type == "complete") or not streaming:
-                            # 有未完成工具调用时推迟落库：工具直发内容（plain/image）
-                            # 不再冲掉 pending 卡片，等结果合并后由后续事件统一保存
-                            if chain_type not in (
-                                "tool_call",
-                                "tool_call_result",
-                            ) and not message_accumulator.has_pending_tool_calls():
-                                should_save = True
-
-                        if should_save:
-                            saved_record = await flush_pending_bot_message()
-                            if saved_record and not client_disconnected:
-                                saved_content = (
-                                    saved_record.content
-                                    if isinstance(saved_record.content, dict)
-                                    else {}
-                                )
-                                saved_parts = saved_content.get("message", [])
-                                saved_refs = saved_content.get("refs")
-                                saved_info: dict = {
-                                    "type": "message_saved",
-                                    "data": {
-                                        "id": saved_record.id,
-                                        "created_at": to_utc_isoformat(
-                                            saved_record.created_at
-                                        ),
-                                        "llm_checkpoint_id": llm_checkpoint_id,
-                                        "message_parts": saved_parts,
-                                    },
-                                }
-                                if saved_refs:
-                                    saved_info["data"]["refs"] = saved_refs
-                                try:
-                                    yield f"data: {json.dumps(saved_info, ensure_ascii=False)}\n\n"
-                                except Exception:
-                                    pass
-                        if msg_type == "end":
-                            break
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.exception(f"WebChat stream unexpected error: {e}", exc_info=True)
-            finally:
-                try:
-                    await flush_pending_bot_message()
-                except Exception as e:
-                    logger.exception(
-                        f"Failed to persist pending webchat message: {e}",
-                        exc_info=True,
-                    )
-                webchat_queue_mgr.remove_back_queue(message_id)
-
-        chat_queue = webchat_queue_mgr.get_or_create_queue(webchat_conv_id)
-        await chat_queue.put(
-            (
-                username,
-                webchat_conv_id,
-                {
-                    "message": message_parts,
-                    "selected_provider": selected_provider,
-                    "selected_model": selected_model,
-                    "enable_streaming": enable_streaming,
-                    "show_reasoning": show_reasoning,
-                    "enable_fallback": enable_fallback,
-                    "message_id": message_id,
-                    "llm_checkpoint_id": llm_checkpoint_id,
-                    "thread_selected_text": thread_selected_text,
-                },
-            ),
-        )
 
         message_parts_for_storage = strip_message_parts_path_fields(message_parts)
         if not skip_user_history:
@@ -1472,7 +1690,55 @@ class ChatService:
                 llm_checkpoint_id=llm_checkpoint_id,
             )
 
-        return stream()
+        back_queue = webchat_queue_mgr.get_or_create_back_queue(
+            message_id,
+            webchat_conv_id,
+        )
+        run = ChatRunState(
+            run_id=message_id,
+            username=username,
+            session_id=webchat_conv_id,
+            llm_checkpoint_id=llm_checkpoint_id,
+            platform_history_id=platform_history_id,
+            back_queue=back_queue,
+        )
+        self.chat_runs[message_id] = run
+        self.chat_runs_by_session.setdefault(webchat_conv_id, set()).add(message_id)
+        stream = self._subscribe_chat_run(
+            run,
+            include_snapshot=False,
+            saved_user_record=saved_user_record,
+        )
+        run.task = asyncio.create_task(
+            self._consume_chat_run(run),
+            name=f"webchat_run_{message_id}",
+        )
+
+        try:
+            chat_queue = webchat_queue_mgr.get_or_create_queue(webchat_conv_id)
+            await chat_queue.put(
+                (
+                    username,
+                    webchat_conv_id,
+                    {
+                        "message": message_parts,
+                        "selected_provider": selected_provider,
+                        "selected_model": selected_model,
+                        "enable_streaming": enable_streaming,
+                        "show_reasoning": show_reasoning,
+                        "enable_fallback": enable_fallback,
+                        "message_id": message_id,
+                        "llm_checkpoint_id": llm_checkpoint_id,
+                        "thread_selected_text": thread_selected_text,
+                    },
+                ),
+            )
+        except BaseException:
+            run.task.cancel()
+            await asyncio.gather(run.task, return_exceptions=True)
+            raise
+
+        return stream
 
     async def set_session_persona(
         self,
@@ -1544,7 +1810,7 @@ class ChatService:
             raise ChatServiceError("Permission denied")
 
         unified_msg_origin = build_webchat_unified_msg_origin(session)
-        # Dashboard 停止按钮视作强制停止：尽快中断且不写入对话历史
+        # Dashboard 停止按钮视作用户主动停止
         stopped_count = active_event_registry.request_agent_stop_all(
             unified_msg_origin,
             extra_updates={"agent_force_stop": True},
@@ -1557,6 +1823,16 @@ class ChatService:
                 active_runner.request_stop()
         except Exception:
             pass
+        # 取消活跃的 chat_run task，让 _consume_chat_run 的 finally 分支
+        # flush 已累积内容并追加 stopped part
+        tasks_to_cancel = []
+        for run_id in list(self.chat_runs_by_session.get(session_id, set())):
+            run = self.chat_runs.get(run_id)
+            if run and run.task and not run.task.done():
+                run.task.cancel()
+                tasks_to_cancel.append(run.task)
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
         return {"stopped_count": stopped_count}
 
     async def stop_session_from_dashboard_payload(
@@ -1577,6 +1853,15 @@ class ChatService:
             f"{session.platform_id}:{message_type}:"
             f"{session.platform_id}!{username}!{session_id}"
         )
+        active_event_registry.request_agent_stop_all(unified_msg_origin)
+        tasks = []
+        for run_id in list(self.chat_runs_by_session.get(session_id, set())):
+            run = self.chat_runs.get(run_id)
+            if run and run.task and not run.task.done():
+                run.task.cancel()
+                tasks.append(run.task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self.conv_mgr.delete_conversations_by_user_id(unified_msg_origin)
 
         history_list = await self.platform_history_mgr.get(
@@ -1785,10 +2070,21 @@ class ChatService:
             creator=username,
         )
 
+        # 加载当前 conversation history，逐条计算 can_regenerate 权威标志
+        _, conv_history = await self.load_current_conversation_history(session)
+        serialized_history = []
+        for history in history_ls:
+            entry = serialize_history_entry(history)
+            entry["can_regenerate"] = self._can_regenerate_message(
+                history, conv_history
+            )
+            serialized_history.append(entry)
+
         response_data = {
-            "history": [serialize_history_entry(history) for history in history_ls],
+            "history": serialized_history,
             "threads": [serialize_thread(thread) for thread in threads],
             "is_running": self.running_convs.get(session_id, False),
+            "active_runs": self.get_active_chat_runs(username, session_id),
         }
         if project_info:
             response_data["project"] = {
@@ -1904,6 +2200,7 @@ class ChatService:
             "thread": serialize_thread(thread),
             "history": [serialize_history_entry(history) for history in history_ls],
             "is_running": self.running_convs.get(thread_id, False),
+            "active_runs": self.get_active_chat_runs(username, thread_id),
         }
 
     async def get_thread_from_dashboard_query(
@@ -2069,6 +2366,116 @@ class ChatService:
     ) -> dict:
         return await self.update_message(username, self._dashboard_payload(payload))
 
+    # -- 重试按钮修复：can_regenerate 权威判定与 llm_error 分流重试 --
+
+    @staticmethod
+    def _is_llm_error_message(record) -> bool:
+        """判断消息是否含 llm_error part（模型请求失败的报错记录）。"""
+        content = getattr(record, "content", None)
+        if not isinstance(content, dict):
+            return False
+        message_parts = content.get("message", [])
+        if not isinstance(message_parts, list):
+            return False
+        return any(
+            isinstance(part, dict) and part.get("type") == "llm_error"
+            for part in message_parts
+        )
+
+    @staticmethod
+    def _can_regenerate_message(record, conv_history: list) -> bool:
+        """计算单条 platform_message_history 记录是否可重试（can_regenerate）。
+
+        - llm_error 报错消息：始终可重试（LLM 请求失败时轮次不写 conversation
+          history，但恰恰最需要重试）；
+        - 其他 bot 消息：llm_checkpoint_id 存在于 conversation history（LLM 历史）
+          才可重试；
+        - 插件/指令消息：checkpoint 不在 LLM 历史 → 不可重试；
+        - user 消息：不可重试。
+        """
+        content = getattr(record, "content", None)
+        if not isinstance(content, dict):
+            return False
+        if content.get("type") != "bot":
+            return False
+
+        # llm_error 报错消息：始终可重试
+        if ChatService._is_llm_error_message(record):
+            return True
+
+        # 其他 bot 消息：checkpoint 在 conversation history 中才可重试
+        checkpoint_id = getattr(record, "llm_checkpoint_id", None)
+        if not checkpoint_id:
+            return False
+        return find_checkpoint_index(conv_history, checkpoint_id) is not None
+
+    async def _prepare_llm_error_regenerate(
+        self,
+        username: str,
+        session,
+        target_record,
+        checkpoint_id: str | None,
+        platform_history: list,
+    ) -> dict:
+        """llm_error 消息单独分流重试。
+
+        以同 checkpoint 的用户消息为源重新发起请求，删除旧报错记录、
+        更新用户消息 checkpoint 为新值，不截断历史（失败轮次本就不在历史中）；
+        无 checkpoint 时退回最后一条用户消息。
+        """
+        # 查找同 checkpoint 的用户消息；无 checkpoint 时退回最后一条用户消息
+        source_user_record = None
+        if checkpoint_id:
+            source_user_record = next(
+                (
+                    item
+                    for item in reversed(platform_history)
+                    if item.llm_checkpoint_id == checkpoint_id
+                    and isinstance(item.content, dict)
+                    and item.content.get("type") == "user"
+                ),
+                None,
+            )
+        if source_user_record is None:
+            # 退回最后一条用户消息
+            source_user_record = next(
+                (
+                    item
+                    for item in reversed(platform_history)
+                    if isinstance(item.content, dict)
+                    and item.content.get("type") == "user"
+                ),
+                None,
+            )
+        if source_user_record is None:
+            raise ChatServiceError("找不到要重试的用户消息")
+
+        # 删除旧报错记录
+        thread_ids = await self.db.delete_webchat_threads_by_parent_message_ids(
+            session.session_id,
+            [target_record.id],
+        )
+        await self.delete_threads_by_ids(thread_ids, username)
+        await self.platform_history_mgr.delete_by_id(target_record.id)
+
+        # 更新用户消息 checkpoint 为新值
+        new_checkpoint_id = str(uuid.uuid4())
+        await self.platform_history_mgr.update(
+            message_id=source_user_record.id,
+            llm_checkpoint_id=new_checkpoint_id,
+        )
+
+        return {
+            "session_id": session.session_id,
+            "message": source_user_record.content.get("message", []),
+            "enable_streaming": True,
+            "show_reasoning": True,
+            "selected_provider": None,
+            "selected_model": None,
+            "_skip_user_history": True,
+            "_llm_checkpoint_id": new_checkpoint_id,
+        }
+
     async def prepare_regenerate_message_payload(
         self,
         username: str,
@@ -2107,11 +2514,27 @@ class ChatService:
 
         checkpoint_id = target_record.llm_checkpoint_id
         if not checkpoint_id:
+            # llm_error 报错消息可能没有 checkpoint，但仍需重试
+            if self._is_llm_error_message(target_record):
+                platform_history = await self.get_sorted_platform_history(session)
+                return await self._prepare_llm_error_regenerate(
+                    username, session, target_record, None, platform_history
+                )
             raise ChatServiceError("Message is not linked to LLM history")
 
         conversation_id, history = await self.load_current_conversation_history(session)
         turn_range = find_turn_range(history, checkpoint_id)
         if not conversation_id or not turn_range:
+            # llm_error 报错消息的 checkpoint 不在 conversation history 中，但仍需重试
+            if self._is_llm_error_message(target_record):
+                platform_history = await self.get_sorted_platform_history(session)
+                return await self._prepare_llm_error_regenerate(
+                    username,
+                    session,
+                    target_record,
+                    checkpoint_id,
+                    platform_history,
+                )
             raise ChatServiceError("Linked checkpoint not found")
         if not is_latest_checkpoint(history, checkpoint_id):
             raise ChatServiceError("Regenerating older turns requires branching")

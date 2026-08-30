@@ -28,7 +28,9 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_t
 from astrbot.core.utils.datetime_utils import to_utc_isoformat
 from astrbot.dashboard.services.chat_service import (
     BotMessageAccumulator,
+    ChatService,
     build_bot_history_content,
+    build_webchat_unified_msg_origin,
     collect_plain_text_from_message_parts,
 )
 
@@ -125,6 +127,7 @@ class LiveChatService:
         self.config = core_lifecycle.astrbot_config
         self.plugin_manager = core_lifecycle.plugin_manager
         self.platform_history_mgr = core_lifecycle.platform_message_history_manager
+        self.conv_mgr = core_lifecycle.conversation_manager
         self.sessions: dict[str, LiveChatSession] = {}
         self.attachments_dir = os.path.join(get_astrbot_data_path(), "attachments")
         self.webchat_img_dir = os.path.join(get_astrbot_data_path(), "webchat", "imgs")
@@ -703,6 +706,17 @@ class LiveChatService:
                 if should_save:
                     saved_record = await flush_pending_bot_message()
                     if saved_record:
+                        # 落库后重新加载 conversation history，
+                        # 此时当前轮次的 checkpoint 已写入，能正确判定 can_regenerate
+                        fresh_session = await self.db.get_platform_session_by_id(session_id)
+                        fresh_conv_history = (
+                            await self._load_conversation_history(fresh_session)
+                            if fresh_session
+                            else []
+                        )
+                        saved_can_regenerate = ChatService._can_regenerate_message(
+                            saved_record, fresh_conv_history
+                        )
                         await self.send_chat_payload(
                             session,
                             {
@@ -714,6 +728,7 @@ class LiveChatService:
                                         saved_record.created_at
                                     ),
                                     "llm_checkpoint_id": llm_checkpoint_id,
+                                    "can_regenerate": saved_can_regenerate,
                                 },
                             },
                             send_json,
@@ -745,6 +760,26 @@ class LiveChatService:
                 )
             session.is_processing = False
             webchat_queue_mgr.remove_back_queue(message_id)
+
+    async def _load_conversation_history(self, session) -> list:
+        """加载当前 session 的 conversation history（LLM 历史）。"""
+        unified_msg_origin = build_webchat_unified_msg_origin(session)
+        conversation_id = await self.conv_mgr.get_curr_conversation_id(
+            unified_msg_origin
+        )
+        if not conversation_id:
+            return []
+        conversation = await self.conv_mgr.get_conversation(
+            unified_msg_origin=unified_msg_origin,
+            conversation_id=conversation_id,
+        )
+        if not conversation:
+            return []
+        try:
+            history = json.loads(conversation.history or "[]")
+        except json.JSONDecodeError:
+            return []
+        return history if isinstance(history, list) else []
 
     async def build_chat_message_parts(self, message: list[dict]) -> list[dict]:
         return await build_webchat_message_parts(

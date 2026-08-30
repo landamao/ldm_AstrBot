@@ -133,9 +133,7 @@ DEFAULT_CONFIG = {
             "enable_private": True,
             "enable_group": True,
             "notify_user": True,
-            "notify_text": "打断当前回复，开始处理新消息。",
-            "add_to_context": True,
-            "context_text": "[系统提示]用户发来了新消息导致打断了此条回复，请联系上下文继续做出回复",
+            "notify_text": "已打断当前回复，开始处理新消息。",
             "wait_timeout": 8.0,
         },
     },
@@ -4773,23 +4771,6 @@ CONFIG_METADATA_3 = {
                         "condition": {
                             "platform_settings.interrupt_reply.enable": True,
                             "platform_settings.interrupt_reply.notify_user": True,
-                        },
-                    },
-                    "platform_settings.interrupt_reply.add_to_context": {
-                        "description": "将打断提示写入对话上下文",
-                        "type": "bool",
-                        "hint": "启用后，打断发生时会在上一轮回复的历史中追加打断提示并自动包裹 <system_reminder> 标签（已完整发出的回复不再追加）；等待旧任务超时时，改为在新请求中临时注入，不落库。",
-                        "condition": {
-                            "platform_settings.interrupt_reply.enable": True,
-                        },
-                    },
-                    "platform_settings.interrupt_reply.context_text": {
-                        "description": "写入上下文的打断提示文案",
-                        "type": "string",
-                        "hint": "写入 <system_reminder> 的提示正文；无需手写标签，会自动包裹（已手写标签则不重复包裹）。",
-                        "condition": {
-                            "platform_settings.interrupt_reply.enable": True,
-                            "platform_settings.interrupt_reply.add_to_context": True,
                         },
                     },
                     "platform_settings.interrupt_reply.wait_timeout": {

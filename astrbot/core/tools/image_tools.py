@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import Field
 from pydantic.dataclasses import dataclass
 
@@ -11,59 +9,12 @@ from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.provider import Provider
 from astrbot.core.tools.registry import builtin_tool
-from astrbot.core.utils.media_utils import (
-    IMAGE_COMPRESS_DEFAULT_MAX_SIZE,
-    IMAGE_COMPRESS_DEFAULT_QUALITY,
-    compress_image,
-)
+from astrbot.core.utils.media_utils import compress_images_for_provider
 
 _DEFAULT_CAPTION_PROMPT = "Please describe the image using Chinese."
 
-
-def _get_image_compress_args(
-    provider_settings: dict[str, Any] | None,
-) -> tuple[bool, int, int]:
-    if not isinstance(provider_settings, dict):
-        return True, IMAGE_COMPRESS_DEFAULT_MAX_SIZE, IMAGE_COMPRESS_DEFAULT_QUALITY
-
-    enabled = provider_settings.get("image_compress_enabled", True)
-    if not isinstance(enabled, bool):
-        enabled = True
-
-    raw_options = provider_settings.get("image_compress_options", {})
-    options = raw_options if isinstance(raw_options, dict) else {}
-
-    max_size = options.get("max_size", IMAGE_COMPRESS_DEFAULT_MAX_SIZE)
-    if not isinstance(max_size, int):
-        max_size = IMAGE_COMPRESS_DEFAULT_MAX_SIZE
-    max_size = max(max_size, 1)
-
-    quality = options.get("quality", IMAGE_COMPRESS_DEFAULT_QUALITY)
-    if not isinstance(quality, int):
-        quality = IMAGE_COMPRESS_DEFAULT_QUALITY
-    quality = min(max(quality, 1), 100)
-
-    return enabled, max_size, quality
-
-
-async def _compress_image_urls(
-    image_urls: list[str],
-    provider_settings: dict[str, Any] | None,
-) -> list[str]:
-    enabled, max_size, quality = _get_image_compress_args(provider_settings)
-    if not enabled:
-        return list(image_urls)
-
-    compressed: list[str] = []
-    for url in image_urls:
-        try:
-            compressed.append(
-                await compress_image(url, max_size=max_size, quality=quality)
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Image compression failed for image caption tool: %s", exc)
-            compressed.append(url)
-    return compressed
+# 压缩配置解析与压缩实现统一在 utils.media_utils，收图路径与工具共用
+_compress_image_urls = compress_images_for_provider
 
 
 @builtin_tool

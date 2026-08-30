@@ -198,9 +198,7 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
 
     def _should_stop_sending(self) -> bool:
         # 仅响应打断/用户中止；stop_event() 只停传播，不拦截已 yield 的发送
-        # agent_force_stop：/stop 强制停止；agent_user_aborted：新消息软打断
-        if self.get_extra("agent_force_stop"):
-            return True
+        # agent_force_stop 不跳过发送：已生成内容仍投递给用户
         if self.get_extra("agent_stop_requested"):
             return True
         if self.get_extra("agent_user_aborted"):

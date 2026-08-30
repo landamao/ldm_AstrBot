@@ -265,9 +265,9 @@ class AstrMessageEvent(abc.ABC):
         """将消息缓冲区中的文本按指定正则表达式分割后发送至消息平台，作为不支持流式输出平台的Fallback。"""
         while True:
             # 仅响应打断/用户中止；stop_event() 只停传播，不拦截已在发送链路中的内容
+            # agent_force_stop 不跳过：已生成内容仍发送
             if (
-                self.get_extra("agent_force_stop")
-                or self.get_extra("agent_stop_requested")
+                self.get_extra("agent_stop_requested")
                 or self.get_extra("agent_user_aborted")
             ):
                 return buffer

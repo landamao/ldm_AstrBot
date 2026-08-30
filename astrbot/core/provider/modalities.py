@@ -156,3 +156,14 @@ def log_context_sanitize_stats(stats: ContextSanitizeStats) -> None:
         stats.fixed_tool_messages,
         stats.removed_tool_calls,
     )
+
+
+def provider_supports_modality(provider: Any, modality: str) -> bool:
+    """判定提供商配置是否声明支持某模态（收图路径与工具图片共用此实现）。
+
+    迁移产生的空列表按未配置处理，视为支持（向后兼容）。
+    """
+    modalities = provider.provider_config.get("modalities", None)
+    if modalities == []:
+        return True
+    return isinstance(modalities, list) and modality in modalities

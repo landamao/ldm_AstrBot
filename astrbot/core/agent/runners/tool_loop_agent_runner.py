@@ -43,9 +43,11 @@ from astrbot.core.provider.entities import (
 )
 from astrbot.core.provider.modalities import (
     log_context_sanitize_stats,
+    provider_supports_modality,
     sanitize_contexts_by_modalities,
 )
 from astrbot.core.provider.provider import Provider
+from astrbot.core.utils.media_utils import compress_images_for_provider
 
 from ..context.compressor import ContextCompressor
 from ..context.config import ContextConfig
@@ -394,6 +396,105 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         if self.read_tool is not None:
             return f"`{self.read_tool.name}`"
         return "the available file-read tool"
+
+    def _provider_supports_image_input(self) -> bool:
+        """当前主模型是否支持图片输入，判定与收到的图片走同一实现。"""
+        return provider_supports_modality(self.provider, "image")
+
+    def _get_image_caption_settings(self) -> tuple[str, bool]:
+        """读取默认图片转述模型配置，与收到的图片共用同一组配置项。
+
+        Returns:
+            (default_image_caption_provider_id, always_use_image_caption_provider)
+        """
+        agent_ctx = self.run_context.context
+        plugin_ctx = getattr(agent_ctx, "context", None)
+        event = getattr(agent_ctx, "event", None)
+        if plugin_ctx is None or event is None:
+            return "", False
+        try:
+            provider_settings = (
+                plugin_ctx.get_config(umo=event.unified_msg_origin).get(
+                    "provider_settings",
+                    {},
+                )
+                or {}
+            )
+            caption_provider_id = str(
+                provider_settings.get("default_image_caption_provider_id") or ""
+            ).strip()
+            always_caption = bool(
+                provider_settings.get("always_use_image_caption_provider", False)
+            )
+            return caption_provider_id, always_caption
+        except Exception:  # noqa: BLE001
+            return "", False
+
+    def _tool_image_inject_for_review(self) -> bool:
+        """是否把工具生成的图片回注给模型审查。
+
+        与收到的图片走同一套全局配置逻辑：
+        - 模型支持图片输入且未开启「始终使用默认图片转述模型」→ 回注原图；
+        - 否则不回注（避免 base64 大图入上下文 / 不支持视觉的模型报 400），
+          先用默认图片转述模型生成描述放进工具结果，图片由 LLM 手动发送。
+        """
+        _, always_caption = self._get_image_caption_settings()
+        return self._provider_supports_image_input() and not always_caption
+
+    async def _caption_tool_image(self, image_path: str) -> str:
+        """用默认图片转述模型描述工具生成的图片，失败时返回空串。"""
+        caption_provider_id, _ = self._get_image_caption_settings()
+        if not caption_provider_id:
+            return ""
+        agent_ctx = self.run_context.context
+        try:
+            prov = agent_ctx.context.get_provider_by_id(caption_provider_id)
+            if prov is None:
+                logger.warning(
+                    "工具图片转述跳过：找不到图片转述模型 %s",
+                    caption_provider_id,
+                )
+                return ""
+            provider_settings = (
+                agent_ctx.context.get_config(
+                    umo=agent_ctx.event.unified_msg_origin,
+                ).get("provider_settings", {})
+                or {}
+            )
+            prompt = str(
+                provider_settings.get("image_caption_prompt")
+                or "Please describe the image using Chinese."
+            ).strip()
+            urls = await compress_images_for_provider([image_path], provider_settings)
+            resp = await prov.text_chat(prompt=prompt, image_urls=urls)
+            return (resp.completion_text or "").strip()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"工具图片转述失败: {e}", exc_info=True)
+            return ""
+
+    def _tool_image_review_hint(
+        self,
+        file_path: str,
+        *,
+        inject_for_review: bool,
+        caption: str = "",
+    ) -> str:
+        """工具图片缓存后写入工具结果的提示语，按处理路径给出不同指引。"""
+        if inject_for_review:
+            return (
+                "Review the image below. Use send_message_to_user to send it to "
+                "the user if satisfied, "
+                f"with type='image' and path='{file_path}'."
+            )
+        # 非回注路径：模型看不到原图，发送动作仍交给 LLM 手动完成
+        # （与回注路径一致，都由 LLM 调用 send_message_to_user 发送）
+        send_instruction = (
+            "Use send_message_to_user to send it to the user, "
+            f"with type='image' and path='{file_path}'."
+        )
+        if caption:
+            return f"<image_caption>{caption}</image_caption> {send_instruction}"
+        return send_instruction
 
     async def _assemble_request_context_for_provider(
         self,
@@ -888,6 +989,17 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         if not self.req:
             raise ValueError("Request is not set. Please call reset() first.")
 
+        # 工具执行完毕后如果用户已停止，不再发起新 LLM 请求
+        if self._is_stop_requested():
+            self._aborted = True
+            self._transition_state(AgentState.DONE)
+            self.stats.end_time = time.time()
+            yield AgentResponse(
+                type="aborted",
+                data=AgentResponseData(chain=MessageChain(type="aborted")),
+            )
+            return
+
         if self._state == AgentState.IDLE:
             try:
                 await self.agent_hooks.on_agent_begin(self.run_context)
@@ -1118,42 +1230,38 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 tool_calls_result.to_openai_messages_model()
             )
 
-            # If there are cached images and the model supports image input,
-            # append a user message with images so LLM can see them
-            if cached_images:
-                modalities = self.provider.provider_config.get("modalities", [])
-                supports_image = (
-                    not modalities or "image" in modalities
-                )  # Empty list is treated as unconfigured for backward compatibility
-                if supports_image:
-                    # Build user message with images for LLM to review
-                    image_parts = []
-                    for cached_img in cached_images:
-                        img_data = tool_image_cache.get_image_base64_by_path(
-                            cached_img.file_path, cached_img.mime_type
+            # 仅当走"回注审查"路径时才把缓存图片回注为 user 消息供模型审查；
+            # 判定与 _handle_function_tools 的提示语一致：模型支持图片输入且未开启
+            # 「始终使用默认图片转述模型」。其余路径图片由 LLM 手动发送（可选转述）。
+            if cached_images and self._tool_image_inject_for_review():
+                # Build user message with images for LLM to review
+                image_parts = []
+                for cached_img in cached_images:
+                    img_data = tool_image_cache.get_image_base64_by_path(
+                        cached_img.file_path, cached_img.mime_type
+                    )
+                    if img_data:
+                        base64_data, mime_type = img_data
+                        image_parts.append(
+                            TextPart(
+                                text=f"[Image from tool '{cached_img.tool_name}', path='{cached_img.file_path}']"
+                            )
                         )
-                        if img_data:
-                            base64_data, mime_type = img_data
-                            image_parts.append(
-                                TextPart(
-                                    text=f"[Image from tool '{cached_img.tool_name}', path='{cached_img.file_path}']"
+                        image_parts.append(
+                            ImageURLPart(
+                                image_url=ImageURLPart.ImageURL(
+                                    url=f"data:{mime_type};base64,{base64_data}",
+                                    id=cached_img.file_path,
                                 )
                             )
-                            image_parts.append(
-                                ImageURLPart(
-                                    image_url=ImageURLPart.ImageURL(
-                                        url=f"data:{mime_type};base64,{base64_data}",
-                                        id=cached_img.file_path,
-                                    )
-                                )
-                            )
-                    if image_parts:
-                        self.run_context.messages.append(
-                            Message(role="user", content=image_parts)
                         )
-                        logger.debug(
-                            f"Appended {len(cached_images)} cached image(s) to context for LLM review"
-                        )
+                if image_parts:
+                    self.run_context.messages.append(
+                        Message(role="user", content=image_parts)
+                    )
+                    logger.debug(
+                        f"Appended {len(cached_images)} cached image(s) to context for LLM review"
+                    )
 
             self.req.append_tool_calls_result(tool_calls_result)
 
@@ -1193,6 +1301,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
     ) -> T.AsyncGenerator[_HandleFunctionToolsResult, None]:
         """处理函数工具调用。"""
         tool_call_result_blocks: list[ToolCallMessageSegment] = []
+        # 本步内是否把工具图片回注给模型审查；非回注路径会先转述，再由 LLM 手动发送
+        inject_for_review = self._tool_image_inject_for_review()
         logger.info(f"Agent 使用工具: {llm_response.tools_call_name}")
 
         def _append_tool_call_result(tool_call_id: str, content: str) -> None:
@@ -1327,10 +1437,18 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                                     index=index,
                                     mime_type=content_item.mimeType or "image/png",
                                 )
+                                caption = ""
+                                if not inject_for_review:
+                                    caption = await self._caption_tool_image(
+                                        cached_img.file_path,
+                                    )
                                 result_parts.append(
                                     f"Image returned and cached at path='{cached_img.file_path}'. "
-                                    f"Review the image below. Use send_message_to_user to send it to the user if satisfied, "
-                                    f"with type='image' and path='{cached_img.file_path}'."
+                                    + self._tool_image_review_hint(
+                                        cached_img.file_path,
+                                        inject_for_review=inject_for_review,
+                                        caption=caption,
+                                    )
                                 )
                                 # Yield image info for LLM visibility (will be handled in step())
                                 yield _HandleFunctionToolsResult.from_cached_image(
@@ -1353,10 +1471,18 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                                         index=index,
                                         mime_type=resource.mimeType,
                                     )
+                                    caption = ""
+                                    if not inject_for_review:
+                                        caption = await self._caption_tool_image(
+                                            cached_img.file_path,
+                                        )
                                     result_parts.append(
                                         f"Image returned and cached at path='{cached_img.file_path}'. "
-                                        f"Review the image below. Use send_message_to_user to send it to the user if satisfied, "
-                                        f"with type='image' and path='{cached_img.file_path}'."
+                                        + self._tool_image_review_hint(
+                                            cached_img.file_path,
+                                            inject_for_review=inject_for_review,
+                                            caption=caption,
+                                        )
                                     )
                                     # Yield image info for LLM visibility
                                     yield _HandleFunctionToolsResult.from_cached_image(
@@ -1583,14 +1709,23 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         历史只保留已向用户/下游产出的内容：
         - 流式：已 yield 的 streaming_delta 文本
         - 非流式：若完整回复尚未交付给下游，则不写入 assistant 正文
-        - 不把系统打断占位语写入对话历史
+        - 工具调用中断时：写入 tool_calls + 中断 tool 结果，让 LLM 知道工具被停止
         """
         logger.info("Agent execution was requested to stop by user.")
         delivered = (getattr(self, "_streamed_assistant_text", "") or "").strip()
         if llm_resp is None:
             llm_resp = LLMResponse(role="assistant", completion_text=delivered)
         elif llm_resp.role != "assistant":
-            llm_resp = LLMResponse(role="assistant", completion_text=delivered)
+            llm_resp = LLMResponse(
+                role="assistant",
+                completion_text=delivered,
+                reasoning_content=llm_resp.reasoning_content,
+                reasoning_signature=llm_resp.reasoning_signature,
+                tools_call_args=llm_resp.tools_call_args,
+                tools_call_name=llm_resp.tools_call_name,
+                tools_call_ids=llm_resp.tools_call_ids,
+                tools_call_extra_content=llm_resp.tools_call_extra_content,
+            )
         else:
             # 避免把未发出的完整生成写入历史；流式以已产出文本为准
             if self.streaming:
@@ -1622,12 +1757,42 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self._transition_state(AgentState.DONE)
         self.stats.end_time = time.time()
 
-        # 仅当确有已交付正文时才追加 assistant；工具调用中断场景若已有 tool 相关上下文由既有消息承担
+        # 构造 assistant 消息的 parts
         parts = []
         if delivered:
             parts.append(TextPart(text=delivered))
-        if parts:
-            self.run_context.messages.append(Message(role="assistant", content=parts))
+
+        # 如果有工具调用：写入 tool_calls + 中断 tool 结果，让 LLM 知道工具被停止
+        has_tool_calls = bool(llm_resp.tools_call_name)
+        if has_tool_calls:
+            # assistant 消息（含 tool_calls）
+            if parts:
+                self.run_context.messages.append(
+                    Message(role="assistant", content=parts, tool_calls=llm_resp.to_openai_to_calls_model())
+                )
+            else:
+                self.run_context.messages.append(
+                    Message(role="assistant", content=None, tool_calls=llm_resp.to_openai_to_calls_model())
+                )
+
+            # 为每个工具调用生成"被中断"的 tool 结果
+            tool_call_ids = llm_resp.tools_call_ids or []
+            tool_call_names = llm_resp.tools_call_name or []
+            for i, call_id in enumerate(tool_call_ids):
+                tool_name = tool_call_names[i] if i < len(tool_call_names) else "unknown"
+                interrupted_result = (
+                    f"<system_reminder>"
+                    f"The tool '{tool_name}' was interrupted by a stop request. "
+                    f"The execution was incomplete."
+                    f"</system_reminder>"
+                )
+                self.run_context.messages.append(
+                    Message(role="tool", content=interrupted_result, tool_call_id=call_id)
+                )
+        else:
+            # 无工具调用：仅当确有已交付正文时才追加 assistant
+            if parts:
+                self.run_context.messages.append(Message(role="assistant", content=parts))
 
         try:
             await self.agent_hooks.on_agent_done(self.run_context, llm_resp)

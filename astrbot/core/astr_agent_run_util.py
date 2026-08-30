@@ -206,15 +206,14 @@ async def run_agent(
                     if can_buffer_llm_result:
                         merged_chain = _merge_buffered_llm_chains(buffered_llm_chains)
                         if merged_chain:
-                            # /stop 强制停止：丢弃缓冲内容，不向用户继续投递
-                            if not astr_event.get_extra("agent_force_stop"):
-                                astr_event.set_result(
-                                    MessageEventResult(
-                                        chain=merged_chain.chain,
-                                        result_content_type=ResultContentType.LLM_RESULT,
-                                    ),
-                                )
-                                yield merged_chain
+                            # 停止/打断：把已生成的内容投递给用户
+                            astr_event.set_result(
+                                MessageEventResult(
+                                    chain=merged_chain.chain,
+                                    result_content_type=ResultContentType.LLM_RESULT,
+                                ),
+                            )
+                            yield merged_chain
                             astr_event.clear_result()
                     if not stop_watcher.done():
                         stop_watcher.cancel()

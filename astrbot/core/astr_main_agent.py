@@ -40,6 +40,9 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider import Provider
 from astrbot.core.provider.entities import ProviderRequest
+from astrbot.core.provider.modalities import (
+    provider_supports_modality as _provider_supports_modality,
+)
 from astrbot.core.provider.register import llm_tools
 from astrbot.core.skills.skill_manager import (
     SkillInfo,
@@ -60,7 +63,6 @@ from astrbot.core.tools.computer_tools import (
     CuaScreenshotTool,
     EvaluateSkillCandidateTool,
     ExecuteShellTool,
-    LocalExecuteShellTool,
     FileDownloadTool,
     FileEditTool,
     FileReadTool,
@@ -71,12 +73,13 @@ from astrbot.core.tools.computer_tools import (
     GrepTool,
     ListSkillCandidatesTool,
     ListSkillReleasesTool,
+    LocalExecuteShellTool,
     LocalPythonTool,
     PromoteSkillCandidateTool,
     PythonTool,
-    ShellSessionTool,
     RollbackSkillReleaseTool,
     RunBrowserSkillTool,
+    ShellSessionTool,
     SyncSkillReleaseTool,
 )
 from astrbot.core.tools.cron_tools import FutureTaskTool
@@ -112,9 +115,7 @@ from astrbot.core.utils.astrbot_path import (
 from astrbot.core.utils.file_extract import extract_file_moonshotai
 from astrbot.core.utils.llm_metadata import LLM_METADATAS
 from astrbot.core.utils.media_utils import (
-    IMAGE_COMPRESS_DEFAULT_MAX_SIZE,
-    IMAGE_COMPRESS_DEFAULT_QUALITY,
-    compress_image,
+    compress_image_for_provider as _compress_image_for_provider,
 )
 from astrbot.core.utils.quoted_message.settings import (
     SETTINGS as DEFAULT_QUOTED_MESSAGE_SETTINGS,
@@ -797,46 +798,6 @@ def _get_quoted_message_parser_settings(
     return DEFAULT_QUOTED_MESSAGE_SETTINGS.with_overrides(overrides)
 
 
-def _get_image_compress_args(
-    provider_settings: dict[str, object] | None,
-) -> tuple[bool, int, int]:
-    if not isinstance(provider_settings, dict):
-        return True, IMAGE_COMPRESS_DEFAULT_MAX_SIZE, IMAGE_COMPRESS_DEFAULT_QUALITY
-
-    enabled = provider_settings.get("image_compress_enabled", True)
-    if not isinstance(enabled, bool):
-        enabled = True
-
-    raw_options = provider_settings.get("image_compress_options", {})
-    options = raw_options if isinstance(raw_options, dict) else {}
-
-    max_size = options.get("max_size", IMAGE_COMPRESS_DEFAULT_MAX_SIZE)
-    if not isinstance(max_size, int):
-        max_size = IMAGE_COMPRESS_DEFAULT_MAX_SIZE
-    max_size = max(max_size, 1)
-
-    quality = options.get("quality", IMAGE_COMPRESS_DEFAULT_QUALITY)
-    if not isinstance(quality, int):
-        quality = IMAGE_COMPRESS_DEFAULT_QUALITY
-    quality = min(max(quality, 1), 100)
-
-    return enabled, max_size, quality
-
-
-async def _compress_image_for_provider(
-    url_or_path: str,
-    provider_settings: dict[str, object] | None,
-) -> str:
-    try:
-        enabled, max_size, quality = _get_image_compress_args(provider_settings)
-        if not enabled:
-            return url_or_path
-        return await compress_image(url_or_path, max_size=max_size, quality=quality)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Image compression failed: %s", exc)
-        return url_or_path
-
-
 def _is_generated_compressed_image_path(
     original_path: str,
     compressed_path: str | None,
@@ -1430,13 +1391,6 @@ def _get_fallback_chat_providers(
         fallbacks.append(fallback_provider)
         seen_provider_ids.add(fallback_id)
     return fallbacks
-
-
-def _provider_supports_modality(provider: Provider, modality: str) -> bool:
-    modalities = provider.provider_config.get("modalities", None)
-    if modalities == []:
-        return True  # Empty list from migration is treated as unconfigured for backward compatibility
-    return isinstance(modalities, list) and modality in modalities
 
 
 def _select_image_chat_provider(

@@ -1611,3 +1611,70 @@ async def compress_image(
         optimize,
     )
     return compressed_path or url_or_path
+
+
+def get_image_compress_args(
+    provider_settings: dict | None,
+) -> tuple[bool, int, int]:
+    """读取全局图片压缩配置，收图与工具图片等所有压缩路径共用。
+
+    Returns:
+        (是否启用, 压缩后最长边 px, JPEG 质量 1-100)
+    """
+    if not isinstance(provider_settings, dict):
+        return True, IMAGE_COMPRESS_DEFAULT_MAX_SIZE, IMAGE_COMPRESS_DEFAULT_QUALITY
+
+    enabled = provider_settings.get("image_compress_enabled", True)
+    if not isinstance(enabled, bool):
+        enabled = True
+
+    raw_options = provider_settings.get("image_compress_options", {})
+    options = raw_options if isinstance(raw_options, dict) else {}
+
+    max_size = options.get("max_size", IMAGE_COMPRESS_DEFAULT_MAX_SIZE)
+    if not isinstance(max_size, int):
+        max_size = IMAGE_COMPRESS_DEFAULT_MAX_SIZE
+    max_size = max(max_size, 1)
+
+    quality = options.get("quality", IMAGE_COMPRESS_DEFAULT_QUALITY)
+    if not isinstance(quality, int):
+        quality = IMAGE_COMPRESS_DEFAULT_QUALITY
+    quality = min(max(quality, 1), 100)
+
+    return enabled, max_size, quality
+
+
+async def compress_image_for_provider(
+    url_or_path: str,
+    provider_settings: dict | None,
+) -> str:
+    """按全局图片压缩配置压缩单张图片；未启用或失败时原样返回。"""
+    try:
+        enabled, max_size, quality = get_image_compress_args(provider_settings)
+        if not enabled:
+            return url_or_path
+        return await compress_image(url_or_path, max_size=max_size, quality=quality)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Image compression failed: %s", exc)
+        return url_or_path
+
+
+async def compress_images_for_provider(
+    image_urls: list[str],
+    provider_settings: dict | None,
+) -> list[str]:
+    """按全局图片压缩配置压缩图片列表；单张失败时回退为原图。"""
+    enabled, max_size, quality = get_image_compress_args(provider_settings)
+    if not enabled:
+        return list(image_urls)
+
+    compressed: list[str] = []
+    for url in image_urls:
+        try:
+            compressed.append(
+                await compress_image(url, max_size=max_size, quality=quality)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Image compression failed: %s", exc)
+            compressed.append(url)
+    return compressed
