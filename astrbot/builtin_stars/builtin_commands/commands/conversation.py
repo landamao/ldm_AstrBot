@@ -14,6 +14,7 @@ from astrbot.core.db.po import ProviderStat
 from astrbot.core.platform.astr_message_event import MessageSession
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.utils.active_event_registry import active_event_registry
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 from .utils.rst_scene import RstScene
 
@@ -93,7 +94,7 @@ class ConversationCommands:
         if not cid:
             message.set_result(
                 MessageEventResult().message(
-                    "当前未处于对话状态，请 /switch 切换或者 /new 创建。",
+                    f"当前未处于对话状态，请 {获取第一个唤醒词()}switch 切换或者 {获取第一个唤醒词()}new 创建。",
                 ),
             )
             return
@@ -129,7 +130,7 @@ class ConversationCommands:
 
         与「新消息软打断」不同：
         - 立即 request_stop 活跃 runner，尽快中断生成
-        - 标记 agent_force_stop，整轮不写入对话历史
+        - 标记 agent_force_stop，按已发送内容落库并追加英文停止标记
         """
         cfg = self.context.get_config(umo=message.unified_msg_origin)
         agent_runner_type = cfg["provider_settings"]["agent_runner_type"]
@@ -138,7 +139,7 @@ class ConversationCommands:
         if agent_runner_type in THIRD_PARTY_AGENT_RUNNER_KEY:
             stopped_count = active_event_registry.stop_all(umo, exclude=message)
         else:
-            # 强制停止：停发送 + 不落库；与软打断的 agent_user_aborted 区分
+            # 强制停止：停发送；历史按已发送内容落库并追加英文停止标记
             stopped_count = active_event_registry.request_agent_stop_all(
                 umo,
                 exclude=message,
@@ -204,7 +205,7 @@ class ConversationCommands:
             f"当前对话历史记录："
             f"{history or '无历史记录'}\n\n"
             f"第 {page} 页 | 共 {total_pages} 页\n"
-            f"*输入 /history 2 跳转到第 2 页"
+            f"*输入 {获取第一个唤醒词()}history 2 跳转到第 2 页"
         )
 
         message.set_result(MessageEventResult().message(ret).use_t2i(False))
@@ -296,8 +297,8 @@ class ConversationCommands:
             ret += "\n会话隔离粒度: 群聊"
 
         ret += f"\n第 {page} 页 | 共 {total_pages} 页"
-        ret += "\n*输入 /ls 2 跳转到第 2 页"
-        ret += "\n*输入 /switch <序号> 切换对话"
+        ret += f"\n*输入 {获取第一个唤醒词()}ls 2 跳转到第 2 页"
+        ret += f"\n*输入 {获取第一个唤醒词()}switch <序号> 切换对话"
 
         message.set_result(MessageEventResult().message(ret).use_t2i(False))
         return
@@ -366,7 +367,7 @@ class ConversationCommands:
         if not isinstance(index, int):
             message.set_result(
                 MessageEventResult().message(
-                    "类型错误，请输入数字对话序号。使用 /ls 查看对话列表。"
+                    f"类型错误，请输入数字对话序号。使用 {获取第一个唤醒词()}ls 查看对话列表。"
                 ),
             )
             return
@@ -374,7 +375,7 @@ class ConversationCommands:
         if index is None:
             message.set_result(
                 MessageEventResult().message(
-                    "请输入对话序号。/switch 对话序号。/ls 查看对话 /new 新建对话",
+                    f"请输入对话序号。{获取第一个唤醒词()}switch 对话序号。{获取第一个唤醒词()}ls 查看对话 {获取第一个唤醒词()}new 新建对话",
                 ),
             )
             return
@@ -383,7 +384,7 @@ class ConversationCommands:
         )
         if index > len(conversations) or index < 1:
             message.set_result(
-                MessageEventResult().message("对话序号错误，请使用 /ls 查看对话列表。"),
+                MessageEventResult().message(f"对话序号错误，请使用 {获取第一个唤醒词()}ls 查看对话列表。"),
             )
         else:
             conversation = conversations[index - 1]
@@ -441,7 +442,7 @@ class ConversationCommands:
         if not session_curr_cid:
             message.set_result(
                 MessageEventResult().message(
-                    "当前未处于对话状态，请 /switch 序号 切换或 /new 创建。",
+                    f"当前未处于对话状态，请 {获取第一个唤醒词()}switch 序号 切换或 {获取第一个唤醒词()}new 创建。",
                 ),
             )
             return
@@ -453,7 +454,7 @@ class ConversationCommands:
             session_curr_cid,
         )
 
-        ret = "删除当前对话成功。不再处于对话状态，使用 /switch 序号 切换到其他对话或 /new 创建。"
+        ret = f"删除当前对话成功。不再处于对话状态，使用 {获取第一个唤醒词()}switch 序号 切换到其他对话或 {获取第一个唤醒词()}new 创建。"
         message.set_extra("_clean_ltm_session", True)
         message.set_result(MessageEventResult().message(ret))
 
@@ -482,7 +483,7 @@ class ConversationCommands:
         if not cid:
             message.set_result(
                 MessageEventResult().message(
-                    f"{run_line}\n当前没有进行中的对话，使用 /new 创建。"
+                    f"{run_line}\n当前没有进行中的对话，使用 {获取第一个唤醒词()}new 创建。"
                 ),
             )
             return

@@ -3,6 +3,7 @@
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.core.star.session_llm_manager import SessionServiceManager
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 
 class FlowCommand:
@@ -29,13 +30,14 @@ class FlowCommand:
             return
 
         if 参数 == "help":
+            前缀 = 获取第一个唤醒词()
             帮助 = (
                 "流式输出管理命令：\n"
-                "/flow              → 切换当前会话的流式输出\n"
-                "/flow on           → 开启当前会话的流式输出\n"
-                "/flow off          → 关闭当前会话的流式输出\n"
-                "/flow unset        → 取消设置，恢复跟随全局配置\n"
-                "/flow help         → 显示本帮助"
+                f"{前缀}flow              → 切换当前会话的流式输出\n"
+                f"{前缀}flow on           → 开启当前会话的流式输出\n"
+                f"{前缀}flow off          → 关闭当前会话的流式输出\n"
+                f"{前缀}flow unset        → 取消设置，恢复跟随全局配置\n"
+                f"{前缀}flow help         → 显示本帮助"
             )
             await event.send(MessageChain().message(帮助))
             return

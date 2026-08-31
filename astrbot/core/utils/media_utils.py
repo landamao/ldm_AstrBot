@@ -36,6 +36,40 @@ IMAGE_COMPRESS_DEFAULT_QUALITY = 95
 IMAGE_COMPRESS_DEFAULT_OPTIMIZE = True
 IMAGE_COMPRESS_DEFAULT_MIN_FILE_SIZE_MB = 1.0
 
+
+def get_auto_download_max_bytes(media_type: str) -> int | None:
+    """读取平台配置中对应媒体类型的自动下载大小上限。
+
+    Returns:
+        允许的最大字节数；未启用限制或配置无效时返回 None（不限制）。
+    """
+    try:
+        from astrbot.core import astrbot_config
+
+        limits = astrbot_config.get("platform_settings", {}).get(
+            "auto_download_limits", {}
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(limits, dict) or not limits.get("enable", False):
+        return None
+
+    key_by_type = {
+        "image": "max_image_mb",
+        "audio": "max_audio_mb",
+        "video": "max_file_mb",
+        "file": "max_file_mb",
+    }
+    key = key_by_type.get(media_type, "max_other_mb")
+    raw = limits.get(key, 0)
+    try:
+        max_mb = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if max_mb <= 0:
+        return None
+    return int(max_mb * 1024 * 1024)
+
 MEDIA_MIME_EXTENSIONS = {
     "audio/wav": ".wav",
     "audio/wave": ".wav",
@@ -431,6 +465,7 @@ async def _materialize_media_ref(
     *,
     media_type: str = "file",
     default_suffix: str | None = None,
+    max_bytes: int | None = None,
 ) -> _LocalMediaFile:
     """Resolve a plugin-facing media reference to a local file.
 
@@ -441,6 +476,7 @@ async def _materialize_media_ref(
         media_ref: Original media reference from a platform, plugin, or history.
         media_type: Logical media family used for temp filenames and defaults.
         default_suffix: Suffix to use when the reference does not carry one.
+        max_bytes: Optional download size limit in bytes (HTTP sources only).
     """
 
     cleanup_paths: list[Path] = []
@@ -455,7 +491,13 @@ async def _materialize_media_ref(
             target_path = _temp_media_path(media_type, target_suffix)
         cleanup_paths.append(target_path)
         try:
-            await download_file(media_ref, str(target_path))
+            await download_file(
+                media_ref,
+                str(target_path),
+                max_bytes=max_bytes
+                if max_bytes is not None
+                else get_auto_download_max_bytes(media_type),
+            )
         except Exception:
             _cleanup_paths(cleanup_paths)
             raise
@@ -611,6 +653,7 @@ class MediaResolver:
         *,
         target_format: str | None = None,
         preserve_mp3: bool = False,
+        max_bytes: int | None = None,
     ) -> ResolvedMediaFile:
         """Materialize the source and apply media-type-specific conversion.
 
@@ -623,6 +666,7 @@ class MediaResolver:
             self.media_ref,
             media_type=self.media_type,
             default_suffix=self.default_suffix,
+            max_bytes=max_bytes,
         )
         cleanup_paths = list(local_file.cleanup_paths)
         resolved_path = local_file.path
@@ -701,6 +745,7 @@ class MediaResolver:
         *,
         target_format: str | None = None,
         preserve_mp3: bool = False,
+        max_bytes: int | None = None,
     ) -> AsyncIterator[ResolvedMediaFile]:
         """Yield a resolved local file and clean resolver-owned temp files on exit.
 
@@ -711,6 +756,7 @@ class MediaResolver:
         resolved = await self._resolve_path(
             target_format=target_format,
             preserve_mp3=preserve_mp3,
+            max_bytes=max_bytes,
         )
         try:
             yield resolved
@@ -722,6 +768,7 @@ class MediaResolver:
         *,
         target_format: str | None = None,
         preserve_mp3: bool = False,
+        max_bytes: int | None = None,
     ) -> str:
         """Return a resolved local path and keep temporary files alive.
 
@@ -732,6 +779,7 @@ class MediaResolver:
         resolved = await self._resolve_path(
             target_format=target_format,
             preserve_mp3=preserve_mp3,
+            max_bytes=max_bytes,
         )
         resolved.detach()
         return str(resolved.path.resolve())

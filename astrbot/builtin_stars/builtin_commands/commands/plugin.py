@@ -15,6 +15,7 @@ from astrbot.core.utils.github_proxy import (
     get_configured_github_proxy,
     log_github_proxy_usage,
 )
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 
 class PluginCommands:
@@ -25,7 +26,9 @@ class PluginCommands:
     def _plugin_not_found_message(plugin_name: str) -> str:
         """插件不存在时的统一提示。"""
         name = (plugin_name or "").strip() or "（空）"
-        return f"插件名「{name}」不存在，使用'/plugin ls'查找插件名"
+        return (
+            f"插件名「{name}」不存在，使用'{获取第一个唤醒词()}plugin ls'查找插件名"
+        )
 
     def _github_proxy(self, *, action: str, target: str = "") -> str:
         """读取服务端配置的 GitHub 加速地址，并打使用日志。"""
@@ -44,36 +47,37 @@ class PluginCommands:
     @staticmethod
     def build_group_help_message() -> str:
         """仅输入 /plugin 时展示的指令组帮助。"""
+        前缀 = 获取第一个唤醒词()
         return "\n".join(
             [
-                "插件管理  /plugin",
+                f"插件管理  {前缀}plugin",
                 "",
                 "用法：",
-                "/plugin ls",
+                f"{前缀}plugin ls",
                 "  查看已安装插件列表",
                 "",
-                "/plugin help <插件名>",
+                f"{前缀}plugin help <插件名>",
                 "  查看指定插件帮助与指令",
                 "",
-                "/plugin on <插件名>",
+                f"{前缀}plugin on <插件名>",
                 "  启用插件（管理员）",
                 "",
-                "/plugin off <插件名>",
+                f"{前缀}plugin off <插件名>",
                 "  禁用插件（管理员）",
                 "",
-                "/plugin restart <插件名>",
+                f"{前缀}plugin restart <插件名>",
                 "  重启插件（管理员）",
                 "",
-                "/plugin update <插件名>",
+                f"{前缀}plugin update <插件名>",
                 "  更新插件（管理员）",
                 "",
-                "/plugin get <插件仓库地址>",
+                f"{前缀}plugin get <插件仓库地址>",
                 "  从仓库安装插件（管理员）",
                 "",
                 "示例：",
-                "/plugin ls",
-                "/plugin help ldm",
-                "/plugin on ldm",
+                f"{前缀}plugin ls",
+                f"{前缀}plugin help ldm",
+                f"{前缀}plugin on ldm",
             ]
         )
 
@@ -132,14 +136,15 @@ class PluginCommands:
         while parts and parts[-1] == "":
             parts.pop()
 
+        前缀 = 获取第一个唤醒词()
         parts.extend(
             [
                 "",
                 "────────",
-                "/plugin help <名>     查看帮助与指令",
-                "/plugin on|off <名>   启用 / 禁用",
-                "/plugin restart <名>  重启",
-                "/plugin update <名>   更新",
+                f"{前缀}plugin help <名>     查看帮助与指令",
+                f"{前缀}plugin on|off <名>   启用 / 禁用",
+                f"{前缀}plugin restart <名>  重启",
+                f"{前缀}plugin update <名>   更新",
             ]
         )
 
@@ -155,7 +160,7 @@ class PluginCommands:
         if not plugin_name:
             event.set_result(
                 MessageEventResult().message(
-                    "使用方法：/plugin off <插件名> 禁用插件。"
+                    f"使用方法：{获取第一个唤醒词()}plugin off <插件名> 禁用插件。"
                 ),
             )
             return
@@ -183,7 +188,7 @@ class PluginCommands:
         if not plugin_name:
             event.set_result(
                 MessageEventResult().message(
-                    "使用方法：/plugin on <插件名> 启用插件。"
+                    f"使用方法：{获取第一个唤醒词()}plugin on <插件名> 启用插件。"
                 ),
             )
             return
@@ -211,7 +216,7 @@ class PluginCommands:
         if not plugin_repo:
             event.set_result(
                 MessageEventResult().message(
-                    "使用方法：/plugin get <插件仓库地址> 安装插件。"
+                    f"使用方法：{获取第一个唤醒词()}plugin get <插件仓库地址> 安装插件。"
                 ),
             )
             return
@@ -237,7 +242,7 @@ class PluginCommands:
         if not plugin_name:
             event.set_result(
                 MessageEventResult().message(
-                    "使用方法：/plugin restart <插件名> 重启插件。"
+                    f"使用方法：{获取第一个唤醒词()}plugin restart <插件名> 重启插件。"
                 ),
             )
             return
@@ -279,7 +284,7 @@ class PluginCommands:
         if not plugin_name:
             event.set_result(
                 MessageEventResult().message(
-                    "使用方法：/plugin update <插件名> 更新插件。"
+                    f"使用方法：{获取第一个唤醒词()}plugin update <插件名> 更新插件。"
                 ),
             )
             return
@@ -374,7 +379,7 @@ class PluginCommands:
         if not plugin_name:
             event.set_result(
                 MessageEventResult().message(
-                    "使用方法：/plugin help <插件名> 查看插件信息。"
+                    f"使用方法：{获取第一个唤醒词()}plugin help <插件名> 查看插件信息。"
                 ),
             )
             return
@@ -445,18 +450,19 @@ class PluginCommands:
                     command_names.append(filter_.group_name)
 
         if command_handlers:
+            前缀 = 获取第一个唤醒词()
             lines.append("")
             lines.append("🔧 指令列表：")
             for i in range(len(command_handlers)):
                 cmd = (command_names[i] or "").strip()
-                if cmd and not cmd.startswith("/"):
-                    cmd = f"/{cmd}"
-                line = cmd or "/"
+                if cmd and not cmd.startswith(前缀):
+                    cmd = f"{前缀}{cmd}"
+                line = cmd or 前缀
                 if command_handlers[i].desc:
                     line += f": {command_handlers[i].desc}"
                 lines.append(line)
             lines.append("")
-            lines.append("提示：指令的触发需要添加唤醒前缀，默认为 /。")
+            lines.append(f"提示：指令的触发需要添加唤醒前缀，当前第一个为 {前缀}。")
 
         event.set_result(
             MessageEventResult().message("\n".join(lines)).use_t2i(False),

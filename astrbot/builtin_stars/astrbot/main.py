@@ -18,6 +18,7 @@ from astrbot.core.utils.session_waiter import (
     SessionWaiter,
     session_waiter,
 )
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 from .group_chat_context import GroupChatContext
 
@@ -238,7 +239,7 @@ class Main(star.Star):
 
                     if not session_curr_cid:
                         logger.error(
-                            "当前未处于对话状态，无法主动回复，请确保 平台设置->会话隔离(unique_session) 未开启，并使用 /new 创建一个会话。",
+                            f"当前未处于对话状态，无法主动回复，请确保 平台设置->会话隔离(unique_session) 未开启，并使用 {获取第一个唤醒词()}new 创建一个会话。",
                         )
                         return
 

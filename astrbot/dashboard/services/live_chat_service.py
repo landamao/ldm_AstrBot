@@ -28,10 +28,10 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_t
 from astrbot.core.utils.datetime_utils import to_utc_isoformat
 from astrbot.dashboard.services.chat_service import (
     BotMessageAccumulator,
-    ChatService,
     build_bot_history_content,
     build_webchat_unified_msg_origin,
     collect_plain_text_from_message_parts,
+    truncate_turn_from_user_message,
 )
 
 SendJson = Callable[[dict], Awaitable[None]]
@@ -490,10 +490,65 @@ class LiveChatService:
 
         await self.ensure_chat_subscription(session, session_id, send_json)
 
+        # 重试：前端传入被重试 bot 消息前面那条用户消息的 id，
+        # 发送前清掉该轮次的旧回复/报错记录，用户消息复用并换新 checkpoint
+        truncate_from_message_id = message.get("_truncate_from_message_id")
+        llm_checkpoint_id = str(uuid.uuid4())
+        if truncate_from_message_id is not None:
+            try:
+                truncate_user_message_id = int(truncate_from_message_id)
+            except (TypeError, ValueError):
+                truncate_user_message_id = None
+            if truncate_user_message_id is None:
+                await self.send_chat_payload(
+                    session,
+                    {
+                        "ct": "chat",
+                        "t": "error",
+                        "data": "Invalid _truncate_from_message_id",
+                        "code": "INVALID_MESSAGE_FORMAT",
+                    },
+                    send_json,
+                )
+                return
+            platform_session = await self.db.get_platform_session_by_id(session_id)
+            if not platform_session or platform_session.creator != session.username:
+                await self.send_chat_payload(
+                    session,
+                    {
+                        "ct": "chat",
+                        "t": "error",
+                        "data": "Session not found",
+                        "code": "PROCESSING_ERROR",
+                    },
+                    send_json,
+                )
+                return
+            new_checkpoint = await truncate_turn_from_user_message(
+                db=self.db,
+                platform_history_mgr=self.platform_history_mgr,
+                conv_mgr=self.conv_mgr,
+                session=platform_session,
+                user_message_id=truncate_user_message_id,
+                creator=platform_session.creator,
+            )
+            if new_checkpoint is None:
+                await self.send_chat_payload(
+                    session,
+                    {
+                        "ct": "chat",
+                        "t": "error",
+                        "data": "User message not found",
+                        "code": "PROCESSING_ERROR",
+                    },
+                    send_json,
+                )
+                return
+            llm_checkpoint_id = new_checkpoint
+
         session.is_processing = True
         session.should_interrupt = False
         back_queue = webchat_queue_mgr.get_or_create_back_queue(message_id, session_id)
-        llm_checkpoint_id = str(uuid.uuid4())
 
         pending_bot_message_flusher = None
         try:
@@ -544,11 +599,37 @@ class LiveChatService:
             message_accumulator = BotMessageAccumulator()
             agent_stats = {}
             refs = {}
+            last_saved_record = None
 
             async def flush_pending_bot_message():
-                nonlocal message_accumulator, agent_stats, refs
-                if not (message_accumulator.has_content() or refs or agent_stats):
+                nonlocal message_accumulator, agent_stats, refs, last_saved_record
+                has_visible = bool(message_accumulator.has_content() or refs)
+                if not has_visible and not agent_stats:
                     return None
+
+                if not has_visible:
+                    stats_to_merge = agent_stats
+                    refs_to_merge = refs
+                    agent_stats = {}
+                    refs = {}
+                    if last_saved_record is None or last_saved_record.id is None:
+                        return None
+                    saved_content = (
+                        last_saved_record.content
+                        if isinstance(last_saved_record.content, dict)
+                        else {}
+                    )
+                    updated = dict(saved_content)
+                    if stats_to_merge:
+                        updated["agent_stats"] = stats_to_merge
+                    if refs_to_merge:
+                        updated["refs"] = refs_to_merge
+                    await self.platform_history_mgr.update(
+                        last_saved_record.id,
+                        content=updated,
+                    )
+                    last_saved_record.content = updated
+                    return last_saved_record
 
                 message_parts_to_save = message_accumulator.build_message_parts(
                     include_pending_tool_calls=True
@@ -586,6 +667,7 @@ class LiveChatService:
                         session_id or "-",
                         plain_text,
                     )
+                last_saved_record = saved_record
                 return saved_record
 
             pending_bot_message_flusher = flush_pending_bot_message
@@ -706,31 +788,20 @@ class LiveChatService:
                 if should_save:
                     saved_record = await flush_pending_bot_message()
                     if saved_record:
-                        # 落库后重新加载 conversation history，
-                        # 此时当前轮次的 checkpoint 已写入，能正确判定 can_regenerate
-                        fresh_session = await self.db.get_platform_session_by_id(session_id)
-                        fresh_conv_history = (
-                            await self._load_conversation_history(fresh_session)
-                            if fresh_session
-                            else []
-                        )
-                        saved_can_regenerate = ChatService._can_regenerate_message(
-                            saved_record, fresh_conv_history
-                        )
+                        payload = {
+                            "ct": "chat",
+                            "type": "message_saved",
+                            "data": {
+                                "id": saved_record.id,
+                                "created_at": to_utc_isoformat(
+                                    saved_record.created_at
+                                ),
+                                "llm_checkpoint_id": llm_checkpoint_id,
+                            },
+                        }
                         await self.send_chat_payload(
                             session,
-                            {
-                                "ct": "chat",
-                                "type": "message_saved",
-                                "data": {
-                                    "id": saved_record.id,
-                                    "created_at": to_utc_isoformat(
-                                        saved_record.created_at
-                                    ),
-                                    "llm_checkpoint_id": llm_checkpoint_id,
-                                    "can_regenerate": saved_can_regenerate,
-                                },
-                            },
+                            payload,
                             send_json,
                         )
 

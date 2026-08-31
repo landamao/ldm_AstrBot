@@ -113,6 +113,7 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_workspaces_path,
 )
 from astrbot.core.utils.file_extract import extract_file_moonshotai
+from astrbot.core.utils.io import DownloadFileSizeLimitError
 from astrbot.core.utils.llm_metadata import LLM_METADATAS
 from astrbot.core.utils.media_utils import (
     compress_image_for_provider as _compress_image_for_provider,
@@ -707,7 +708,21 @@ async def _ensure_img_caption(
     try:
         compressed_urls = []
         for url in req.image_urls:
-            compressed_url = await _compress_image_for_provider(url, cfg)
+            try:
+                compressed_url = await _compress_image_for_provider(url, cfg)
+            except DownloadFileSizeLimitError:
+                # 超过下载上限的图片：不在 req.image_urls 里展开，保留 URL 文本兜底
+                logger.info("图片超过下载上限，已跳过转述压缩 | url=%s", url)
+                req.image_urls = []
+                req.extra_user_content_parts.append(
+                    TextPart(
+                        text=(
+                            "[Image Attachment skipped (exceeds download "
+                            f"size limit): url {url}]"
+                        )
+                    )
+                )
+                return
             compressed_urls.append(compressed_url)
             if _is_generated_compressed_image_path(url, compressed_url):
                 event.track_temporary_local_file(compressed_url)
@@ -755,6 +770,20 @@ async def _append_video_attachment(
 ) -> None:
     try:
         video_path = await video.convert_to_file_path()
+    except DownloadFileSizeLimitError as exc:
+        logger.info("视频超过下载上限，改为把链接传给模型 | %s", exc)
+        video_ref = video.url or video.file or ""
+        video_name = video.path or "video"
+        req.extra_user_content_parts.append(
+            TextPart(
+                text=(
+                    "[Video Attachment skipped (exceeds download "
+                    f"size limit): name {os.path.basename(str(video_name))}, "
+                    f"url {video_ref or exc}]"
+                )
+            )
+        )
+        return
     except Exception as exc:  # noqa: BLE001
         if quoted:
             logger.debug(
@@ -1468,7 +1497,21 @@ async def build_main_agent(
             # media files attachments
             for comp in event.message_obj.message:
                 if isinstance(comp, Image):
-                    path = await comp.convert_to_file_path()
+                    try:
+                        path = await comp.convert_to_file_path()
+                    except DownloadFileSizeLimitError as exc:
+                        logger.info(
+                            "图片超过下载上限，改为把链接传给模型 | %s", exc
+                        )
+                        req.extra_user_content_parts.append(
+                            TextPart(
+                                text=(
+                                    "[Image Attachment skipped (exceeds download "
+                                    f"size limit): url {comp.url or comp.file}]"
+                                )
+                            )
+                        )
+                        continue
                     image_path = await _compress_image_for_provider(
                         path,
                         config.provider_settings,
@@ -1480,11 +1523,35 @@ async def build_main_agent(
                         TextPart(text=f"[Image Attachment: path {image_path}]")
                     )
                 elif isinstance(comp, Record):
-                    audio_path = await comp.convert_to_file_path()
+                    try:
+                        audio_path = await comp.convert_to_file_path()
+                    except DownloadFileSizeLimitError as exc:
+                        logger.info(
+                            "语音超过下载上限，改为把链接传给模型 | %s", exc
+                        )
+                        _append_audio_attachment(
+                            req, comp.file or comp.url or str(exc)
+                        )
+                        continue
                     req.audio_urls.append(audio_path)
                     _append_audio_attachment(req, audio_path)
                 elif isinstance(comp, File):
-                    file_path = await comp.get_file()
+                    try:
+                        file_path = await comp.get_file()
+                    except DownloadFileSizeLimitError as exc:
+                        logger.info(
+                            "文件超过下载上限，改为把链接传给模型 | %s", exc
+                        )
+                        file_name = comp.name or "file"
+                        req.extra_user_content_parts.append(
+                            TextPart(
+                                text=(
+                                    f"[File Attachment: name {file_name}, "
+                                    f"url {comp.url or exc}]"
+                                )
+                            )
+                        )
+                        continue
                     file_name = comp.name or os.path.basename(file_path)
                     req.extra_user_content_parts.append(
                         TextPart(
@@ -1507,7 +1574,18 @@ async def build_main_agent(
                     for reply_comp in comp.chain:
                         if isinstance(reply_comp, Image):
                             has_embedded_image = True
-                            path = await reply_comp.convert_to_file_path()
+                            try:
+                                path = await reply_comp.convert_to_file_path()
+                            except DownloadFileSizeLimitError as exc:
+                                logger.info(
+                                    "引用图片超过下载上限，改为把链接传给模型 | %s",
+                                    exc,
+                                )
+                                _append_quoted_image_attachment(
+                                    req,
+                                    reply_comp.url or reply_comp.file or str(exc),
+                                )
+                                continue
                             image_path = await _compress_image_for_provider(
                                 path,
                                 config.provider_settings,
@@ -1517,11 +1595,39 @@ async def build_main_agent(
                             req.image_urls.append(image_path)
                             _append_quoted_image_attachment(req, image_path)
                         elif isinstance(reply_comp, Record):
-                            audio_path = await reply_comp.convert_to_file_path()
+                            try:
+                                audio_path = await reply_comp.convert_to_file_path()
+                            except DownloadFileSizeLimitError as exc:
+                                logger.info(
+                                    "引用语音超过下载上限，改为把链接传给模型 | %s",
+                                    exc,
+                                )
+                                _append_quoted_audio_attachment(
+                                    req,
+                                    reply_comp.file or reply_comp.url or str(exc),
+                                )
+                                continue
                             req.audio_urls.append(audio_path)
                             _append_quoted_audio_attachment(req, audio_path)
                         elif isinstance(reply_comp, File):
-                            file_path = await reply_comp.get_file()
+                            try:
+                                file_path = await reply_comp.get_file()
+                            except DownloadFileSizeLimitError as exc:
+                                logger.info(
+                                    "引用文件超过下载上限，改为把链接传给模型 | %s",
+                                    exc,
+                                )
+                                file_name = reply_comp.name or "file"
+                                req.extra_user_content_parts.append(
+                                    TextPart(
+                                        text=(
+                                            f"[File Attachment in quoted message: "
+                                            f"name {file_name}, url "
+                                            f"{reply_comp.url or exc}]"
+                                        )
+                                    )
+                                )
+                                continue
                             file_name = reply_comp.name or os.path.basename(file_path)
                             req.extra_user_content_parts.append(
                                 TextPart(

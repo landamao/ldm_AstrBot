@@ -217,6 +217,32 @@ class InternalAgentSubStage(Stage):
         if active_runner is None and not has_other_events:
             return False
 
+        # 工具调用期间防打断：当前任务正在执行工具调用时不打断，防止误操作。
+        # 开启「输出函数调用状态」时向用户发送提示，否则静默放入队列（走 follow-up）。
+        if (
+            interrupt_cfg.get("tool_interrupt_protect", True)
+            and active_runner is not None
+            and active_runner.is_tool_executing()
+        ):
+            if self.show_tool_use:
+                # 提示中的停止指令前缀取用户配置的第一个唤醒词，为空则不加前缀
+                wake_prefixes = self.ctx.astrbot_config.get("wake_prefix") or []
+                first_wake = str(wake_prefixes[0]).strip() if wake_prefixes else ""
+                stop_hint = f"{first_wake}stop" if first_wake else "stop"
+                try:
+                    await event.send(
+                        MessageChain().message(
+                            f"⚠️ 我正在使用工具，你的消息我将稍稍后回复，如需停止，请发送「{stop_hint}」"
+                        )
+                    )
+                except Exception:
+                    logger.warning("发送工具防打断提示失败", exc_info=True)
+            logger.info(
+                "当前任务正在执行工具调用，本次不打断: umo=%s",
+                umo,
+            )
+            return False
+
         # 固定英文系统提示，不可配置
         context_text = (
             "The user sent a new message and interrupted this response. "
@@ -693,6 +719,7 @@ class InternalAgentSubStage(Stage):
         runner_aborted: bool = False,
         original_text: str = "",
         delivered_text: str = "",
+        force_stopped: bool = False,
     ) -> bool:
         """回复是否已完整发给用户。
 
@@ -700,7 +727,10 @@ class InternalAgentSubStage(Stage):
         - 真截断：生成中 / 分段发送中被软打断
         - 收尾撞车：2/2 已发完，仅写历史/注销阶段被标 abort
         后者不应再往历史追加停止系统提示。
+        用户主动停止（/stop、ChatUI 停止）必须写停止标记，不算「完整发出」。
         """
+        if force_stopped:
+            return False
         if event.get_extra("_llm_reply_send_truncated"):
             return False
         if event.get_extra("_llm_reply_send_completed"):
@@ -736,14 +766,13 @@ class InternalAgentSubStage(Stage):
 
         # WebChat 流式路径不走 send()，delivered 始终为空。
         # 从 LLM 最终响应中取出已产出文本作为已发送内容。
-        if not delivered and runner_aborted and llm_response is not None:
+        if not delivered and (runner_aborted or force_stopped) and llm_response is not None:
             completion = (llm_response.completion_text or "").strip()
             if completion:
                 delivered = completion
-                # 同时回写 extra，让后续日志/判断能取到
                 event.set_extra("_delivered_llm_plain_text", delivered)
 
-        if not delivered and runner_aborted:
+        if not delivered and runner_aborted and not force_stopped:
             logger.info(
                 "停止时未发送任何内容，跳过历史裁剪与停止标记: umo=%s",
                 event.unified_msg_origin,
@@ -766,34 +795,36 @@ class InternalAgentSubStage(Stage):
                 "</system_reminder>"
             )
 
-        # 工具已执行（消息序列中有 role="tool"）时：工具可能已修改文件/状态，
-        # 必须完整保存到上下文，不裁剪 tool_calls 和 tool 结果，只追加停止标记
+        # 消息序列中有 role="tool" 时：工具可能已修改文件/状态，tool 调用与
+        # 结果必须完整保留（不裁剪、不重写真实结果）。但中断可能发生在工具
+        # 之后的文本生成阶段——此时仍要在最终文本回复末尾追加停止标记，
+        # 所以继续走通用追加逻辑；只有以 tool 结果结尾（工具阶段被中断，
+        # 中断提示已由 runner 写在 tool 结果里）才原样保留。
         has_tool_results = any(msg.role == "tool" for msg in messages)
         if has_tool_results:
-            # 找最后一条无 tool_calls 的 assistant（最终回复），追加停止标记
-            target_idx = None
-            for i in range(len(messages) - 1, -1, -1):
-                msg = messages[i]
-                if msg.role == "assistant" and not msg.tool_calls:
-                    target_idx = i
-                    break
-            if target_idx is not None:
-                msg = messages[target_idx]
-                original = self._extract_message_plain(msg.content).strip()
-                if note and note not in (original or ""):
-                    msg.content = (
-                        f"{original}\n{note}" if original else note
-                    )
-            elif not delivered and not any(
-                m.role == "assistant" and m.content for m in messages
-            ):
-                # 没有最终回复且无已发送内容：追加一条仅含停止标记的 assistant
-                messages.append(Message(role="assistant", content=note))
+            # 本轮是否有文本回复：最后一条 user 消息之后存在无 tool_calls 的
+            # 非空文本 assistant。只有这种情况才需要追加停止标记（文本阶段
+            # 被中断）；只看 messages[-1] 会误伤多轮场景下上一轮的旧回复。
+            last_user_idx = -1
+            for i, msg in enumerate(messages):
+                if msg.role == "user":
+                    last_user_idx = i
+            has_final_text_reply = any(
+                msg.role == "assistant"
+                and not msg.tool_calls
+                and self._extract_message_plain(msg.content).strip()
+                for msg in messages[last_user_idx + 1:]
+            )
+            if not has_final_text_reply:
+                logger.info(
+                    "工具阶段被中断，完整保留上下文，中断提示已写在 tool 结果中: umo=%s",
+                    event.unified_msg_origin,
+                )
+                return messages
             logger.info(
-                "工具已执行，完整保存上下文并追加停止标记: umo=%s",
+                "工具已执行且其后有文本回复，保留工具结果并在文本末尾追加停止标记: umo=%s",
                 event.unified_msg_origin,
             )
-            return messages
 
         # 优先最后一条无 tool_calls 的 assistant（最终回复）
         target_idx = None
@@ -817,6 +848,7 @@ class InternalAgentSubStage(Stage):
             runner_aborted=runner_aborted,
             original_text=original,
             delivered_text=delivered,
+            force_stopped=force_stopped,
         )
         if fully_delivered:
             # 已完整发出：保留原回复正文，不写打断提示
@@ -884,8 +916,9 @@ class InternalAgentSubStage(Stage):
             or event.get_extra("agent_user_aborted")
         )
 
-        # 分段/发送已全部完成时：只是收尾撞上软打断，按正常回复落库
-        if interrupted and not runner_aborted:
+        # 分段/发送已全部完成时：只是收尾撞上软打断，按正常回复落库。
+        # 用户主动停止仍要写入英文停止标记。
+        if interrupted and not runner_aborted and not force_stopped:
             delivered = self._get_delivered_llm_plain(event)
             completion = ""
             if llm_response is not None:
@@ -895,6 +928,7 @@ class InternalAgentSubStage(Stage):
                 runner_aborted=runner_aborted,
                 original_text=completion,
                 delivered_text=delivered,
+                force_stopped=force_stopped,
             ):
                 logger.info(
                     "软打断发生在回复完整发出之后，按正常历史落库: umo=%s",

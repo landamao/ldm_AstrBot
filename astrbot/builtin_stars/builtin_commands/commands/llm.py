@@ -1,6 +1,7 @@
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.core import logger
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 
 class LLMCommands:
@@ -87,18 +88,19 @@ class LLMCommands:
 
         # -------- help ----------
         if sid and sid.lower() == "help":
+            前缀 = 获取第一个唤醒词()
             帮助 = (
                 "LLM 管理命令：\n"
-                "/llm              → 切换当前会话的 LLM 开关（群聊/私聊）\n"
-                "/llm on           → 开启当前会话的 LLM\n"
-                "/llm off          → 关闭当前会话的 LLM\n"
-                "/llm <id> -q      → 切换指定群组的 LLM 开关\n"
-                "/llm <id> -s      → 切换指定私聊用户的 LLM 开关\n"
-                "/llm list         → 查看已关闭 LLM 的群组\n"
-                "/llm list -s      → 查看已关闭 LLM 的私聊用户\n"
-                "/llm list -a      → 查看所有已关闭的会话\n"
-                "/llm all [on|off] → 全局禁用/启用 LLM（不指定则切换状态）\n"
-                "/llm help         → 显示本帮助"
+                f"{前缀}llm              → 切换当前会话的 LLM 开关（群聊/私聊）\n"
+                f"{前缀}llm on           → 开启当前会话的 LLM\n"
+                f"{前缀}llm off          → 关闭当前会话的 LLM\n"
+                f"{前缀}llm <id> -q      → 切换指定群组的 LLM 开关\n"
+                f"{前缀}llm <id> -s      → 切换指定私聊用户的 LLM 开关\n"
+                f"{前缀}llm list         → 查看已关闭 LLM 的群组\n"
+                f"{前缀}llm list -s      → 查看已关闭 LLM 的私聊用户\n"
+                f"{前缀}llm list -a      → 查看所有已关闭的会话\n"
+                f"{前缀}llm all [on|off] → 全局禁用/启用 LLM（不指定则切换状态）\n"
+                f"{前缀}llm help         → 显示本帮助"
             )
             await event.send(MessageChain().message(帮助))
             return

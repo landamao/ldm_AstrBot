@@ -3,10 +3,65 @@ import traceback
 import typing as T
 
 from astrbot import logger
-from astrbot.core.message.message_event_result import CommandResult, MessageEventResult
+from astrbot.core.message.components import Json
+from astrbot.core.message.message_event_result import (
+    CommandResult,
+    MessageChain,
+    MessageEventResult,
+)
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
-from astrbot.core.star.star import star_map
+from astrbot.core.star.star import StarMetadata, star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
+
+
+def plugin_display_name(md: StarMetadata | None) -> str:
+    """插件展示名：优先 display_name，否则 name。"""
+    if md is None:
+        return "未知"
+    name = (md.display_name or md.name or "").strip()
+    return name or "未知"
+
+
+def format_event_stopped_message(
+    md: StarMetadata | None,
+    handler_name: str | None,
+) -> str:
+    """插件「xxx」（方法）终止了事件传播"""
+    method = (handler_name or "").strip() or "未知"
+    return f"插件「{plugin_display_name(md)}」（{method}）终止了事件传播"
+
+
+def log_event_stopped(md: StarMetadata | None, handler_name: str | None) -> None:
+    logger.info(f"{format_event_stopped_message(md, handler_name)}。")
+
+
+async def notify_event_stopped(
+    event: AstrMessageEvent,
+    md: StarMetadata | None,
+    handler_name: str | None,
+) -> None:
+    """打日志；WebChat 再发一条结构化提示，ChatUI 原样显示。同一事件只通知一次。"""
+    if event.get_extra("_event_stopped_notified"):
+        return
+    event.set_extra("_event_stopped_notified", True)
+    log_event_stopped(md, handler_name)
+    if event.get_platform_name() != "webchat":
+        return
+    text = format_event_stopped_message(md, handler_name)
+    await event.send(
+        MessageChain(
+            type="event_stopped",
+            chain=[
+                Json(
+                    {
+                        "text": text,
+                        "plugin": plugin_display_name(md),
+                        "method": (handler_name or "").strip(),
+                    }
+                )
+            ],
+        )
+    )
 
 
 async def call_handler(
@@ -104,8 +159,10 @@ async def call_event_hook(
             logger.error(traceback.format_exc())
 
         if event.is_stopped():
-            logger.info(
-                f"{star_map[handler.handler_module_path].name} - {handler.handler_name} 终止了事件传播。",
+            await notify_event_stopped(
+                event,
+                star_map.get(handler.handler_module_path),
+                handler.handler_name,
             )
             return True
 

@@ -117,12 +117,6 @@ class ChatMessagePatchRequest(OpenModel):
     content: dict[str, Any]
 
 
-class ChatMessageRegenerateRequest(OpenModel):
-    selected_provider: str | None = None
-    selected_model: str | None = None
-    enable_streaming: bool | None = None
-
-
 class ChatThreadCreateRequest(OpenModel):
     session_id: str
     parent_message_id: str | int

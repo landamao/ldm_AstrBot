@@ -1,6 +1,7 @@
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core.umo_alias import get_event_auto_name, normalize_umo_name
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 
 class NameCommand:
@@ -23,7 +24,7 @@ class NameCommand:
                 .message(
                     "\n".join(
                         [
-                            "使用方法：/name <名称>",
+                            f"使用方法：{获取第一个唤醒词()}name <名称>",
                             "传入 unset 清除自定义名称",
                             f"会话 ID: {umo}",
                             f"自动名称: {auto_name or '（空）'}",

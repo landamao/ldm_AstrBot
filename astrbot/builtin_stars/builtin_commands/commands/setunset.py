@@ -1,5 +1,6 @@
 from astrbot.api import sp, star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 
 class SetUnsetCommands:
@@ -15,7 +16,7 @@ class SetUnsetCommands:
 
         event.set_result(
             MessageEventResult().message(
-                f"会话 {uid} 变量 {key} 存储成功。使用 /unset 移除。",
+                f"会话 {uid} 变量 {key} 存储成功。使用 {获取第一个唤醒词()}unset 移除。",
             ),
         )
 
@@ -26,7 +27,7 @@ class SetUnsetCommands:
 
         if key not in session_var:
             event.set_result(
-                MessageEventResult().message("没有那个变量名。格式 /unset 变量名。"),
+                MessageEventResult().message(f"没有那个变量名。格式 {获取第一个唤醒词()}unset 变量名。"),
             )
         else:
             del session_var[key]

@@ -455,8 +455,13 @@ class AstrBotCoreLifecycle:
         / _reboot() 全部跳过, 导致进程卡死: event bus 停了但平台/WebUI 还活着, 新
         进程没启动.
 
-        修复: 把实际的终止+重启逻辑放到一个独立的后台 task 里, 并用 asyncio.shield
-        保护. 调用者 (pipeline 任务) 可以安全被 cancel, 后台 task 不受影响.
+        修复: 把实际的终止+重启逻辑放到一个独立的后台 task 里。
+        调用者 (pipeline 任务) 可以安全被 cancel, 后台 task 不受影响。
+
+        注意: 不要写成 create_task(asyncio.shield(coro))。
+        shield() 返回 Future, create_task() 只接受 coroutine, 会直接 TypeError,
+        WebUI /system/restart 每次都会打「Dashboard API 未处理异常」。
+        独立 create_task 已经和调用方解耦, 不需要再套 shield。
         """
         async def _do_restart():
             if self.event_bus:
@@ -473,7 +478,10 @@ class AstrBotCoreLifecycle:
                 daemon=True,
             ).start()
 
-        asyncio.create_task(asyncio.shield(_do_restart()))
+        self._restart_task = asyncio.create_task(
+            _do_restart(),
+            name="core-restart",
+        )
 
     def load_platform(self) -> list[asyncio.Task]:
         """加载平台实例并返回所有平台实例的异步任务列表"""

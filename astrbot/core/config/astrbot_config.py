@@ -86,6 +86,8 @@ class AstrBotConfig(dict):
             )
         # 检查配置完整性，并插入
         has_new = self.check_config_integrity(default_config, conf)
+        if self._rename_legacy_log_paths(conf):
+            has_new = True
         reset_dashboard_password = self._consume_reset_dashboard_password_flag()
         if reset_dashboard_password and "dashboard" in conf:
             self._reset_generated_dashboard_password(conf)
@@ -168,6 +170,19 @@ class AstrBotConfig(dict):
         _parse_schema(schema, conf)
 
         return conf
+
+    @staticmethod
+    def _rename_legacy_log_paths(conf: dict) -> bool:
+        """把仍是旧默认文件名的日志路径改成 ldmbot。自定义路径不改。"""
+        renamed = False
+        for key, old, new in (
+            ("log_file_path", "logs/astrbot.log", "logs/ldmbot.log"),
+            ("trace_log_path", "logs/astrbot.trace.log", "logs/ldmbot.trace.log"),
+        ):
+            if conf.get(key) == old:
+                conf[key] = new
+                renamed = True
+        return renamed
 
     def check_config_integrity(self, refer_conf: dict, conf: dict, path=""):
         """检查配置完整性，如果有新的配置项或顺序不一致则返回 True"""

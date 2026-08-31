@@ -203,7 +203,7 @@ class LogManager:
 
     @classmethod
     def _default_log_path(cls) -> str:
-        return os.path.join(get_astrbot_data_path(), "logs", "astrbot.log")
+        return os.path.join(get_astrbot_data_path(), "logs", "ldmbot.log")
 
     @classmethod
     def _plugin_log_levels_path(cls) -> Path:
@@ -617,7 +617,7 @@ class LogManager:
             return
 
         cls._trace_sink_id = cls._add_file_sink(
-            file_path=cls._resolve_log_path(path or "logs/astrbot.trace.log"),
+            file_path=cls._resolve_log_path(path or "logs/ldmbot.trace.log"),
             level=logging.INFO,
             max_mb=max_mb,
             backup_count=3,

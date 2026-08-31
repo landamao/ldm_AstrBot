@@ -7,7 +7,7 @@ import os
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -194,6 +194,22 @@ class BotMessageAccumulator:
             if self._think_start_time is not None:
                 self._finalize_thinking_duration()
             self._store_llm_error(result_text)
+            return
+
+        if chain_type == "event_stopped":
+            # 插件 stop_event：持久化为 event_stopped part，ChatUI 显示终止提示
+            self._flush_pending_text()
+            payload = self._parse_json_object(result_text) or {}
+            text = str(payload.get("text") or result_text or "").strip()
+            if text:
+                self.parts.append(
+                    {
+                        "type": "event_stopped",
+                        "text": text,
+                        "plugin": str(payload.get("plugin") or ""),
+                        "method": str(payload.get("method") or ""),
+                    }
+                )
             return
 
         if chain_type == "stopped":
@@ -444,6 +460,119 @@ def extract_platform_message_text(content: dict | None) -> str:
     return "".join(texts)
 
 
+def truncate_turn_from_user_message(
+    *,
+    db,
+    platform_history_mgr,
+    conv_mgr,
+    session,
+    user_message_id: int,
+    creator: str,
+) -> Coroutine[Any, Any, str | None]:
+    """重试清理（模块级，SSE 与 WS 两条通路共用）。
+
+    从指定用户消息开始清掉该轮次的所有记录：
+    - 删除该用户消息之后的所有 platform 记录（bot 回复、报错、插件消息等）；
+    - 删除被删记录关联的 threads；
+    - conversation history 截断到该用户消息轮次写入 LLM 历史之前；
+    - 用户消息本身不删，换新 checkpoint（重新请求视为新一轮）。
+
+    Returns:
+        coroutine，resolve 为新 checkpoint id；找不到记录 resolve 为 None。
+    """
+
+    async def _run() -> str | None:
+        target_record = await db.get_platform_message_history_by_id(user_message_id)
+        if (
+            not target_record
+            or target_record.platform_id != session.platform_id
+            or target_record.user_id != session.session_id
+        ):
+            return None
+        if not isinstance(target_record.content, dict):
+            return None
+
+        # 删除该用户消息之后的所有记录（含 bot 回复、报错、插件消息）
+        history_list = await platform_history_mgr.get(
+            platform_id=session.platform_id,
+            user_id=session.session_id,
+            page=1,
+            page_size=100000,
+        )
+        history_list = ChatService.sort_history_by_turn(history_list)
+        should_delete = False
+        deleted_ids: list[int] = []
+        for item in history_list:
+            if should_delete:
+                if item.id is not None:
+                    deleted_ids.append(item.id)
+                continue
+            if item.id == user_message_id:
+                should_delete = True
+        thread_ids = await db.delete_webchat_threads_by_parent_message_ids(
+            session.session_id,
+            deleted_ids,
+        )
+        for thread_id in thread_ids:
+            unified_msg_origin = build_thread_unified_msg_origin(creator, thread_id)
+            active_event_registry.request_agent_stop_all(unified_msg_origin)
+            await conv_mgr.delete_conversations_by_user_id(unified_msg_origin)
+            await platform_history_mgr.delete(
+                platform_id="webchat_thread",
+                user_id=build_thread_session_id(creator, thread_id),
+                offset_sec=0,
+            )
+            webchat_queue_mgr.remove_queues(thread_id)
+        for deleted_id in deleted_ids:
+            await platform_history_mgr.delete_by_id(deleted_id)
+
+        # conversation history 截断：保留该用户消息 checkpoint 所在轮次之前
+        # 的内容（checkpoint 段在轮次末尾，用 find_turn_range 找轮次起点）。
+        old_checkpoint = target_record.llm_checkpoint_id
+        unified_msg_origin = build_webchat_unified_msg_origin(session)
+        conversation_id = await conv_mgr.get_curr_conversation_id(unified_msg_origin)
+        conv_history: list = []
+        if conversation_id:
+            conversation = await conv_mgr.get_conversation(
+                unified_msg_origin=unified_msg_origin,
+                conversation_id=conversation_id,
+            )
+            if conversation:
+                try:
+                    loaded = json.loads(conversation.history or "[]")
+                    conv_history = loaded if isinstance(loaded, list) else []
+                except json.JSONDecodeError:
+                    conv_history = []
+            cut_index = None
+            if old_checkpoint:
+                turn_range = find_turn_range(conv_history, old_checkpoint)
+                if turn_range:
+                    cut_index = turn_range[0]
+            if cut_index is None:
+                # checkpoint 不在 conv history（llm_error 轮次/插件消息轮次）：
+                # 失败轮次本就不在历史中，保留整段历史即可
+                cut_index = len(conv_history)
+            await conv_mgr.update_conversation(
+                unified_msg_origin=unified_msg_origin,
+                conversation_id=conversation_id,
+                history=conv_history[:cut_index],
+            )
+
+        # 用户消息换新 checkpoint（重新请求视为全新一轮）
+        new_checkpoint_id = str(uuid.uuid4())
+        await platform_history_mgr.update(
+            message_id=user_message_id,
+            llm_checkpoint_id=new_checkpoint_id,
+        )
+        return new_checkpoint_id
+
+    return _run()
+
+
+def build_thread_session_id(creator: str, thread_id: str) -> str:
+    return f"webchat!{creator}!{thread_id}"
+
+
 def build_webchat_unified_msg_origin(session) -> str:
     message_type = (
         MessageType.GROUP_MESSAGE.value
@@ -639,6 +768,7 @@ class ChatRunState:
     revision: int = 0
     status: str = "running"
     task: asyncio.Task[None] | None = None
+    user_stopped: bool = False
 
 
 class ChatServiceError(Exception):
@@ -661,6 +791,9 @@ class ChatService:
         self.platform_history_mgr = core_lifecycle.platform_message_history_manager
         self.umop_config_router = core_lifecycle.umop_config_router
         self.running_convs: dict[str, bool] = {}
+        self.image_gen_tasks: dict[str, asyncio.Task] = {}
+        # 生图会话开始时间（epoch 秒）：断线重进后前端据此继续计时
+        self.image_gen_started_at: dict[str, float] = {}
         self.chat_runs: dict[str, ChatRunState] = {}
         self.chat_runs_by_session: dict[str, set[str]] = {}
 
@@ -924,6 +1057,21 @@ class ChatService:
                 should_delete = True
         return deleted_ids
 
+    async def _truncate_turn_from_user_message(
+        self,
+        session,
+        user_message_id: int,
+    ) -> str | None:
+        """重试清理：从指定用户消息开始清掉该轮次的所有记录。"""
+        return await truncate_turn_from_user_message(
+            db=self.db,
+            platform_history_mgr=self.platform_history_mgr,
+            conv_mgr=self.conv_mgr,
+            session=session,
+            user_message_id=user_message_id,
+            creator=session.creator,
+        )
+
     async def save_bot_message(
         self,
         webchat_conv_id: str,
@@ -1111,6 +1259,7 @@ class ChatService:
         used_provider_id = provider_id
         used_model = ""
         self.running_convs[session_id] = True
+        self.image_gen_started_at[session_id] = time.time()
         try:
             provider_manager = self.core_lifecycle.provider_manager
             provider = None
@@ -1120,13 +1269,12 @@ class ChatService:
                     provider = candidate
                 else:
                     raise ChatServiceError(f"生图模型 {provider_id} 不可用")
-            elif isinstance(
-                provider_manager.curr_image_generation_provider_inst,
-                ProviderOpenAIImageGeneration,
-            ):
-                provider = provider_manager.curr_image_generation_provider_inst
-            elif provider_manager.image_generation_provider_insts:
-                provider = provider_manager.image_generation_provider_insts[0]
+            else:
+                default = self.core_lifecycle.star_context.get_using_image_generation_provider()
+                if isinstance(default, ProviderOpenAIImageGeneration):
+                    provider = default
+                elif provider_manager.image_generation_provider_insts:
+                    provider = provider_manager.image_generation_provider_insts[0]
             if provider is None:
                 raise ChatServiceError(
                     "没有可用的生图模型，请先在「模型提供商-生图」中配置并启用。"
@@ -1143,28 +1291,100 @@ class ChatService:
                 count,
                 retry_message_id is not None,
             )
-            images = await provider.generate_image(
-                prompt,
-                n=count,
-                size=size,
-                image=reference_images or None,
-            )
 
-            bot_parts: list[dict] = []
-            for image in images:
-                part = await self._save_generated_image_attachment(image)
-                if part:
-                    bot_parts.append(part)
-            if not bot_parts:
-                raise RuntimeError("没有生成任何图片附件。")
-            bot_parts.insert(
-                0,
-                {
-                    "type": "plain",
-                    "text": f"{used_provider_id}（{used_model}）生成 {len(images)} 张图片：",
-                },
-            )
+            async def _image_gen_job() -> dict:
+                开始时间 = self.image_gen_started_at.get(session_id) or time.time()
+                try:
+                    images = await provider.generate_image(
+                        prompt,
+                        n=count,
+                        size=size,
+                        image=reference_images or None,
+                    )
+                    bot_parts: list[dict] = []
+                    for image in images:
+                        part = await self._save_generated_image_attachment(image)
+                        if part:
+                            bot_parts.append(part)
+                    if not bot_parts:
+                        raise RuntimeError("没有生成任何图片附件。")
+                    bot_parts.insert(
+                        0,
+                        {
+                            "type": "plain",
+                            "text": (
+                                f"{used_provider_id}（{used_model}）"
+                                f"生成 {len(images)} 张图片，"
+                                f"耗时 {time.time() - 开始时间:.1f} 秒："
+                            ),
+                        },
+                    )
+                    saved_bot_record = await self.save_bot_message(
+                        session_id,
+                        bot_parts,
+                        {},
+                        {},
+                    )
+                except asyncio.CancelledError:
+                    logger.info("生图会话已停止：%s/%s", username, session_id)
+                    saved_bot_record = await asyncio.shield(
+                        self.save_bot_message(
+                            session_id,
+                            [{"type": "plain", "text": "已停止生成"}],
+                            {},
+                            {},
+                        )
+                    )
+                    return {
+                        "provider_id": used_provider_id,
+                        "model": used_model,
+                        "user_message": serialize_history_entry(saved_user_record),
+                        "bot_message": serialize_history_entry(saved_bot_record),
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    exc_text = str(exc).strip() or exc.__class__.__name__
+                    logger.error("生图会话生成失败: %s", exc_text)
+                    saved_bot_record = await self.save_bot_message(
+                        session_id,
+                        [{"type": "plain", "text": f"生图失败：{exc_text}"}],
+                        {},
+                        {},
+                    )
+                    return {
+                        "provider_id": used_provider_id,
+                        "model": used_model,
+                        "user_message": serialize_history_entry(saved_user_record),
+                        "bot_message": serialize_history_entry(saved_bot_record),
+                    }
+                else:
+                    return {
+                        "provider_id": used_provider_id,
+                        "model": used_model,
+                        "user_message": serialize_history_entry(saved_user_record),
+                        "bot_message": serialize_history_entry(saved_bot_record),
+                    }
+                finally:
+                    self.running_convs.pop(session_id, None)
+                    self.image_gen_tasks.pop(session_id, None)
+                    self.image_gen_started_at.pop(session_id, None)
+
+            image_task = asyncio.create_task(_image_gen_job())
+            self.image_gen_tasks[session_id] = image_task
+            try:
+                # shield：前端断线只取消 HTTP，不取消生图；停止按钮走 cancel task
+                return await asyncio.shield(image_task)
+            except asyncio.CancelledError:
+                if image_task.cancelled() or image_task.done():
+                    return await image_task
+                raise
+        except ChatServiceError:
+            self.running_convs.pop(session_id, None)
+            self.image_gen_started_at.pop(session_id, None)
+            raise
         except Exception as exc:  # noqa: BLE001
+            self.running_convs.pop(session_id, None)
+            self.image_gen_tasks.pop(session_id, None)
+            self.image_gen_started_at.pop(session_id, None)
             exc_text = str(exc).strip() or exc.__class__.__name__
             logger.error("生图会话生成失败: %s", exc_text)
             saved_bot_record = await self.save_bot_message(
@@ -1179,22 +1399,6 @@ class ChatService:
                 "user_message": serialize_history_entry(saved_user_record),
                 "bot_message": serialize_history_entry(saved_bot_record),
             }
-        else:
-            saved_bot_record = await self.save_bot_message(
-                session_id,
-                bot_parts,
-                {},
-                {},
-            )
-
-            return {
-                "provider_id": used_provider_id,
-                "model": used_model,
-                "user_message": serialize_history_entry(saved_user_record),
-                "bot_message": serialize_history_entry(saved_bot_record),
-            }
-        finally:
-            self.running_convs.pop(session_id, None)
 
     def get_active_chat_runs(self, username: str, session_id: str) -> list[dict]:
         """返回指定用户在指定会话中可恢复的活跃 run 列表。"""
@@ -1346,17 +1550,91 @@ class ChatService:
         display_accumulator = BotMessageAccumulator()
         pending_agent_stats = {}
         pending_refs = {}
+        last_saved_record = None
 
         async def flush_pending_bot_message():
             nonlocal pending_accumulator, pending_agent_stats, pending_refs
-            if not (
-                pending_accumulator.has_content() or pending_refs or pending_agent_stats
-            ):
+            nonlocal last_saved_record
+            has_visible = bool(pending_accumulator.has_content() or pending_refs)
+            if not has_visible and not pending_agent_stats:
                 return None
+
+            # complete 已落库正文后，end 往往只剩 agent_stats。
+            # 这时再 insert 会多出一条空 bot 消息。
+            if not has_visible:
+                pending_agent_stats_to_merge = pending_agent_stats
+                pending_refs_to_merge = pending_refs
+                pending_agent_stats = {}
+                pending_refs = {}
+                if last_saved_record is None or last_saved_record.id is None:
+                    return None
+                saved_content = (
+                    last_saved_record.content
+                    if isinstance(last_saved_record.content, dict)
+                    else {}
+                )
+                updated = dict(saved_content)
+                if pending_agent_stats_to_merge:
+                    updated["agent_stats"] = pending_agent_stats_to_merge
+                if pending_refs_to_merge:
+                    updated["refs"] = pending_refs_to_merge
+                if run.user_stopped:
+                    parts = list(updated.get("message") or [])
+                    if not any(
+                        isinstance(part, dict) and part.get("type") == "stopped"
+                        for part in parts
+                    ):
+                        parts.append({"type": "stopped"})
+                        updated["message"] = parts
+                await self.platform_history_mgr.update(
+                    last_saved_record.id,
+                    content=updated,
+                )
+                last_saved_record.content = updated
+                return last_saved_record
 
             message_parts_to_save = pending_accumulator.build_message_parts(
                 include_pending_tool_calls=True
             )
+            # complete 已落库后，stopped 等尾巴必须合并进原消息，不能再 insert 一条
+            if last_saved_record is not None and last_saved_record.id is not None:
+                saved_content = (
+                    last_saved_record.content
+                    if isinstance(last_saved_record.content, dict)
+                    else {}
+                )
+                updated = dict(saved_content)
+                existing_parts = list(updated.get("message") or [])
+                existing_types = {
+                    part.get("type")
+                    for part in existing_parts
+                    if isinstance(part, dict)
+                }
+                merged = False
+                for part in message_parts_to_save:
+                    if not isinstance(part, dict):
+                        continue
+                    part_type = part.get("type")
+                    if part_type == "stopped" and "stopped" in existing_types:
+                        continue
+                    existing_parts.append(part)
+                    existing_types.add(part_type)
+                    merged = True
+                if merged or pending_agent_stats or pending_refs:
+                    updated["message"] = existing_parts
+                    if pending_agent_stats:
+                        updated["agent_stats"] = pending_agent_stats
+                    if pending_refs:
+                        updated["refs"] = pending_refs
+                    await self.platform_history_mgr.update(
+                        last_saved_record.id,
+                        content=updated,
+                    )
+                    last_saved_record.content = updated
+                    pending_accumulator = BotMessageAccumulator()
+                    pending_agent_stats = {}
+                    pending_refs = {}
+                    return last_saved_record
             plain_text = collect_plain_text_from_message_parts(message_parts_to_save)
             try:
                 extracted_refs = extract_web_search_refs(
@@ -1390,6 +1668,7 @@ class ChatService:
                     run.session_id or "-",
                     plain_text,
                 )
+            last_saved_record = saved_record
             return saved_record
 
         self.running_convs[run.session_id] = True
@@ -1488,19 +1767,6 @@ class ChatService:
                         )
                         saved_parts = saved_content.get("message", [])
                         saved_refs = saved_content.get("refs")
-                        # 落库后重新加载 conversation history，
-                        # 此时当前轮次的 checkpoint 已写入，能正确判定 can_regenerate
-                        fresh_session = await self.db.get_platform_session_by_id(
-                            run.session_id
-                        )
-                        _, fresh_conv_history = (
-                            await self.load_current_conversation_history(fresh_session)
-                            if fresh_session
-                            else ("", [])
-                        )
-                        saved_can_regenerate = self._can_regenerate_message(
-                            saved_record, fresh_conv_history
-                        )
                         saved_info: dict = {
                             "type": "message_saved",
                             "data": {
@@ -1510,18 +1776,18 @@ class ChatService:
                                 ),
                                 "llm_checkpoint_id": run.llm_checkpoint_id,
                                 "message_parts": saved_parts,
-                                "can_regenerate": saved_can_regenerate,
                             },
                         }
                         if saved_refs:
                             saved_info["data"]["refs"] = saved_refs
                         self._publish_chat_run(run, saved_info)
                 if msg_type == "end":
-                    run.status = "completed"
+                    run.status = "stopped" if run.user_stopped else "completed"
                     break
         except asyncio.CancelledError:
             run.status = "stopped"
-            # 用户主动停止：在已累积内容后追加停止标记 part
+            run.user_stopped = True
+            # 用户主动停止：有已累积内容才追加「已停止生成」
             if pending_accumulator.has_content():
                 pending_accumulator.add_plain(
                     "",
@@ -1540,21 +1806,20 @@ class ChatService:
                     )
                     saved_parts = saved_content.get("message", [])
                     saved_refs = saved_content.get("refs")
-                    self._publish_chat_run(
-                        run,
-                        {
-                            "type": "message_saved",
-                            "data": {
-                                "id": saved_record.id,
-                                "created_at": to_utc_isoformat(
-                                    saved_record.created_at
-                                ),
-                                "llm_checkpoint_id": run.llm_checkpoint_id,
-                                "message_parts": saved_parts,
-                                "can_regenerate": False,
-                            },
+                    saved_info: dict = {
+                        "type": "message_saved",
+                        "data": {
+                            "id": saved_record.id,
+                            "created_at": to_utc_isoformat(
+                                saved_record.created_at
+                            ),
+                            "llm_checkpoint_id": run.llm_checkpoint_id,
+                            "message_parts": saved_parts,
                         },
-                    )
+                    }
+                    if saved_refs:
+                        saved_info["data"]["refs"] = saved_refs
+                    self._publish_chat_run(run, saved_info)
             except Exception as e:
                 logger.exception(
                     f"Failed to flush stopped webchat message: {e}",
@@ -1569,8 +1834,26 @@ class ChatService:
             )
         finally:
             try:
-                # stop 时 task 被 cancel，但 finally 里的 flush 必须完成
-                # 才能让前端 loadSessionMessages 读到含 stopped part 的消息
+                # 用户主动停止且 complete 已落库：补上 stopped 标记再 flush
+                if run.user_stopped and last_saved_record is not None:
+                    saved_content = (
+                        last_saved_record.content
+                        if isinstance(last_saved_record.content, dict)
+                        else {}
+                    )
+                    parts = list(saved_content.get("message") or [])
+                    if not any(
+                        isinstance(part, dict) and part.get("type") == "stopped"
+                        for part in parts
+                    ) and (
+                        parts
+                        or pending_accumulator.has_content()
+                    ):
+                        pending_accumulator.add_plain(
+                            "",
+                            chain_type="stopped",
+                            streaming=False,
+                        )
                 saved_record = await flush_pending_bot_message()
                 if saved_record:
                     saved_content = (
@@ -1580,17 +1863,6 @@ class ChatService:
                     )
                     saved_parts = saved_content.get("message", [])
                     saved_refs = saved_content.get("refs")
-                    fresh_session = await self.db.get_platform_session_by_id(
-                        run.session_id
-                    )
-                    _, fresh_conv_history = (
-                        await self.load_current_conversation_history(fresh_session)
-                        if fresh_session
-                        else ("", [])
-                    )
-                    saved_can_regenerate = self._can_regenerate_message(
-                        saved_record, fresh_conv_history
-                    )
                     saved_info: dict = {
                         "type": "message_saved",
                         "data": {
@@ -1598,7 +1870,6 @@ class ChatService:
                             "created_at": to_utc_isoformat(saved_record.created_at),
                             "llm_checkpoint_id": run.llm_checkpoint_id,
                             "message_parts": saved_parts,
-                            "can_regenerate": saved_can_regenerate,
                         },
                     }
                     if saved_refs:
@@ -1675,7 +1946,35 @@ class ChatService:
                 )
 
         message_id = str(uuid.uuid4())
-        llm_checkpoint_id = post_data.get("_llm_checkpoint_id") or str(uuid.uuid4())
+        # 重试：前端传入被重试 bot 消息前面那条用户消息的 id，
+        # 发送前清掉该轮次的旧回复/报错记录，用户消息复用并换新 checkpoint
+        truncate_from_message_id = post_data.get("_truncate_from_message_id")
+        new_checkpoint_from_truncate = None
+        if truncate_from_message_id is not None:
+            try:
+                truncate_user_message_id = int(truncate_from_message_id)
+            except (TypeError, ValueError) as exc:
+                raise ChatServiceError("Invalid key: _truncate_from_message_id") from exc
+            session_for_truncate = await self.db.get_platform_session_by_id(
+                webchat_conv_id
+            )
+            if not session_for_truncate:
+                raise ChatServiceError(f"Session {webchat_conv_id} not found")
+            if session_for_truncate.creator != username:
+                raise ChatServiceError("Permission denied")
+            new_checkpoint_from_truncate = await self._truncate_turn_from_user_message(
+                session_for_truncate,
+                truncate_user_message_id,
+            )
+            if new_checkpoint_from_truncate is None:
+                raise ChatServiceError(
+                    f"User message {truncate_user_message_id} not found"
+                )
+        llm_checkpoint_id = (
+            new_checkpoint_from_truncate
+            or post_data.get("_llm_checkpoint_id")
+            or str(uuid.uuid4())
+        )
         skip_user_history = bool(post_data.get("_skip_user_history"))
         saved_user_record = None
 
@@ -1811,6 +2110,10 @@ class ChatService:
 
         unified_msg_origin = build_webchat_unified_msg_origin(session)
         # Dashboard 停止按钮视作用户主动停止
+        for run_id in list(self.chat_runs_by_session.get(session_id, set())):
+            run = self.chat_runs.get(run_id)
+            if run:
+                run.user_stopped = True
         stopped_count = active_event_registry.request_agent_stop_all(
             unified_msg_origin,
             extra_updates={"agent_force_stop": True},
@@ -1821,19 +2124,41 @@ class ChatService:
             active_runner = get_active_runner(unified_msg_origin)
             if active_runner is not None:
                 active_runner.request_stop()
+            # 先等 pipeline 把 LLM 历史（含 checkpoint）写完，再结束消费任务。
+            # 立刻 cancel 的话 checkpoint 还没落库，重试清理时找不到轮次位置。
+            await active_event_registry.wait_until_idle(
+                unified_msg_origin,
+                timeout=8.0,
+            )
+            deadline = asyncio.get_running_loop().time() + 1.0
+            while get_active_runner(unified_msg_origin) is not None:
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(0.05)
         except Exception:
             pass
-        # 取消活跃的 chat_run task，让 _consume_chat_run 的 finally 分支
-        # flush 已累积内容并追加 stopped part
-        tasks_to_cancel = []
+        # 取消活跃的 chat_run task；优先等它自然消费完 end 再 flush
+        tasks_to_wait = []
         for run_id in list(self.chat_runs_by_session.get(session_id, set())):
             run = self.chat_runs.get(run_id)
             if run and run.task and not run.task.done():
-                run.task.cancel()
-                tasks_to_cancel.append(run.task)
-        if tasks_to_cancel:
-            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+                tasks_to_wait.append(run.task)
+        if tasks_to_wait:
+            _done, pending = await asyncio.wait(tasks_to_wait, timeout=3.0)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        await self._cancel_image_generation(session_id)
         return {"stopped_count": stopped_count}
+
+    async def _cancel_image_generation(self, session_id: str) -> None:
+        """取消该会话正在进行的生图请求（httpx 随 task cancel 中断）。"""
+        task = self.image_gen_tasks.get(session_id)
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     async def stop_session_from_dashboard_payload(
         self,
@@ -1862,6 +2187,7 @@ class ChatService:
                 tasks.append(run.task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self._cancel_image_generation(session_id)
         await self.conv_mgr.delete_conversations_by_user_id(unified_msg_origin)
 
         history_list = await self.platform_history_mgr.get(
@@ -2070,15 +2396,7 @@ class ChatService:
             creator=username,
         )
 
-        # 加载当前 conversation history，逐条计算 can_regenerate 权威标志
-        _, conv_history = await self.load_current_conversation_history(session)
-        serialized_history = []
-        for history in history_ls:
-            entry = serialize_history_entry(history)
-            entry["can_regenerate"] = self._can_regenerate_message(
-                history, conv_history
-            )
-            serialized_history.append(entry)
+        serialized_history = [serialize_history_entry(item) for item in history_ls]
 
         response_data = {
             "history": serialized_history,
@@ -2086,6 +2404,12 @@ class ChatService:
             "is_running": self.running_convs.get(session_id, False),
             "active_runs": self.get_active_chat_runs(username, session_id),
         }
+        # 生图进行中时带上开始时间（epoch 秒），前端据此续算耗时
+        started_at = self.image_gen_started_at.get(session_id)
+        if self.running_convs.get(session_id) and started_at is not None:
+            response_data["image_gen_started_at"] = started_at
+            # 服务器当前时间：前端时钟与服务器有偏差时用来校准
+            response_data["image_gen_server_now"] = time.time()
         if project_info:
             response_data["project"] = {
                 "project_id": project_info.project_id,
@@ -2365,249 +2689,6 @@ class ChatService:
         payload: object,
     ) -> dict:
         return await self.update_message(username, self._dashboard_payload(payload))
-
-    # -- 重试按钮修复：can_regenerate 权威判定与 llm_error 分流重试 --
-
-    @staticmethod
-    def _is_llm_error_message(record) -> bool:
-        """判断消息是否含 llm_error part（模型请求失败的报错记录）。"""
-        content = getattr(record, "content", None)
-        if not isinstance(content, dict):
-            return False
-        message_parts = content.get("message", [])
-        if not isinstance(message_parts, list):
-            return False
-        return any(
-            isinstance(part, dict) and part.get("type") == "llm_error"
-            for part in message_parts
-        )
-
-    @staticmethod
-    def _can_regenerate_message(record, conv_history: list) -> bool:
-        """计算单条 platform_message_history 记录是否可重试（can_regenerate）。
-
-        - llm_error 报错消息：始终可重试（LLM 请求失败时轮次不写 conversation
-          history，但恰恰最需要重试）；
-        - 其他 bot 消息：llm_checkpoint_id 存在于 conversation history（LLM 历史）
-          才可重试；
-        - 插件/指令消息：checkpoint 不在 LLM 历史 → 不可重试；
-        - user 消息：不可重试。
-        """
-        content = getattr(record, "content", None)
-        if not isinstance(content, dict):
-            return False
-        if content.get("type") != "bot":
-            return False
-
-        # llm_error 报错消息：始终可重试
-        if ChatService._is_llm_error_message(record):
-            return True
-
-        # 其他 bot 消息：checkpoint 在 conversation history 中才可重试
-        checkpoint_id = getattr(record, "llm_checkpoint_id", None)
-        if not checkpoint_id:
-            return False
-        return find_checkpoint_index(conv_history, checkpoint_id) is not None
-
-    async def _prepare_llm_error_regenerate(
-        self,
-        username: str,
-        session,
-        target_record,
-        checkpoint_id: str | None,
-        platform_history: list,
-    ) -> dict:
-        """llm_error 消息单独分流重试。
-
-        以同 checkpoint 的用户消息为源重新发起请求，删除旧报错记录、
-        更新用户消息 checkpoint 为新值，不截断历史（失败轮次本就不在历史中）；
-        无 checkpoint 时退回最后一条用户消息。
-        """
-        # 查找同 checkpoint 的用户消息；无 checkpoint 时退回最后一条用户消息
-        source_user_record = None
-        if checkpoint_id:
-            source_user_record = next(
-                (
-                    item
-                    for item in reversed(platform_history)
-                    if item.llm_checkpoint_id == checkpoint_id
-                    and isinstance(item.content, dict)
-                    and item.content.get("type") == "user"
-                ),
-                None,
-            )
-        if source_user_record is None:
-            # 退回最后一条用户消息
-            source_user_record = next(
-                (
-                    item
-                    for item in reversed(platform_history)
-                    if isinstance(item.content, dict)
-                    and item.content.get("type") == "user"
-                ),
-                None,
-            )
-        if source_user_record is None:
-            raise ChatServiceError("找不到要重试的用户消息")
-
-        # 删除旧报错记录
-        thread_ids = await self.db.delete_webchat_threads_by_parent_message_ids(
-            session.session_id,
-            [target_record.id],
-        )
-        await self.delete_threads_by_ids(thread_ids, username)
-        await self.platform_history_mgr.delete_by_id(target_record.id)
-
-        # 更新用户消息 checkpoint 为新值
-        new_checkpoint_id = str(uuid.uuid4())
-        await self.platform_history_mgr.update(
-            message_id=source_user_record.id,
-            llm_checkpoint_id=new_checkpoint_id,
-        )
-
-        return {
-            "session_id": session.session_id,
-            "message": source_user_record.content.get("message", []),
-            "enable_streaming": True,
-            "show_reasoning": True,
-            "selected_provider": None,
-            "selected_model": None,
-            "_skip_user_history": True,
-            "_llm_checkpoint_id": new_checkpoint_id,
-        }
-
-    async def prepare_regenerate_message_payload(
-        self,
-        username: str,
-        data: dict,
-    ) -> dict:
-        session_id = data.get("session_id")
-        message_id = data.get("message_id")
-        if not session_id:
-            raise ChatServiceError("Missing key: session_id")
-        if message_id is None:
-            raise ChatServiceError("Missing key: message_id")
-
-        try:
-            message_id = int(message_id)
-        except (TypeError, ValueError) as exc:
-            raise ChatServiceError("Invalid key: message_id") from exc
-
-        session = await self.db.get_platform_session_by_id(session_id)
-        if not session:
-            raise ChatServiceError(f"Session {session_id} not found")
-        if session.creator != username:
-            raise ChatServiceError("Permission denied")
-
-        target_record = await self.db.get_platform_message_history_by_id(message_id)
-        if not target_record:
-            raise ChatServiceError(f"Message {message_id} not found")
-        if (
-            target_record.platform_id != session.platform_id
-            or target_record.user_id != session_id
-        ):
-            raise ChatServiceError("Message does not belong to the session")
-        if not isinstance(target_record.content, dict):
-            raise ChatServiceError("Invalid message content")
-        if target_record.content.get("type") != "bot":
-            raise ChatServiceError("Only bot messages can be regenerated")
-
-        checkpoint_id = target_record.llm_checkpoint_id
-        if not checkpoint_id:
-            # llm_error 报错消息可能没有 checkpoint，但仍需重试
-            if self._is_llm_error_message(target_record):
-                platform_history = await self.get_sorted_platform_history(session)
-                return await self._prepare_llm_error_regenerate(
-                    username, session, target_record, None, platform_history
-                )
-            raise ChatServiceError("Message is not linked to LLM history")
-
-        conversation_id, history = await self.load_current_conversation_history(session)
-        turn_range = find_turn_range(history, checkpoint_id)
-        if not conversation_id or not turn_range:
-            # llm_error 报错消息的 checkpoint 不在 conversation history 中，但仍需重试
-            if self._is_llm_error_message(target_record):
-                platform_history = await self.get_sorted_platform_history(session)
-                return await self._prepare_llm_error_regenerate(
-                    username,
-                    session,
-                    target_record,
-                    checkpoint_id,
-                    platform_history,
-                )
-            raise ChatServiceError("Linked checkpoint not found")
-        if not is_latest_checkpoint(history, checkpoint_id):
-            raise ChatServiceError("Regenerating older turns requires branching")
-
-        start, end = turn_range
-        user_index = find_turn_user_index(history, start, end)
-        if user_index is None:
-            raise ChatServiceError("Linked user message not found")
-
-        platform_history = await self.get_sorted_platform_history(session)
-        source_user_record = next(
-            (
-                item
-                for item in reversed(platform_history)
-                if item.llm_checkpoint_id == checkpoint_id
-                and isinstance(item.content, dict)
-                and item.content.get("type") == "user"
-            ),
-            None,
-        )
-        if not source_user_record:
-            raise ChatServiceError("Linked user display message not found")
-
-        old_bot_record_ids = [
-            item.id
-            for item in platform_history
-            if item.id is not None
-            and item.llm_checkpoint_id == checkpoint_id
-            and isinstance(item.content, dict)
-            and item.content.get("type") == "bot"
-        ]
-        if not old_bot_record_ids:
-            raise ChatServiceError("Linked bot display message not found")
-
-        new_checkpoint_id = str(uuid.uuid4())
-        new_history = history[:start] + history[end + 1 :]
-        await self.conv_mgr.update_conversation(
-            unified_msg_origin=build_webchat_unified_msg_origin(session),
-            conversation_id=conversation_id,
-            history=new_history,
-        )
-        thread_ids = await self.db.delete_webchat_threads_by_parent_message_ids(
-            session_id,
-            old_bot_record_ids,
-        )
-        await self.delete_threads_by_ids(thread_ids, username)
-        for old_bot_record_id in old_bot_record_ids:
-            await self.platform_history_mgr.delete_by_id(old_bot_record_id)
-        await self.platform_history_mgr.update(
-            message_id=source_user_record.id,
-            llm_checkpoint_id=new_checkpoint_id,
-        )
-
-        return {
-            "session_id": session_id,
-            "message": source_user_record.content.get("message", []),
-            "enable_streaming": data.get("enable_streaming", True),
-            "show_reasoning": data.get("show_reasoning", True),
-            "selected_provider": data.get("selected_provider"),
-            "selected_model": data.get("selected_model"),
-            "_skip_user_history": True,
-            "_llm_checkpoint_id": new_checkpoint_id,
-        }
-
-    async def prepare_regenerate_message_payload_from_dashboard_payload(
-        self,
-        username: str,
-        payload: object,
-    ) -> dict:
-        return await self.prepare_regenerate_message_payload(
-            username,
-            self._dashboard_payload(payload),
-        )
 
     async def update_session_display_name(
         self,

@@ -6,6 +6,7 @@ from astrbot.core.star.filter.permission import PermissionTypeFilter
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import StarHandlerMetadata, star_handlers_registry
 from astrbot.core.utils.command_parser import CommandParserMixin
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 from .utils.rst_scene import RstScene
 
@@ -29,13 +30,14 @@ class AlterCmdCommands(CommandParserMixin):
     async def alter_cmd(self, event: AstrMessageEvent) -> None:
         token = self.parse_commands(event.message_str)
         if token.len < 3:
+            前缀 = 获取第一个唤醒词()
             await event.send(
                 MessageChain().message(
                     "该指令用于设置指令或指令组的权限。\n"
-                    "格式: /alter_cmd <cmd_name> <admin/member>\n"
-                    "例1: /alter_cmd c1 admin 将 c1 设为管理员指令\n"
-                    "例2: /alter_cmd g1 c1 admin 将 g1 指令组的 c1 子指令设为管理员指令\n"
-                    "/alter_cmd reset config 打开 reset 权限配置",
+                    f"格式: {前缀}alter_cmd <cmd_name> <admin/member>\n"
+                    f"例1: {前缀}alter_cmd c1 admin 将 c1 设为管理员指令\n"
+                    f"例2: {前缀}alter_cmd g1 c1 admin 将 g1 指令组的 c1 子指令设为管理员指令\n"
+                    f"{前缀}alter_cmd reset config 打开 reset 权限配置",
                 ),
             )
             return
@@ -61,8 +63,8 @@ class AlterCmdCommands(CommandParserMixin):
                 2. 群聊+会话隔离关: {group_unique_off}
                 3. 私聊: {private}
                 修改指令格式：
-                /alter_cmd reset scene <场景编号> <admin/member>
-                例如: /alter_cmd reset scene 2 member"""
+                {获取第一个唤醒词()}alter_cmd reset scene <场景编号> <admin/member>
+                例如: {获取第一个唤醒词()}alter_cmd reset scene 2 member"""
             await event.send(MessageChain().message(config_menu))
             return
 

@@ -82,7 +82,7 @@ def _select_image_generation_provider(
             return prov, ""
 
     available = "\n".join(
-        f"- {prov.provider_config.get('id', '')}（模型: {prov.provider_config.get('model', '')}）"
+        f"- 模型ID: {prov.provider_config.get('id', '')} | 模型: {prov.provider_config.get('model', '')}"
         for prov in providers
     )
     return None, f"错误：找不到生图模型 `{needle}`。可用的生图模型有：\n{available}"
@@ -288,9 +288,9 @@ class ListImageGenerationModelsTool(FunctionTool[AstrAgentContext]):
             provider_id = prov.provider_config.get("id", "")
             model = prov.provider_config.get("model", "")
             marker = "（默认）" if provider_id == default_id else ""
-            lines.append(f"- {provider_id} | 模型: {model}{marker}")
+            lines.append(f"- 模型ID: {provider_id} | 模型: {model}{marker}")
         lines.append(
-            "生成图片时，把上面列出的模型 ID 作为 ldmbot_generate_image 的 "
+            "生成图片时，把上面列出的「模型ID」作为 ldmbot_generate_image 的 "
             "`model` 参数传入即可；不传则使用默认生图模型。"
         )
         return "\n".join(lines)

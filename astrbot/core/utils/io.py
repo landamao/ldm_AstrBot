@@ -42,6 +42,15 @@ def _safe_url_for_log(url: str) -> str:
     return f"URL len={len(url)}"
 
 
+def _remove_partial_download(path: str) -> None:
+    """下载中断后尽力移除半成品文件。"""
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError as e:
+        logger.debug("移除未完成的下载文件失败 %s: %s", path, e)
+
+
 def on_error(func, path, exc_info) -> None:
     """A callback of the rmtree function."""
     import stat
@@ -182,6 +191,18 @@ class DownloadFileHTTPError(RuntimeError):
     """Raised when a file download returns an unsuccessful HTTP status."""
 
 
+class DownloadFileSizeLimitError(RuntimeError):
+    """下载文件大小超过配置的限制时抛出。"""
+
+    def __init__(self, url: str, size_bytes: int, max_bytes: int) -> None:
+        self.url = url
+        self.size_bytes = size_bytes
+        self.max_bytes = max_bytes
+        super().__init__(
+            f"文件大小超过下载限制: size={size_bytes} max={max_bytes} url={_safe_url_for_log(url)}"
+        )
+
+
 def _raise_for_download_status(resp, url: str) -> None:
     if resp.status == 200:
         return
@@ -203,6 +224,7 @@ async def _download_response_to_file(
     show_progress: bool,
     progress_callback,
     show_downloading_label: bool = True,
+    max_bytes: int | None = None,
 ) -> None:
     """Write a successful download response to a local file.
 
@@ -213,10 +235,13 @@ async def _download_response_to_file(
         show_progress: Whether to print progress to stdout.
         progress_callback: Optional callback for progress payloads.
         show_downloading_label: Whether to use the standard download heading.
+        max_bytes: Optional maximum number of bytes allowed; exceeding aborts.
 
     """
 
     total_size = int(resp.headers.get("content-length", 0))
+    if max_bytes and max_bytes > 0 and total_size > max_bytes:
+        raise DownloadFileSizeLimitError(url, total_size, max_bytes)
     downloaded_size = 0
     start_time = time.time()
     if show_progress:
@@ -243,6 +268,8 @@ async def _download_response_to_file(
             break
         file_obj.write(chunk)
         downloaded_size += len(chunk)
+        if max_bytes and max_bytes > 0 and downloaded_size > max_bytes:
+            raise DownloadFileSizeLimitError(url, downloaded_size, max_bytes)
         elapsed_time = time.time() - start_time if time.time() - start_time > 0 else 1
         speed = downloaded_size / 1024 / elapsed_time  # KB/s
         percent = downloaded_size / total_size if total_size > 0 else 0
@@ -279,6 +306,7 @@ async def download_file(
     show_progress: bool = False,
     progress_callback=None,
     allow_insecure_ssl_fallback: bool = True,
+    max_bytes: int | None = None,
 ) -> None:
     """Download a remote file to a local path.
 
@@ -289,6 +317,8 @@ async def download_file(
         progress_callback: Optional callback for progress payloads.
         allow_insecure_ssl_fallback: Whether certificate failures may retry with
             TLS certificate verification disabled.
+        max_bytes: Optional maximum download size in bytes. When exceeded, a
+            DownloadFileSizeLimitError is raised and the partial file removed.
 
     Returns:
         None.
@@ -305,14 +335,19 @@ async def download_file(
         ) as session:
             async with session.get(url, timeout=1800) as resp:
                 _raise_for_download_status(resp, url)
-                with open(path, "wb") as f:
-                    await _download_response_to_file(
-                        resp,
-                        f,
-                        url,
-                        show_progress,
-                        progress_callback,
-                    )
+                try:
+                    with open(path, "wb") as f:
+                        await _download_response_to_file(
+                            resp,
+                            f,
+                            url,
+                            show_progress,
+                            progress_callback,
+                            max_bytes=max_bytes,
+                        )
+                except BaseException:
+                    _remove_partial_download(path)
+                    raise
     except (aiohttp.ClientConnectorSSLError, aiohttp.ClientConnectorCertificateError):
         if not allow_insecure_ssl_fallback:
             raise
@@ -333,15 +368,20 @@ async def download_file(
         async with aiohttp.ClientSession() as session:
             async with session.get(url, ssl=ssl_context, timeout=120) as resp:
                 _raise_for_download_status(resp, url)
-                with open(path, "wb") as f:
-                    await _download_response_to_file(
-                        resp,
-                        f,
-                        url,
-                        show_progress,
-                        progress_callback,
-                        show_downloading_label=False,
-                    )
+                try:
+                    with open(path, "wb") as f:
+                        await _download_response_to_file(
+                            resp,
+                            f,
+                            url,
+                            show_progress,
+                            progress_callback,
+                            show_downloading_label=False,
+                            max_bytes=max_bytes,
+                        )
+                except BaseException:
+                    _remove_partial_download(path)
+                    raise
     if show_progress:
         print()
 

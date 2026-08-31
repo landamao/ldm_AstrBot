@@ -5,6 +5,7 @@ from datetime import datetime
 from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 
 class AdminCommands:
@@ -16,7 +17,7 @@ class AdminCommands:
         if not admin_id:
             event.set_result(
                 MessageEventResult().message(
-                    "使用方法: /op <id> 授权管理员；/deop <id> 取消管理员。可通过 /sid 获取 ID。",
+                    f"使用方法: {获取第一个唤醒词()}op <id> 授权管理员；{获取第一个唤醒词()}deop <id> 取消管理员。可通过 {获取第一个唤醒词()}sid 获取 ID。",
                 ),
             )
             return
@@ -29,7 +30,7 @@ class AdminCommands:
         if not admin_id:
             event.set_result(
                 MessageEventResult().message(
-                    "使用方法: /deop <id> 取消管理员。可通过 /sid 获取 ID。",
+                    f"使用方法: {获取第一个唤醒词()}deop <id> 取消管理员。可通过 {获取第一个唤醒词()}sid 获取 ID。",
                 ),
             )
             return
@@ -47,7 +48,7 @@ class AdminCommands:
         if not sid:
             event.set_result(
                 MessageEventResult().message(
-                    "使用方法: /wl <id> 添加白名单；/dwl <id> 删除白名单。可通过 /sid 获取 ID。",
+                    f"使用方法: {获取第一个唤醒词()}wl <id> 添加白名单；{获取第一个唤醒词()}dwl <id> 删除白名单。可通过 {获取第一个唤醒词()}sid 获取 ID。",
                 ),
             )
             return
@@ -61,7 +62,7 @@ class AdminCommands:
         if not sid:
             event.set_result(
                 MessageEventResult().message(
-                    "使用方法: /dwl <id> 删除白名单。可通过 /sid 获取 ID。",
+                    f"使用方法: {获取第一个唤醒词()}dwl <id> 删除白名单。可通过 {获取第一个唤醒词()}sid 获取 ID。",
                 ),
             )
             return

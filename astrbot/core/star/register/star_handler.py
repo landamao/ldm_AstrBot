@@ -6,7 +6,6 @@ from typing import Any
 
 import docstring_parser
 
-from astrbot.core import logger
 from astrbot.core.agent.agent import Agent
 from astrbot.core.agent.handoff import HandoffTool
 from astrbot.core.agent.hooks import BaseAgentRunHooks
@@ -95,12 +94,15 @@ def register_command(
             )
             command_name.parent_group.add_sub_command_filter(new_command)
         else:
-            logger.warning(
-                f"注册指令{command_name} 的子指令时未提供 sub_command 参数。",
+            group_name = command_name.parent_group.group_name
+            raise ValueError(
+                f"指令组「{group_name}」注册子指令时未提供 sub_command 参数，插件加载失败。",
             )
     # 裸指令
     elif command_name is None:
-        logger.warning("注册裸指令时未提供 command_name 参数。")
+        raise ValueError(
+            "注册裸指令时未提供 command_name 参数，插件加载失败。",
+        )
     else:
         new_command = CommandFilter(command_name, alias, None)
         add_to_event_filters = True
@@ -213,7 +215,9 @@ def register_command_group(
     if isinstance(command_group_name, RegisteringCommandable):
         # 子指令组
         if sub_command is None:
-            logger.warning(f"{command_group_name} 指令组的子指令组 sub_command 未指定")
+            raise ValueError(
+                f"指令组「{command_group_name.parent_group.group_name}」注册子指令组时未提供 sub_command 参数，插件加载失败。",
+            )
         else:
             new_group = CommandGroupFilter(
                 sub_command,
@@ -223,7 +227,9 @@ def register_command_group(
             command_group_name.parent_group.add_sub_command_filter(new_group)
     # 根指令组
     elif command_group_name is None:
-        logger.warning("根指令组的名称未指定")
+        raise ValueError(
+            "注册指令组时未提供 command_group_name 参数，插件加载失败。",
+        )
     else:
         new_group = CommandGroupFilter(command_group_name, alias)
 

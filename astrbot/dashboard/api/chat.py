@@ -9,7 +9,6 @@ from astrbot.dashboard.async_utils import run_maybe_async
 from astrbot.dashboard.responses import error, ok
 from astrbot.dashboard.schemas import (
     ChatMessagePatchRequest,
-    ChatMessageRegenerateRequest,
     ChatSessionBatchDeleteRequest,
     ChatSessionPatchRequest,
     ChatThreadCreateRequest,
@@ -267,31 +266,6 @@ async def update_chat_message(
     )
 
 
-@router.post("/chat/sessions/{session_id}/messages/{message_id}/regenerate")
-async def regenerate_chat_message(
-    session_id: str,
-    message_id: str,
-    request: Request,
-    payload: ChatMessageRegenerateRequest | None = None,
-    auth: AuthContext = Depends(require_chat_scope),
-    service: ChatService = Depends(get_service),
-):
-    body = _model_dict(payload) if payload is not None else {}
-    try:
-        chat_payload = await service.prepare_regenerate_message_payload(
-            auth.username,
-            {"session_id": session_id, "message_id": message_id, **body},
-        )
-    except ChatServiceError as exc:
-        return JSONResponse(error(str(exc)))
-    return await _send_chat(
-        request=request,
-        username=auth.username,
-        service=service,
-        payload=chat_payload,
-    )
-
-
 @router.get("/chat/configs")
 async def chat_configs(
     request: Request,
@@ -493,29 +467,6 @@ async def dashboard_update_message(
 ):
     body = await _json_or_empty(request)
     return await _run(lambda: service.update_message(username, body))
-
-
-@legacy_router.post("/message/regenerate")
-async def dashboard_regenerate_message(
-    request: Request,
-    username: str = Depends(require_dashboard_user),
-    service: ChatService = Depends(get_service),
-):
-    try:
-        payload = (
-            await service.prepare_regenerate_message_payload_from_dashboard_payload(
-                username,
-                await _json_or_empty(request),
-            )
-        )
-    except ChatServiceError as exc:
-        return JSONResponse(error(str(exc)))
-    return await _send_chat(
-        request=request,
-        username=username,
-        service=service,
-        payload=payload,
-    )
 
 
 @legacy_router.post("/thread/create")

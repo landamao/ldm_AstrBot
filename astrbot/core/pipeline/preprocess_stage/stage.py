@@ -8,6 +8,7 @@ from astrbot.core import logger
 from astrbot.core.message.components import Image, Plain, Record, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+from astrbot.core.utils.io import DownloadFileSizeLimitError
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
     ensure_jpeg,
@@ -123,6 +124,10 @@ class PreProcessStage(Stage):
             if isinstance(component, Record):
                 try:
                     original_path = await component.convert_to_file_path()
+                except DownloadFileSizeLimitError as e:
+                    logger.warning(f"语音超过下载上限，已跳过处理: {e}")
+                    continue
+                try:
                     self._track_temp_media(event, original_path)
                     record_path = await ensure_wav(original_path)
                     self._track_temp_media(event, record_path)
@@ -141,6 +146,12 @@ class PreProcessStage(Stage):
                     # Image.convert_to_file_path() prefers url, so keep it aligned.
                     component.url = image_path
                     message_chain[idx] = component
+                except DownloadFileSizeLimitError as e:
+                    # 超过图片下载上限：保留原始 URL，交由 LLM 侧把链接传给模型
+                    logger.info(
+                        "图片超过下载上限，跳过本地化处理，保留原始链接 | %s", e
+                    )
+                    continue
                 except Exception as e:
                     media_ref = component.url or component.file
                     logger.warning(
@@ -156,6 +167,10 @@ class PreProcessStage(Stage):
                     if isinstance(reply_comp, Record):
                         try:
                             original_path = await reply_comp.convert_to_file_path()
+                        except DownloadFileSizeLimitError as e:
+                            logger.warning(f"引用语音超过下载上限，已跳过处理: {e}")
+                            continue
+                        try:
                             self._track_temp_media(event, original_path)
                             record_path = await ensure_wav(original_path)
                             self._track_temp_media(event, record_path)
@@ -176,6 +191,12 @@ class PreProcessStage(Stage):
                             # Image.convert_to_file_path() prefers url, so keep it aligned.
                             reply_comp.url = image_path
                             component.chain[idx] = reply_comp
+                        except DownloadFileSizeLimitError as e:
+                            logger.info(
+                                "引用图片超过下载上限，跳过本地化处理，保留原始链接 | %s",
+                                e,
+                            )
+                            continue
                         except Exception as e:
                             media_ref = reply_comp.url or reply_comp.file
                             logger.warning(

@@ -9,6 +9,7 @@ from .commands import (
     ConversationCommands,
     FlowCommand,
     HelpCommand,
+    ImageCommands,
     LLMCommands,
     NameCommand,
     PersonaCommands,
@@ -27,6 +28,7 @@ class Main(star.Star):
         self.config = config
 
         self.help_c = HelpCommand(self.context)
+        self.image_c = ImageCommands(self.context, config)
         self.llm_c = LLMCommands(self.context, config)
         self.plugin_c = PluginCommands(self.context)
         self.admin_c = AdminCommands(self.context)
@@ -107,6 +109,52 @@ class Main(star.Star):
     async def plugin_help(self, event: AstrMessageEvent, plugin_name: str = "") -> None:
         """获取插件帮助"""
         await self.plugin_c.plugin_help(event, plugin_name)
+
+    @filter.command_group("image")
+    def image(self) -> None:
+        """生图"""
+
+    @image.command("star", alias={"start"})
+    async def image_star(
+        self, event: AstrMessageEvent, prompt: GreedyStr = ""
+    ) -> None:
+        """使用默认生图模型生成图片"""
+        await self.image_c.star(event, prompt)
+
+    @image.command("model")
+    async def image_model(
+        self,
+        event: AstrMessageEvent,
+        model_id: str = "",
+        prompt: GreedyStr = "",
+    ) -> None:
+        """指定生图模型生成图片"""
+        await self.image_c.model(event, model_id, prompt)
+
+    @image.command("stop")
+    async def image_stop(self, event: AstrMessageEvent, task_id: str = "") -> None:
+        """停止生图任务"""
+        await self.image_c.stop(event, task_id)
+
+    @image.command("mlist")
+    async def image_mlist(self, event: AstrMessageEvent) -> None:
+        """列出可用生图模型"""
+        await self.image_c.mlist(event)
+
+    @image.command("tlist")
+    async def image_tlist(self, event: AstrMessageEvent, user_id: str = "") -> None:
+        """列出正在进行的生图任务"""
+        await self.image_c.tlist(event, user_id)
+
+    @image.command("help")
+    async def image_help(self, event: AstrMessageEvent) -> None:
+        """查看生图指令帮助"""
+        await self.image_c.help(event)
+
+    @image.command("*")
+    async def image_fallback(self, event: AstrMessageEvent, cmd: str = "") -> None:
+        """未匹配的生图子指令，发送帮助"""
+        await self.image_c.help(event)
 
     @filter.command("t2i")
     async def t2i(self, event: AstrMessageEvent) -> None:

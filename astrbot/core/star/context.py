@@ -441,7 +441,7 @@ class Context:
             默认生图 Provider，没有可用的生图提供商时返回 None。
         """
         default_id = str(
-            self.provider_manager.provider_settings.get(
+            (self.get_config().get("provider_settings") or {}).get(
                 "default_image_generation_provider_id"
             )
             or ""

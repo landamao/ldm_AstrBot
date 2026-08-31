@@ -16,5 +16,35 @@
         "type": "bool",
         "default": false,
         "hint": "开启后，所有会话都不会触发 LLM 回复，优先级高于单独设置"
+    },
+    "生图设置": {
+        "description": "聊天侧 /image 生图指令限制",
+        "type": "object",
+        "hint": "仅约束 /image 指令，不影响 LLM 生图工具和 ChatUI 生图会话。管理员不受这些限制。",
+        "items": {
+            "仅允许管理员使用": {
+                "type": "bool",
+                "description": "仅允许管理员使用生图指令",
+                "default": true,
+                "hint": "开启后普通用户无法使用 /image 系列指令。"
+            },
+            "生图单任务限制": {
+                "type": "bool",
+                "description": "普通用户同时只允许一个生图任务",
+                "default": true,
+                "hint": "开启后普通用户必须等当前生图结束（成功、失败或停止）才能再发新任务。"
+            },
+            "生图冷却时间": {
+                "type": "int",
+                "description": "普通用户生图冷却时间（秒）",
+                "default": 0,
+                "hint": "与「生图单任务限制」配对：开启时在任务结束（成功、失败或停止）后再计时；关闭时在任务开始时计时。0 表示无冷却。",
+                "slider": {
+                    "min": 0,
+                    "max": 300,
+                    "step": 1
+                }
+            }
+        }
     }
 }

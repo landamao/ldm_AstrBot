@@ -622,6 +622,17 @@ class ConfigProfileService:
             _set_nested_value(config, ("dashboard", "totp", "secret"), "")
             _set_nested_value(config, ("dashboard", "totp", "recovery_code_hash"), "")
 
+        # 值合法性校验：WebUI 端口号（与 CLI conf set 规则一致），不合法直接报错不落盘
+        port = _get_nested_value(config, ("dashboard", "port"))
+        if port is not None:
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                port = -1
+            if not 1 <= port <= 65535:
+                raise ValueError("WebUI 端口号必须是 1-65535 之间的整数")
+            _set_nested_value(config, ("dashboard", "port"), port)
+
         set_pending_totp_secret(None)
         save_config(config, self.acm.confs[config_id], is_core=True)
         if protected_2fa_changed and self.db is not None:

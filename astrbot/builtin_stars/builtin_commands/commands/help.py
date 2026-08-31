@@ -6,6 +6,7 @@ from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core.config.default import VERSION
 from astrbot.core.star import command_management
 from astrbot.core.utils.io import get_dashboard_version
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 
 class HelpCommand:
@@ -58,7 +59,7 @@ class HelpCommand:
                 description = item.get("description") or ""
                 desc_text = f" - {description}" if description else ""
                 indent_prefix = "  " * indent
-                lines.append(f"{indent_prefix}/{effective}{desc_text}")
+                lines.append(f"{indent_prefix}{获取第一个唤醒词()}{effective}{desc_text}")
 
         walk(commands)
         return lines

@@ -11,6 +11,7 @@ from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core.provider.entities import ProviderType
 from astrbot.core.utils.error_redaction import safe_error
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 if TYPE_CHECKING:
     from astrbot.core.provider.provider import Provider
@@ -507,15 +508,15 @@ class ProviderCommands:
                         line += " (当前使用)"
                     parts.append(line + "\n")
 
-            parts.append("\n使用 /provider <序号> 切换 LLM 提供商。")
+            parts.append(f"\n使用 {获取第一个唤醒词()}provider <序号> 切换 LLM 提供商。")
             ret = "".join(parts)
 
             if ttss:
-                ret += "\n使用 /provider tts <序号> 切换 TTS 提供商。"
+                ret += f"\n使用 {获取第一个唤醒词()}provider tts <序号> 切换 TTS 提供商。"
             if stts:
-                ret += "\n使用 /provider stt <序号> 切换 STT 提供商。"
+                ret += f"\n使用 {获取第一个唤醒词()}provider stt <序号> 切换 STT 提供商。"
             if not reachability_check_enabled:
-                ret += "\n已跳过提供商可达性检测，如需检测请使用 /provider test。"
+                ret += f"\n已跳过提供商可达性检测，如需检测请使用 {获取第一个唤醒词()}provider test。"
 
             event.set_result(MessageEventResult().message(ret))
         elif idx == "tts":
@@ -673,7 +674,7 @@ class ProviderCommands:
             curr_model = prov.get_model() or "无"
             parts.append(f"\n当前模型: 「{curr_model}」")
             parts.append(
-                "\nTips: 使用 /model <模型名/编号> 切换模型。输入模型名时可自动跨提供商查找并切换；跨提供商也可使用 /provider 切换。"
+                f"\nTips: 使用 {获取第一个唤醒词()}model <模型名/编号> 切换模型。输入模型名时可自动跨提供商查找并切换；跨提供商也可使用 {获取第一个唤醒词()}provider 切换。"
             )
 
             ret = "".join(parts)
@@ -728,7 +729,7 @@ class ProviderCommands:
 
             parts.append(f"\n当前 Key: {curr_key[:8]}")
             parts.append("\n当前模型: " + prov.get_model())
-            parts.append("\n使用 /key <idx> 切换 Key。")
+            parts.append(f"\n使用 {获取第一个唤醒词()}key <idx> 切换 Key。")
 
             ret = "".join(parts)
             message.set_result(MessageEventResult().message(ret).use_t2i(False))

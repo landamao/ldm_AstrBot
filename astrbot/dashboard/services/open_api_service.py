@@ -435,6 +435,7 @@ class OpenApiService:
             message_accumulator = BotMessageAccumulator()
             agent_stats = {}
             refs = {}
+            last_saved_record = None
             while True:
                 try:
                     result = await asyncio.wait_for(back_queue.get(), timeout=1)
@@ -495,45 +496,70 @@ class OpenApiService:
                         should_save = True
 
                 if should_save:
-                    message_parts_to_save = message_accumulator.build_message_parts(
-                        include_pending_tool_calls=True
-                    )
-                    plain_text = collect_plain_text_from_message_parts(
-                        message_parts_to_save
-                    )
-                    try:
-                        refs = chat_bridge.extract_web_search_refs(
-                            plain_text,
-                            message_parts_to_save,
+                    has_visible = bool(message_accumulator.has_content() or refs)
+                    if not has_visible:
+                        if last_saved_record is not None and last_saved_record.id:
+                            saved_content = (
+                                last_saved_record.content
+                                if isinstance(last_saved_record.content, dict)
+                                else {}
+                            )
+                            updated = dict(saved_content)
+                            if agent_stats:
+                                updated["agent_stats"] = agent_stats
+                            if refs:
+                                updated["refs"] = refs
+                            await chat_bridge.platform_history_mgr.update(
+                                last_saved_record.id,
+                                content=updated,
+                            )
+                            last_saved_record.content = updated
+                        message_accumulator = BotMessageAccumulator()
+                        agent_stats = {}
+                        refs = {}
+                    else:
+                        message_parts_to_save = (
+                            message_accumulator.build_message_parts(
+                                include_pending_tool_calls=True
+                            )
                         )
-                    except Exception as exc:
-                        logger.exception(
-                            f"Open API WS failed to extract web search refs: {exc}",
-                            exc_info=True,
+                        plain_text = collect_plain_text_from_message_parts(
+                            message_parts_to_save
                         )
+                        try:
+                            refs = chat_bridge.extract_web_search_refs(
+                                plain_text,
+                                message_parts_to_save,
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                f"Open API WS failed to extract web search refs: {exc}",
+                                exc_info=True,
+                            )
 
-                    saved_record = await chat_bridge.save_bot_message(
-                        session_id,
-                        message_parts_to_save,
-                        agent_stats,
-                        refs,
-                    )
-                    if saved_record:
-                        await send_json(
-                            {
-                                "type": "message_saved",
-                                "data": {
-                                    "id": saved_record.id,
-                                    "created_at": to_utc_isoformat(
-                                        saved_record.created_at
-                                    ),
-                                },
-                                "session_id": session_id,
-                            }
+                        saved_record = await chat_bridge.save_bot_message(
+                            session_id,
+                            message_parts_to_save,
+                            agent_stats,
+                            refs,
                         )
-                    message_accumulator = BotMessageAccumulator()
-                    agent_stats = {}
-                    refs = {}
+                        if saved_record:
+                            last_saved_record = saved_record
+                            await send_json(
+                                {
+                                    "type": "message_saved",
+                                    "data": {
+                                        "id": saved_record.id,
+                                        "created_at": to_utc_isoformat(
+                                            saved_record.created_at
+                                        ),
+                                    },
+                                    "session_id": session_id,
+                                }
+                            )
+                        message_accumulator = BotMessageAccumulator()
+                        agent_stats = {}
+                        refs = {}
                 if msg_type == "end":
                     break
         except Exception as exc:

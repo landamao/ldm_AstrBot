@@ -102,7 +102,19 @@ class FollowUpTicket:
 
 
 class _ToolExecutionInterrupted(Exception):
-    """Raised when a running tool call is interrupted by a stop request."""
+    """Raised when a running tool call is interrupted because the user actively requested to stop."""
+
+    def __init__(
+        self,
+        message: str = "Tool execution interrupted because the user actively requested to stop.",
+        completed_blocks: list[ToolCallMessageSegment] | None = None,
+        interrupted_tool_call_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        # 中断前已真实执行完成的工具结果（按 tool_call_id 记录），收尾时保留真实结果
+        self.completed_blocks = completed_blocks or []
+        # 被中断的那个工具调用的 ID，收尾时只给它写中断提示
+        self.interrupted_tool_call_id = interrupted_tool_call_id
 
 
 def extract_exception_code(exc: BaseException | None) -> str | None:
@@ -345,6 +357,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self._last_tool_name: str | None = None
         self._last_tool_args: dict[str, T.Any] | None = None
         self._same_tool_streak = 0
+        # 当前正在执行的工具调用 ID（None = 没有工具在执行），供「工具调用期间防打断」判断
+        self._tool_executing: str | None = None
 
         # These two are used for tool schema mode handling
         # We now have two modes:
@@ -902,8 +916,28 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             return
         follow_ups = self._pending_follow_ups
         self._pending_follow_ups = []
+        # 仅显式强制停止（/stop、Dashboard 停止）才丢弃排队消息——stop 的语义是取消一切；
+        # 软打断（新消息打断文本回复）不丢弃，释放后排队消息按到达顺序作为新请求正常处理
+        if self._is_stop_requested():
+            runner_event = getattr(
+                getattr(self.run_context, "context", None), "event", None
+            )
+            force_stop = bool(runner_event.get_extra("agent_force_stop")) if runner_event else False
+            if force_stop:
+                for ticket in follow_ups:
+                    ticket.consumed = True
+                    ticket.resolved.set()
+                logger.info(
+                    f"用户已强制停止，丢弃排队中的 {len(follow_ups)} 条 follow-up 消息。"
+                )
+                return
         for ticket in follow_ups:
             ticket.resolved.set()
+
+    @staticmethod
+    def _format_follow_up_line(idx: int, text: str) -> str:
+        """follow-up 消息注入格式：保持全英文，与 NOTICE 模板语言一致"""
+        return f"Message {idx + 1}: {text}"
 
     def _consume_follow_up_notice(self) -> str:
         if not self._pending_follow_ups:
@@ -914,7 +948,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             ticket.consumed = True
             ticket.resolved.set()
         follow_up_lines = "\n".join(
-            f"{idx}. {ticket.text}" for idx, ticket in enumerate(follow_ups, start=1)
+            self._format_follow_up_line(idx, ticket.text)
+            for idx, ticket in enumerate(follow_ups)
         )
         return self.FOLLOW_UP_NOTICE_TEMPLATE.format(
             follow_up_lines=follow_up_lines,
@@ -1201,8 +1236,13 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                             type=ar_type,
                             data=AgentResponseData(chain=chain),
                         )
-            except _ToolExecutionInterrupted:
-                yield await self._finalize_aborted_step(llm_resp)
+            except _ToolExecutionInterrupted as e:
+                # 带上中断前已完成工具的真实结果，只给真正被中断的工具写提示
+                yield await self._finalize_aborted_step(
+                    llm_resp,
+                    completed_blocks=e.completed_blocks,
+                    interrupted_tool_call_id=e.interrupted_tool_call_id,
+                )
                 return
 
             # 将结果添加到上下文中
@@ -1325,6 +1365,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 func_tool_name,
                 func_tool_args,
             )
+            # 标记当前正在执行的工具调用，供「工具调用期间防打断」判断
+            self._tool_executing = func_tool_id
             yield _HandleFunctionToolsResult.from_message_chain(
                 MessageChain(
                     type="tool_call",
@@ -1413,7 +1455,13 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 )
 
                 _final_resp: CallToolResult | None = None
-                async for resp in self._iter_tool_executor_results(executor):  # type: ignore
+                # 传入已完成结果列表和当前工具 ID：中断异常需要带上它们，
+                # 收尾时才能保留已完成工具的真实结果、只给被中断的工具写提示
+                async for resp in self._iter_tool_executor_results(
+                    executor,
+                    tool_call_result_blocks,
+                    func_tool_id,
+                ):  # type: ignore
                     if isinstance(resp, CallToolResult):
                         res = resp
                         _final_resp = resp
@@ -1574,6 +1622,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 )
                 logger.info(f"Tool `{func_tool_name}` Result: {tool_result_content}")
 
+            # 该工具已执行完毕，清除「工具执行中」标记
+            if self._tool_executing == func_tool_id:
+                self._tool_executing = None
+
         # 处理函数调用响应
         if tool_call_result_blocks:
             yield _HandleFunctionToolsResult.from_tool_call_result_blocks(
@@ -1694,6 +1746,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
     def _is_stop_requested(self) -> bool:
         return self._abort_signal.is_set()
 
+    def is_tool_executing(self) -> bool:
+        """当前是否有工具调用正在执行（供工具防打断判断）。"""
+        return self._tool_executing is not None
+
     def was_aborted(self) -> bool:
         return self._aborted
 
@@ -1703,13 +1759,16 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
     async def _finalize_aborted_step(
         self,
         llm_resp: LLMResponse | None = None,
+        completed_blocks: list[ToolCallMessageSegment] | None = None,
+        interrupted_tool_call_id: str | None = None,
     ) -> AgentResponse:
         """结束被打断的一步。
 
         历史只保留已向用户/下游产出的内容：
         - 流式：已 yield 的 streaming_delta 文本
         - 非流式：若完整回复尚未交付给下游，则不写入 assistant 正文
-        - 工具调用中断时：写入 tool_calls + 中断 tool 结果，让 LLM 知道工具被停止
+        - 工具调用中断时：写入 tool_calls + 工具结果；串行执行下已完成的工具
+          保留真实结果，被中断的工具写中断提示，未执行的工具写未执行提示
         """
         logger.info("Agent execution was requested to stop by user.")
         delivered = (getattr(self, "_streamed_assistant_text", "") or "").strip()
@@ -1762,7 +1821,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         if delivered:
             parts.append(TextPart(text=delivered))
 
-        # 如果有工具调用：写入 tool_calls + 中断 tool 结果，让 LLM 知道工具被停止
+        # 如果有工具调用：写入 tool_calls + 工具结果，让 LLM 知道工具的执行情况
         has_tool_calls = bool(llm_resp.tools_call_name)
         if has_tool_calls:
             # assistant 消息（含 tool_calls）
@@ -1775,19 +1834,41 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     Message(role="assistant", content=None, tool_calls=llm_resp.to_openai_to_calls_model())
                 )
 
-            # 为每个工具调用生成"被中断"的 tool 结果
+            # 串行执行：中断前已完成的工具保留真实结果，只有真正被中断的那个工具
+            # 写中断提示，其余未执行的工具不写（不能所有工具都标成被中断）
+            completed_blocks = completed_blocks or []
+            for block in completed_blocks:
+                self.run_context.messages.append(
+                    Message(
+                        role="tool",
+                        content=block.content,
+                        tool_call_id=block.tool_call_id,
+                    )
+                )
+            handled_ids = {block.tool_call_id for block in completed_blocks}
             tool_call_ids = llm_resp.tools_call_ids or []
             tool_call_names = llm_resp.tools_call_name or []
             for i, call_id in enumerate(tool_call_ids):
+                if call_id in handled_ids:
+                    continue
                 tool_name = tool_call_names[i] if i < len(tool_call_names) else "unknown"
-                interrupted_result = (
-                    f"<system_reminder>"
-                    f"The tool '{tool_name}' was interrupted by a stop request. "
-                    f"The execution was incomplete."
-                    f"</system_reminder>"
-                )
+                if interrupted_tool_call_id and call_id == interrupted_tool_call_id:
+                    # 真正被中断的那个工具：写中断提示
+                    result = (
+                        f"<system_reminder>"
+                        f"The tool '{tool_name}' was interrupted because the user actively requested to stop. "
+                        f"The execution was incomplete."
+                        f"</system_reminder>"
+                    )
+                else:
+                    # 未执行到的工具：写未执行提示（每个 tool_call 都必须有结果，否则历史不完整）
+                    result = (
+                        f"<system_reminder>"
+                        f"The tool '{tool_name}' was not executed because the user actively requested to stop."
+                        f"</system_reminder>"
+                    )
                 self.run_context.messages.append(
-                    Message(role="tool", content=interrupted_result, tool_call_id=call_id)
+                    Message(role="tool", content=result, tool_call_id=call_id)
                 )
         else:
             # 无工具调用：仅当确有已交付正文时才追加 assistant
@@ -1815,6 +1896,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
     async def _iter_tool_executor_results(
         self,
         executor: T.AsyncGenerator[ToolExecutorResultT, None],
+        completed_blocks: list[ToolCallMessageSegment],
+        current_tool_call_id: str,
     ) -> T.AsyncGenerator[ToolExecutorResultT, None]:
         async def _next_executor_result() -> ToolExecutorResultT:
             return await anext(executor)
@@ -1823,7 +1906,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             if self._is_stop_requested():
                 await self._close_executor(executor)
                 raise _ToolExecutionInterrupted(
-                    "Tool execution interrupted before reading the next tool result."
+                    "Tool execution interrupted because the user actively requested to stop, "
+                    "before reading the next tool result.",
+                    completed_blocks=list(completed_blocks),
+                    interrupted_tool_call_id=current_tool_call_id,
                 )
 
             next_result_task = asyncio.create_task(_next_executor_result())
@@ -1843,7 +1929,9 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     await self._close_executor(executor)
 
                     raise _ToolExecutionInterrupted(
-                        "Tool execution interrupted by a stop request."
+                        "Tool execution interrupted because the user actively requested to stop.",
+                        completed_blocks=list(completed_blocks),
+                        interrupted_tool_call_id=current_tool_call_id,
                     )
 
                 try:

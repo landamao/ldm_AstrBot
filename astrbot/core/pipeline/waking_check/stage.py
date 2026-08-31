@@ -10,6 +10,7 @@ from astrbot.core.star.filter.permission import PermissionTypeFilter
 from astrbot.core.star.session_plugin_manager import SessionPluginManager
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 from ..context import PipelineContext
 from ..stage import Stage, register_stage
@@ -193,7 +194,7 @@ class WakingCheckStage(Stage):
                     if (
                         isinstance(filter, CommandGroupFilter)
                         and filter.group_name == "plugin"
-                        and err_text.startswith("参数不足。")
+                        and err_text.startswith("子指令名不存在。")
                     ):
                         from astrbot.builtin_stars.builtin_commands.commands.plugin import (
                             PluginCommands,
@@ -203,6 +204,44 @@ class WakingCheckStage(Stage):
                         await event.send(
                             MessageEventResult().message(help_msg).use_t2i(False),
                         )
+                    elif (
+                        isinstance(filter, CommandGroupFilter)
+                        and filter.group_name == "image"
+                        and err_text.startswith("子指令名不存在。")
+                    ):
+                        from astrbot.builtin_stars.builtin_commands.commands.image import (
+                            NATIVE_PERMISSION_MESSAGE,
+                            ImageCommands,
+                        )
+                        from astrbot.core.star.star import star_registry
+
+                        image_cmds = None
+                        for meta in star_registry:
+                            inst = getattr(meta, "star_cls", None)
+                            image_c = getattr(inst, "image_c", None)
+                            if isinstance(image_c, ImageCommands):
+                                image_cmds = image_c
+                                break
+                        if image_cmds and image_cmds.admin_only() and not event.is_admin():
+                            await event.send(
+                                MessageChain().message(
+                                    NATIVE_PERMISSION_MESSAGE.format(
+                                        sender_id=event.get_sender_id(),
+                                    ),
+                                ),
+                            )
+                            logger.info(
+                                "触发 /image 时, 用户(ID=%s) 权限不足。",
+                                event.get_sender_id(),
+                            )
+                        else:
+                            await event.send(
+                                MessageEventResult()
+                                .message(
+                                    f"插件 {star_map[handler.handler_module_path].name}: {err_text}",
+                                )
+                                .use_markdown(False),
+                            )
                     else:
                         plugin_name = star_map[handler.handler_module_path].name
                         await event.send(
@@ -223,7 +262,7 @@ class WakingCheckStage(Stage):
                     if self.no_permission_reply:
                         await event.send(
                             MessageChain().message(
-                                f"您(ID: {event.get_sender_id()})的权限不足以使用此指令。通过 /sid 获取 ID 并请管理员添加。",
+                                f"您(ID: {event.get_sender_id()})的权限不足以使用此指令。通过 {获取第一个唤醒词()}sid 获取 ID 并请管理员添加。",
                             ),
                         )
                     logger.info(

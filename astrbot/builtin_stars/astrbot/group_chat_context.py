@@ -29,7 +29,8 @@ from astrbot.api.platform import MessageType
 from astrbot.api.provider import Provider, ProviderRequest
 from astrbot.core.agent.message import TextPart
 from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
-from astrbot.core.utils.media_utils import file_uri_to_path
+from astrbot.core.utils.io import DownloadFileSizeLimitError
+from astrbot.core.utils.media_utils import file_uri_to_path, get_auto_download_max_bytes
 
 """
 Group chat context awareness.
@@ -115,6 +116,12 @@ class GroupChatContext:
         ar_possibility = active_reply["possibility_reply"]
         ar_prompt = active_reply.get("prompt", "")
         ar_whitelist = active_reply.get("whitelist", [])
+        try:
+            image_caption_max_size_mb = float(
+                group_context_cfg.get("image_caption_max_size_mb", 0)
+            )
+        except (TypeError, ValueError):
+            image_caption_max_size_mb = 0.0
         return {
             "group_message_max_cnt": _positive_int(
                 group_context_cfg.get(
@@ -130,6 +137,7 @@ class GroupChatContext:
             "image_caption_min_interval": image_caption_min_interval,
             "image_caption_lazy": image_caption_lazy,
             "image_caption_concurrency": image_caption_concurrency,
+            "image_caption_max_size_mb": image_caption_max_size_mb,
             "enable_active_reply": enable_active_reply,
             "ar_method": ar_method,
             "ar_possibility": ar_possibility,
@@ -197,15 +205,27 @@ class GroupChatContext:
         while len(self._caption_cache) > _CAPTION_CACHE_MAX:
             self._caption_cache.popitem(last=False)
 
-    async def _calc_image_md5(self, image_url: str) -> str | None:
-        """下载/读取图片字节并计算 MD5；失败返回 None。"""
+    async def _calc_image_md5(
+        self, image_url: str, cfg: dict | None = None
+    ) -> str | None:
+        """下载/读取图片字节并计算 MD5；失败或超过图片下载上限返回 None。"""
         try:
             # 已是本地路径时直接读，避免再走 MediaResolver 产生新临时文件
             path = image_url
             if path.startswith("file://"):
                 path = file_uri_to_path(path)
             if not (path and Path(path).is_file()):
-                path = await Image(file=image_url).convert_to_file_path()
+                max_bytes = self._image_caption_max_bytes(cfg)
+                if max_bytes:
+                    # 图片下载走群聊上下文感知的大小上限
+                    from astrbot.core.utils.media_utils import MediaResolver
+
+                    path = await MediaResolver(
+                        image_url,
+                        media_type="image",
+                    ).to_path(max_bytes=max_bytes)
+                else:
+                    path = await Image(file=image_url).convert_to_file_path()
             # 分块读，避免超大图占满内存
             h = hashlib.md5()
             with open(path, "rb") as f:
@@ -215,9 +235,25 @@ class GroupChatContext:
                         break
                     h.update(chunk)
             return h.hexdigest()
+        except DownloadFileSizeLimitError as e:
+            logger.info(f"群聊上下文:自动理解图片:超过下载上限 | 跳过转述 | {e}")
+            return None
         except Exception as e:
             logger.warning(f"群聊上下文:自动理解图片:计算MD5失败 | {e}")
             return None
+
+    @staticmethod
+    def _image_caption_max_bytes(cfg: dict | None) -> int | None:
+        """从 cfg 读取图片下载上限（MB→字节），0/无效 = 不限制。"""
+        if not cfg:
+            return None
+        try:
+            max_mb = float(cfg.get("image_caption_max_size_mb", 0))
+        except (TypeError, ValueError):
+            return None
+        if max_mb <= 0:
+            return None
+        return int(max_mb * 1024 * 1024)
 
     async def get_image_caption(
         self,
@@ -261,7 +297,11 @@ class GroupChatContext:
         预计算md5：上游已算好时传入，避免重复读盘。
         记入md5：在途失败递归重试时传 False，避免同一张图双计 md5。
         """
-        md5 = 预计算md5 if 预计算md5 is not None else await self._calc_image_md5(image_url)
+        md5 = (
+            预计算md5
+            if 预计算md5 is not None
+            else await self._calc_image_md5(image_url, cfg)
+        )
         fut: asyncio.Future | None = None
         if md5:
             if 统计 is not None and 记入md5:
@@ -388,7 +428,7 @@ class GroupChatContext:
 
         if md5_jobs:
             md5_results = await asyncio.gather(
-                *[self._calc_image_md5(url) for _, url in md5_jobs]
+                *[self._calc_image_md5(url, cfg) for _, url in md5_jobs]
             )
             for (token, _), md5 in zip(md5_jobs, md5_results):
                 token_md5[token] = md5

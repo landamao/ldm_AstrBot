@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import inspect
 import re
 import types
 import typing
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from astrbot.core.config import AstrBotConfig
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
@@ -10,6 +12,9 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from ..star_handler import StarHandlerMetadata
 from . import HandlerFilter
 from .custom_filter import CustomFilter
+
+if TYPE_CHECKING:
+    from .command_group import CommandGroupFilter
 
 
 class GreedyStr(str):
@@ -44,6 +49,9 @@ class CommandFilter(HandlerFilter):
         self.parent_command_names = (
             parent_command_names if parent_command_names is not None else [""]
         )
+        # 所属指令组引用。仅当本过滤器是兜底子指令（command_name == "*"）时由
+        # CommandGroupFilter.add_sub_command_filter 设置，用于未匹配时处理。
+        self.parent_group: CommandGroupFilter | None = None
         # 处理器参数的默认值，仅当用户缺省该参数时用于填充
         self.handler_param_defaults: dict[str, Any] = {}
         if handler_md:
@@ -232,6 +240,18 @@ class CommandFilter(HandlerFilter):
                 return True
         return False
 
+    def matches(self, message_str: str) -> bool:
+        """判断消息字符串是否命中本指令（指令名 + 参数形式）。"""
+        for full_cmd in self.get_complete_command_names():
+            if message_str.startswith(f"{full_cmd} ") or message_str == full_cmd:
+                return True
+        return False
+
+    @property
+    def is_fallback(self) -> bool:
+        """是否为兜底子指令（指令名为 *，表示组内其他子指令未匹配时处理）。"""
+        return self.command_name == "*"
+
     def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
         if not event.is_at_or_wake_command:
             return False
@@ -241,13 +261,38 @@ class CommandFilter(HandlerFilter):
 
         # 检查是否以指令开头
         message_str = re.sub(r"\s+", " ", event.get_message_str().strip())
-        ok = False
-        for full_cmd in self.get_complete_command_names():
-            if message_str.startswith(f"{full_cmd} ") or message_str == full_cmd:
-                ok = True
-                message_str = message_str[len(full_cmd) :].strip()
-        if not ok:
-            return False
+
+        if self.command_name == "*":
+            # 兜底子指令：组前缀命中、非纯组名、且组内其他子指令（含子指令组）都没有匹配时才生效
+            if not self.parent_group:
+                return False
+            if self.parent_group.equals(message_str):
+                return False
+            if not self.parent_group.startswith(message_str):
+                return False
+            from .command_group import CommandGroupFilter  # 局部导入防循环引用
+
+            for sub in self.parent_group.sub_command_filters:
+                if sub is self:
+                    continue
+                if isinstance(sub, CommandGroupFilter):
+                    if sub.startswith(message_str):
+                        return False
+                elif sub.matches(message_str):
+                    return False
+            # 剥离组名，剩余部分作为参数解析
+            for full_cmd in self.parent_group.get_complete_command_names():
+                if message_str.startswith(f"{full_cmd} ") or message_str == full_cmd:
+                    message_str = message_str[len(full_cmd) :].strip()
+                    break
+        else:
+            ok = False
+            for full_cmd in self.get_complete_command_names():
+                if message_str.startswith(f"{full_cmd} ") or message_str == full_cmd:
+                    ok = True
+                    message_str = message_str[len(full_cmd) :].strip()
+            if not ok:
+                return False
 
         # 分割为列表
         ls = message_str.split(" ")

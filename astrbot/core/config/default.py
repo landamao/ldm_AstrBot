@@ -129,12 +129,25 @@ DEFAULT_CONFIG = {
         "ignore_bot_self_message": False,
         "ignore_at_all": False,
         "interrupt_reply": {
-            "enable": False,
+            "enable": True,
             "enable_private": True,
-            "enable_group": True,
-            "notify_user": True,
+            "enable_group": False,
+            "notify_user": False,
             "notify_text": "已打断当前回复，开始处理新消息。",
-            "wait_timeout": 8.0,
+            "tool_interrupt_protect": True,
+            "wait_timeout": 3.0,
+        },
+        # 自动下载大小限制：媒体按类型限制下载，超限/失败时把 URL 传给 LLM 兜底。
+        "auto_download_limits": {
+            "enable": True,
+            # 普通文件/视频上限（MB），0 表示不限制
+            "max_file_mb": 20.0,
+            # 图片上限（MB），0 表示不限制
+            "max_image_mb": 10.0,
+            # 语音上限（MB），0 表示不限制
+            "max_audio_mb": 10.0,
+            # 其他类型（兜底）上限（MB），0 表示不限制
+            "max_other_mb": 10.0,
         },
     },
     "provider_sources": [],  # provider sources
@@ -276,6 +289,8 @@ DEFAULT_CONFIG = {
         "image_caption_lazy": True,
         # 延迟/即时转述时的 VLM 并发上限（相同 MD5 会复用转述结果）。
         "image_caption_concurrency": 2,
+        # 群聊上下文自动理解图片的下载大小上限（MB），0 表示不限制。
+        "image_caption_max_size_mb": 10.0,
         "group_message_history_enable": False,
         "group_message_history_max_cnt": 700,
         "active_reply": {
@@ -347,12 +362,12 @@ DEFAULT_CONFIG = {
     "log_level": "INFO",
     "log_hide_conf_platform": False,
     "log_file_enable": False,
-    "log_file_path": "logs/astrbot.log",
+    "log_file_path": "logs/ldmbot.log",
     "log_file_max_mb": 20,
     "temp_dir_max_size": 1024,
     "trace_enable": False,
     "trace_log_enable": False,
-    "trace_log_path": "logs/astrbot.trace.log",
+    "trace_log_path": "logs/ldmbot.trace.log",
     "trace_log_max_mb": 20,
     "pip_install_arg": "",
     "pypi_index_url": "https://mirrors.aliyun.com/pypi/simple/",
@@ -1127,9 +1142,18 @@ CONFIG_METADATA_2 = {
                             "enable_group": {"type": "bool"},
                             "notify_user": {"type": "bool"},
                             "notify_text": {"type": "string"},
-                            "add_to_context": {"type": "bool"},
-                            "context_text": {"type": "string"},
+                            "tool_interrupt_protect": {"type": "bool"},
                             "wait_timeout": {"type": "float"},
+                        },
+                    },
+                    "auto_download_limits": {
+                        "type": "object",
+                        "items": {
+                            "enable": {"type": "bool"},
+                            "max_file_mb": {"type": "float"},
+                            "max_image_mb": {"type": "float"},
+                            "max_audio_mb": {"type": "float"},
+                            "max_other_mb": {"type": "float"},
                         },
                     },
                     "segmented_reply": {
@@ -1274,7 +1298,7 @@ CONFIG_METADATA_2 = {
                 "type": "list",
                 # provider sources templates
                 "config_template": {
-                    "OpenAI Compatible": {
+                    "OpenAI 兼容": {
                         "id": "openai",
                         "provider": "openai",
                         "type": "openai_chat_completion",
@@ -3298,6 +3322,9 @@ CONFIG_METADATA_2 = {
                     "image_caption_concurrency": {
                         "type": "int",
                     },
+                    "image_caption_max_size_mb": {
+                        "type": "float",
+                    },
                     "image_caption_prompt": {
                         "type": "string",
                     },
@@ -3558,7 +3585,7 @@ CONFIG_METADATA_3 = {
                         "description": "默认生图模型",
                         "type": "string",
                         "_special": "select_provider_image_generation",
-                        "hint": "全局默认生图模型：LLM 生图工具、ChatUI 生图会话等未手动指定模型时使用；留空则用第一个可用的生图模型。",
+                        "hint": "全局默认生图模型：LLM 生图工具、ChatUI 生图会话、/image 指令等未手动指定模型时使用；留空则用第一个可用的生图模型。",
                     },
                     "provider_stt_settings.enable": {
                         "description": "启用语音转文本",
@@ -4339,6 +4366,53 @@ CONFIG_METADATA_3 = {
                     },
                 },
             },
+            "auto_download_limits": {
+                "description": "文件下载限制",
+                "type": "object",
+                "items": {
+                    "platform_settings.auto_download_limits.enable": {
+                        "description": "启用文件下载限制",
+                        "type": "bool",
+                        "hint": "启用后，媒体消息自动下载会按类型限制大小，超过上限的文件不再下载，改为把下载链接传给模型。只有唤醒 LLM 的消息才会触发自动下载。",
+                    },
+                    "platform_settings.auto_download_limits.max_file_mb": {
+                        "description": "文件/视频上限 (MB)",
+                        "type": "float",
+                        "hint": "普通文件与视频自动下载的最大大小，超过后不下载、把链接传给模型。0 表示不限制。",
+                        "condition": {
+                            "platform_settings.auto_download_limits.enable": True,
+                        },
+                        "slider": {"min": 0, "max": 100, "step": 0.1},
+                    },
+                    "platform_settings.auto_download_limits.max_image_mb": {
+                        "description": "图片上限 (MB)",
+                        "type": "float",
+                        "hint": "图片自动下载的最大大小，超过后不下载、把链接传给模型。0 表示不限制。",
+                        "condition": {
+                            "platform_settings.auto_download_limits.enable": True,
+                        },
+                        "slider": {"min": 0, "max": 100, "step": 0.1},
+                    },
+                    "platform_settings.auto_download_limits.max_audio_mb": {
+                        "description": "语音上限 (MB)",
+                        "type": "float",
+                        "hint": "语音自动下载的最大大小，超过后不下载、把链接传给模型。0 表示不限制。",
+                        "condition": {
+                            "platform_settings.auto_download_limits.enable": True,
+                        },
+                        "slider": {"min": 0, "max": 100, "step": 0.1},
+                    },
+                    "platform_settings.auto_download_limits.max_other_mb": {
+                        "description": "其他类型上限 (MB)",
+                        "type": "float",
+                        "hint": "未明确分类的媒体自动下载的最大大小。0 表示不限制。",
+                        "condition": {
+                            "platform_settings.auto_download_limits.enable": True,
+                        },
+                        "slider": {"min": 0, "max": 100, "step": 0.1},
+                    },
+                },
+            },
             "content_safety": {
                 "description": "内容安全",
                 "type": "object",
@@ -4773,6 +4847,14 @@ CONFIG_METADATA_3 = {
                             "platform_settings.interrupt_reply.notify_user": True,
                         },
                     },
+                    "platform_settings.interrupt_reply.tool_interrupt_protect": {
+                        "description": "工具调用期间防打断",
+                        "type": "bool",
+                        "hint": "开启后，当前任务正在执行工具调用时不打断，防止误操作。开启「输出函数调用状态」时会提示用户稍后回复，否则静默放入队列。",
+                        "condition": {
+                            "platform_settings.interrupt_reply.enable": True,
+                        },
+                    },
                     "platform_settings.interrupt_reply.wait_timeout": {
                         "description": "等待旧任务结束超时（秒）",
                         "type": "float",
@@ -4850,6 +4932,16 @@ CONFIG_METADATA_3 = {
                         "description": "图片转述并发数",
                         "type": "int",
                         "hint": "唤醒 LLM 时批量转述图片的最大并发请求数。建议 1-4。相同 MD5 图片会复用，不重复请求。",
+                        "condition": {
+                            "provider_ltm_settings.group_icl_enable": True,
+                            "provider_ltm_settings.image_caption": True,
+                        },
+                    },
+                    "provider_ltm_settings.image_caption_max_size_mb": {
+                        "description": "图片下载大小上限 (MB)",
+                        "type": "float",
+                        "hint": "自动理解图片时下载图片的最大大小，超过后跳过该图的转述。0 表示不限制。",
+                        "slider": {"min": 0, "max": 100, "step": 0.1},
                         "condition": {
                             "provider_ltm_settings.group_icl_enable": True,
                             "provider_ltm_settings.image_caption": True,
@@ -4969,6 +5061,11 @@ CONFIG_METADATA_3_SYSTEM = {
                         "type": "bool",
                         "hint": "关闭时忽略 X-Forwarded-For/X-Real-IP，仅使用连接地址。",
                     },
+                    "dashboard.port": {
+                        "description": "WebUI 端口号",
+                        "type": "int",
+                        "hint": "WebUI 服务监听的端口，默认 6185，范围 1-65535。修改后需重启 ldm 生效；若设置了环境变量 LDMBOT_DASHBOARD_PORT，则环境变量优先生效。",
+                    },
                     "dashboard.auth_rate_limit.enable": {
                         "description": "启用登录验证速率限制",
                         "type": "bool",
@@ -5018,7 +5115,7 @@ CONFIG_METADATA_3_SYSTEM = {
                     "log_file_path": {
                         "description": "日志文件路径",
                         "type": "string",
-                        "hint": "相对路径以 data 目录为基准，例如 logs/astrbot.log；支持绝对路径。",
+                        "hint": "相对路径以 data 目录为基准，例如 logs/ldmbot.log；支持绝对路径。",
                     },
                     "log_file_max_mb": {
                         "description": "日志文件大小上限 (MB)",
@@ -5038,7 +5135,7 @@ CONFIG_METADATA_3_SYSTEM = {
                     "trace_log_path": {
                         "description": "Trace 日志文件路径",
                         "type": "string",
-                        "hint": "相对路径以 data 目录为基准，例如 logs/astrbot.trace.log；支持绝对路径。",
+                        "hint": "相对路径以 data 目录为基准，例如 logs/ldmbot.trace.log；支持绝对路径。",
                     },
                     "trace_log_max_mb": {
                         "description": "Trace 日志大小上限 (MB)",

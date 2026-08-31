@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
+from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 if TYPE_CHECKING:
     from astrbot.core.db.po import Persona
@@ -71,7 +72,7 @@ class PersonaCommands:
             if conv is None:
                 message.set_result(
                     MessageEventResult().message(
-                        "当前对话不存在，请先使用 /new 新建一个对话。",
+                        f"当前对话不存在，请先使用 {获取第一个唤醒词()}new 新建一个对话。",
                     ),
                 )
                 return
@@ -104,15 +105,16 @@ class PersonaCommands:
             curr_cid_title += f"({cid[:4]})"
 
         if len(l) == 1:
+            前缀 = 获取第一个唤醒词()
             message.set_result(
                 MessageEventResult()
                 .message(
                     f"""[Persona]
 
-- 人格情景列表: `/persona list`
-- 设置人格情景: `/persona 人格`
-- 人格情景详细信息: `/persona view 人格`
-- 取消人格: `/persona unset`
+- 人格情景列表: `{前缀}persona list`
+- 设置人格情景: `{前缀}persona 人格`
+- 人格情景详细信息: `{前缀}persona view 人格`
+- 取消人格: `{前缀}persona unset`
 
 默认人格情景: {default_persona["name"]}
 当前对话 {curr_cid_title} 的人格情景: {curr_persona_name}
@@ -144,8 +146,8 @@ class PersonaCommands:
             # 统计信息
             total_count = len(all_personas)
             lines.append(f"\n共 {total_count} 个人格")
-            lines.append("\n*使用 `/persona <人格名>` 设置人格")
-            lines.append("*使用 `/persona view <人格名>` 查看详细信息")
+            lines.append(f"\n*使用 `{获取第一个唤醒词()}persona <人格名>` 设置人格")
+            lines.append(f"*使用 `{获取第一个唤醒词()}persona view <人格名>` 查看详细信息")
 
             msg = "\n".join(lines)
             message.set_result(MessageEventResult().message(msg).use_t2i(False))
@@ -182,7 +184,7 @@ class PersonaCommands:
             if not cid:
                 message.set_result(
                     MessageEventResult().message(
-                        "当前没有对话，请先开始对话或使用 /new 创建一个对话。",
+                        f"当前没有对话，请先开始对话或使用 {获取第一个唤醒词()}new 创建一个对话。",
                     ),
                 )
                 return
@@ -205,12 +207,12 @@ class PersonaCommands:
 
                 message.set_result(
                     MessageEventResult().message(
-                        f"设置成功。如果您正在切换到不同的人格，请注意使用 /reset 来清空上下文，防止原人格对话影响现人格。{force_warn_msg}",
+                        f"设置成功。如果您正在切换到不同的人格，请注意使用 {获取第一个唤醒词()}reset 来清空上下文，防止原人格对话影响现人格。{force_warn_msg}",
                     ),
                 )
             else:
                 message.set_result(
                     MessageEventResult().message(
-                        "不存在该人格情景。使用 /persona list 查看所有。",
+                        f"不存在该人格情景。使用 {获取第一个唤醒词()}persona list 查看所有。",
                     ),
                 )

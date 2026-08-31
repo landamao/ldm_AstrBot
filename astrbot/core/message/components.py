@@ -866,7 +866,11 @@ class File(BaseMessageComponent):
         else:
             filename = f"fileseg_{uuid.uuid4().hex}"
         file_path = download_dir / filename
-        await download_file(self.url, str(file_path))
+        await download_file(
+            self.url,
+            str(file_path),
+            max_bytes=get_auto_download_max_bytes("file"),
+        )
         self.file_ = str(file_path.resolve())
 
     async def register_to_file_service(self) -> str:

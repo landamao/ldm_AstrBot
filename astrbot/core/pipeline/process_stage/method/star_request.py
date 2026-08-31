@@ -11,6 +11,7 @@ from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, StarHandlerMetadata
 
 from ...context import PipelineContext, call_event_hook, call_handler
+from ...context_utils import notify_event_stopped
 from ..stage import Stage
 
 
@@ -49,6 +50,7 @@ class StarRequestSubStage(Stage):
                 async for ret in wrapper:
                     yield ret
                 if event.is_stopped():
+                    await notify_event_stopped(event, md, handler.handler_name)
                     break
                 event.clear_result()  # 清除上一个 handler 的结果
             except Exception as e:

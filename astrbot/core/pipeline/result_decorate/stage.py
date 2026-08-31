@@ -183,8 +183,12 @@ class ResultDecorateStage(Stage):
                 logger.error(traceback.format_exc())
 
             if event.is_stopped():
-                logger.info(
-                    f"{star_map[handler.handler_module_path].name} - {handler.handler_name} 终止了事件传播。",
+                from ..context_utils import notify_event_stopped
+
+                await notify_event_stopped(
+                    event,
+                    star_map.get(handler.handler_module_path),
+                    handler.handler_name,
                 )
                 return
 
