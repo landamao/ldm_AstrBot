@@ -266,6 +266,24 @@ async def update_chat_message(
     )
 
 
+@router.post("/chat/sessions/{session_id}/messages/delete")
+async def delete_chat_messages(
+    session_id: str,
+    payload: dict,
+    auth: AuthContext = Depends(require_chat_scope),
+    service: ChatService = Depends(get_service),
+):
+    """批量删除选中的消息（选中用户消息时连带删除该轮全部记录）。"""
+    data = payload if isinstance(payload, dict) else {}
+    return await _run(
+        lambda: service.delete_messages(
+            auth.username,
+            session_id,
+            data.get("message_ids") or [],
+        )
+    )
+
+
 @router.get("/chat/configs")
 async def chat_configs(
     request: Request,

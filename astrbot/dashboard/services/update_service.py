@@ -26,16 +26,16 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_data_path,
     get_astrbot_temp_path,
 )
+from astrbot.core.utils.update_rollback import (
+    clear_dir_contents,
+    get_rollback_dir,
+    list_backups,
+    rollback,
+)
 from astrbot.core.utils.github_proxy import (
     log_github_proxy_usage,
     resolve_github_proxy,
     normalize_ldm_mirror,
-)
-from astrbot.core.utils.io import (
-    download_dashboard as _download_dashboard,
-)
-from astrbot.core.utils.io import (
-    extract_dashboard as _extract_dashboard,
 )
 from astrbot.core.utils.io import (
     get_dashboard_version as _get_dashboard_version,
@@ -43,26 +43,7 @@ from astrbot.core.utils.io import (
 
 DEMO_MODE = _DEMO_MODE
 pip_installer = _pip_installer
-download_dashboard = _download_dashboard
-extract_dashboard = _extract_dashboard
 get_dashboard_version = _get_dashboard_version
-
-
-async def call_download_dashboard(*args, **kwargs):
-    """兼容旧调用：不再从官方源下载面板。
-
-    实际 WebUI 同步由 AstrBotUpdator 从 landamao/ldm_AstrBot 源码包完成。
-    """
-    logger.info(
-        "跳过官方 download_dashboard；WebUI 将从 ldm_AstrBot 源码包同步。"
-    )
-    return None
-
-
-async def call_extract_dashboard(*args, **kwargs):
-    """兼容旧调用：解压逻辑已并入 apply_update_package。"""
-    logger.info("跳过官方 extract_dashboard；WebUI 解压由 ldm 更新器处理。")
-    return None
 
 
 async def call_get_dashboard_version(*args, **kwargs):
@@ -94,8 +75,6 @@ class UpdateService:
         astrbot_updator: AstrBotUpdator,
         core_lifecycle: AstrBotCoreLifecycle,
         *,
-        download_dashboard_func: Callable[..., Awaitable[Any]],
-        extract_dashboard_func: Callable[..., Any],
         get_dashboard_version_func: Callable[..., Awaitable[str | None]],
         pip_install_func: Callable[..., Awaitable[Any]],
         demo_mode: bool,
@@ -103,14 +82,15 @@ class UpdateService:
     ) -> None:
         self.astrbot_updator = astrbot_updator
         self.core_lifecycle = core_lifecycle
-        self.download_dashboard = download_dashboard_func
-        self.extract_dashboard = extract_dashboard_func
         self.get_dashboard_version = get_dashboard_version_func
         self.pip_install = pip_install_func
         self.demo_mode = demo_mode
         self.clear_site_data_headers = clear_site_data_headers
         self.update_progress: dict[str, dict] = {}
         self._update_tasks: dict[str, asyncio.Task] = {}
+        # 核心更新互斥标记：更新后台任务执行期间为 True，
+        # 防止前端状态复位后重复请求产生多个并发更新任务（多标签页/双击竞态兜底）
+        self._core_update_running = False
 
     def get_update_progress(self, progress_id: str) -> UpdateServiceResult:
         if not progress_id:
@@ -131,13 +111,6 @@ class UpdateService:
     ) -> UpdateServiceResult:
         try:
             dashboard_version = await self.get_dashboard_version()
-            if update_type == "dashboard":
-                return UpdateServiceResult(
-                    data={
-                        "has_new_version": dashboard_version != f"v{VERSION}",
-                        "current_version": dashboard_version,
-                    }
-                )
             try:
                 update_result = await self.astrbot_updator.check_update(
                     None,
@@ -241,6 +214,25 @@ class UpdateService:
                 source="请求参数" if explicit else ("服务端配置" if proxy else "无"),
             )
 
+        # 全局互斥：已有核心更新在后台执行时拒绝新任务（progress_id 不同也拦截），
+        # 报错给前端弹「已有更新任务正在进行」toast
+        if self._core_update_running:
+            running = [
+                progress
+                for progress in self.update_progress.values()
+                if progress.get("status") == "running"
+            ]
+            target_desc = (
+                running[0].get("version") or "latest"
+                if running
+                else "未知版本"
+            )
+            logger.warning(
+                f"拒绝重复更新请求（目标: {version or 'latest'}），"
+                f"已有更新任务正在执行（目标: {target_desc}）"
+            )
+            raise UpdateServiceError("已有更新任务正在进行中")
+
         existing_task = self._update_tasks.get(progress_id)
         if existing_task and not existing_task.done():
             return UpdateServiceResult(
@@ -250,6 +242,7 @@ class UpdateService:
             )
 
         self._init_update_progress(progress_id, version)
+        self._core_update_running = True
         task = asyncio.create_task(
             self._run_update_project(
                 progress_id, version, latest, reboot, proxy, mirror_url
@@ -431,31 +424,8 @@ class UpdateService:
             )
             logger.error(f"/api/update_project: {traceback.format_exc()}")
             logger.debug(f"Update task failed: {exc!s}")
-
-    async def update_dashboard(
-        self, mirror_url: str = ""
-    ) -> UpdateServiceResult:
-        """仅从 landamao/ldm_AstrBot 同步 WebUI（目标目录跟随 --webui-dir，默认 data/dist）。"""
-        try:
-            applied = await self.astrbot_updator.apply_webui_only_from_package(
-                latest=True,
-                version=None,
-                proxy="",
-                mirror_url=normalize_ldm_mirror(mirror_url),
-            )
-            if not applied:
-                raise UpdateServiceError(
-                    "ldm_AstrBot 更新包中未找到可用的 dashboard/dist 或 data/dist。"
-                )
-            return UpdateServiceResult(
-                message="WebUI 已从 landamao/ldm_AstrBot 同步。刷新页面即可应用。",
-                headers=self.clear_site_data_headers,
-            )
-        except UpdateServiceError:
-            raise
-        except Exception as exc:
-            logger.error(f"/api/update_dashboard: {traceback.format_exc()}")
-            raise UpdateServiceError(exc.__str__()) from exc
+        finally:
+            self._core_update_running = False
 
     async def install_pip_package(self, data: object) -> UpdateServiceResult:
         """禁用 WebUI 任意 pip 安装；核心更新时的 requirements 安装走独立路径。"""
@@ -464,6 +434,97 @@ class UpdateService:
             message="已禁用 WebUI 任意 pip 安装；请通过项目更新流程安装 requirements。",
             headers={},
         )
+
+    async def list_rollback_backups(self) -> UpdateServiceResult:
+        """列出回滚备份 zip（版本号、大小、备份时间，最新在前）。"""
+        backups = await asyncio.to_thread(list_backups, str(get_astrbot_data_path()))
+        items = []
+        for zip_path in backups:
+            stat = zip_path.stat()
+            items.append(
+                {
+                    "version": zip_path.stem.removeprefix("ldmbot_"),
+                    "filename": zip_path.name,
+                    "size": stat.st_size,
+                    "mtime": int(stat.st_mtime),
+                }
+            )
+        return UpdateServiceResult(
+            data={
+                "backups": items,
+                "rollback_dir": str(
+                    get_rollback_dir(str(get_astrbot_data_path()))
+                ),
+            }
+        )
+
+    async def rollback_to_version(self, data: object) -> UpdateServiceResult:
+        """回滚到指定版本备份（默认最近一次），成功后自动全量重启。"""
+        if is_desktop_managed_backend():
+            raise UpdateServiceError(
+                DESKTOP_MANAGED_RESTART_MESSAGE,
+                code="desktop_managed",
+            )
+        if self._core_update_running:
+            raise UpdateServiceError("已有更新任务正在进行中，请稍后再试。")
+        if self.demo_mode:
+            raise UpdateServiceError(DEMO_MODE)
+
+        payload = data if isinstance(data, dict) else {}
+        version = str(payload.get("version", "")).strip()
+
+        logger.info(f"WebUI 发起版本回滚: {version or '最近一次备份'}")
+        ok = await asyncio.to_thread(
+            rollback,
+            version or None,
+            None,  # project_root 用模块默认（源码根）
+            self.astrbot_updator._resolve_webui_dir(),
+            str(get_astrbot_data_path()),
+        )
+        if not ok:
+            raise UpdateServiceError(
+                "回滚失败，请查看服务端日志（常见原因：找不到备份或备份文件损坏）。"
+            )
+
+        message = "回滚成功，ldm 将在 2 秒内全量重启以应用旧版本代码。"
+        logger.info(f"版本回滚完成: {version or '最近一次备份'}，准备重启。")
+        self._schedule_restart()
+        return UpdateServiceResult(
+            message=message,
+            headers=self.clear_site_data_headers,
+        )
+
+    async def clear_rollback_backups(self, data: object) -> UpdateServiceResult:
+        """清理回滚备份目录：只删 ldmbot_*.zip 备份，保留目录与说明.txt。"""
+        if is_desktop_managed_backend():
+            raise UpdateServiceError(
+                DESKTOP_MANAGED_RESTART_MESSAGE,
+                code="desktop_managed",
+            )
+        payload = data if isinstance(data, dict) else {}
+        only_version = str(payload.get("version", "")).strip()
+
+        rollback_dir = get_rollback_dir(str(get_astrbot_data_path()))
+        if only_version:
+            target = rollback_dir / f"ldmbot_{only_version}.zip"
+            if not target.is_file():
+                raise UpdateServiceError(f"找不到版本 {only_version} 的回滚备份。")
+            await asyncio.to_thread(target.unlink)
+            logger.info(f"已删除回滚备份: {target.name}")
+            return UpdateServiceResult(message=f"已删除版本 {only_version} 的回滚备份。")
+
+        # 全部清理：逐个删 zip（不整目录清空，保留说明.txt）
+        backups = await asyncio.to_thread(list_backups, str(get_astrbot_data_path()))
+        removed = 0
+        for zip_path in backups:
+            try:
+                await asyncio.to_thread(zip_path.unlink)
+                removed += 1
+            except OSError as exc:
+                logger.warning(f"删除回滚备份 {zip_path.name} 失败: {exc}")
+
+        logger.info(f"已清理回滚备份 {removed} 个。")
+        return UpdateServiceResult(message=f"已清理 {removed} 个回滚备份。")
 
     # 上传压缩包校验所需的一级文件/目录
     _上传校验_根文件 = {"main.py"}
@@ -665,24 +726,34 @@ class UpdateService:
         if not zip_path.is_file():
             raise UpdateServiceError("上传的压缩包文件已过期，请重新上传。")
 
-        # 应用更新包
-        await asyncio.to_thread(
-            self.astrbot_updator.apply_update_package,
-            zip_path,
-        )
+        # 全局互斥：核心更新进行中不允许再应用上传包（同一份源码树，并发应用会互相覆盖）
+        if self._core_update_running:
+            raise UpdateServiceError(
+                "已有核心更新任务正在进行中"
+            )
 
-        # 更新依赖
-        logger.info("正在更新依赖（来自上传压缩包）...")
+        self._core_update_running = True
         try:
-            await self.pip_install(requirements_path="requirements.txt")
-        except Exception as exc:
-            logger.error(f"更新依赖失败: {exc}")
+            # 应用更新包
+            await asyncio.to_thread(
+                self.astrbot_updator.apply_update_package,
+                zip_path,
+            )
 
-        # 清理临时目录
-        try:
-            zip_path.parent.rmdir()
-        except Exception:
-            pass
+            # 更新依赖
+            logger.info("正在更新依赖（来自上传压缩包）...")
+            try:
+                await self.pip_install(requirements_path="requirements.txt")
+            except Exception as exc:
+                logger.error(f"更新依赖失败: {exc}")
+
+            # 清理临时目录
+            try:
+                zip_path.parent.rmdir()
+            except Exception:
+                pass
+        finally:
+            self._core_update_running = False
 
         if reboot:
             message = "上传压缩包更新成功，ldm 将在重启后应用新的代码。"

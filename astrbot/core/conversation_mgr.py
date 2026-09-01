@@ -165,9 +165,26 @@ class ConversationManager:
         await self.db.delete_conversations_by_user_id(user_id=unified_msg_origin)
         self.session_conversations.pop(unified_msg_origin, None)
         await sp.session_remove(unified_msg_origin, "sel_conv_id")
+        await self._cleanup_umo_residue(unified_msg_origin)
 
         # 触发会话删除回调（级联清理）
         await self._trigger_session_deleted(unified_msg_origin)
+
+    async def _cleanup_umo_residue(self, unified_msg_origin: str) -> None:
+        """清理该 UMO 的残留数据：昵称记录与其余偏好设置。
+
+        对话数据全删后，umo_aliases 的昵称残留会让该 UMO 继续出现在
+        WebUI「自定义规则-添加规则」等下拉里干扰操作；preference 里
+        该 UMO 的其他键（如 persona_id 等运行痕迹）一并清掉。
+        """
+        try:
+            await self.db.delete_umo_aliases([unified_msg_origin])
+            await sp.clear_async("umo", unified_msg_origin)
+        except Exception:
+            astrbot_logger.warning(
+                f"清理 UMO 残留数据失败: {unified_msg_origin}",
+                exc_info=True,
+            )
 
     async def get_curr_conversation_id(self, unified_msg_origin: str) -> str | None:
         """获取会话当前的对话 ID

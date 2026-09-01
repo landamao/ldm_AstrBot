@@ -2055,6 +2055,19 @@ class SQLiteDatabase(BaseDatabase):
             result = await session.execute(query)
             return list(result.scalars().all())
 
+    async def delete_umo_aliases(self, umos: list[str]) -> int:
+        """Delete alias metadata for the given UMOs. Returns deleted row count."""
+        if not umos:
+            return 0
+
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                result = await session.execute(
+                    delete(UmoAlias).where(col(UmoAlias.umo).in_(umos)),
+                )
+                return result.rowcount or 0
+
     # ====
     # ChatUI Project Management
     # ====

@@ -16,7 +16,7 @@ class AboutCommand:
         ldm = info["ldm"]
         version = ldm["version"]
         webui_version = ldm["webui_version"] or "未知"
-        version_header = f"ldm v{version}(WebUI: {webui_version})"
+        version_header = f"ldm v{version}（WebUI: {webui_version}）"
 
         ret = (
             f"{version_header}\n"
@@ -25,13 +25,15 @@ class AboutCommand:
             f"  Python: {system['python']}\n"
             f"ldm 信息:\n"
             f"  主程序版本: v{version}\n"
-            f"  WebUI 版本: {webui_version}\n"
+            f"  WebUI版本: {webui_version}\n"
             f"  启动目录: {ldm['startup_dir']}\n"
             f"  启动命令: {ldm['startup_command']}\n"
             f"  启动时间: {ldm['startup_time']}\n"
             f"  已运行时长: {ldm['uptime']}\n"
+            f"  WebUI目录: {ldm['webui_dir']}\n"
             f"  数据目录: {ldm['data_dir']}\n"
-            f"  WebUI 目录: {ldm['webui_dir']}\n"
+            f"  插件目录: {ldm['plugin_dir']}\n"
+            f"  插件数据目录: {ldm['plugin_data_dir']}\n"
             f"  备份目录: {ldm['backup_dir']}\n"
             f"  版本回滚目录: {ldm['rollback_dir']}\n"
             f"项目地址: {info['project_url']}\n"

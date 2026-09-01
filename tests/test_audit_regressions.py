@@ -23,14 +23,22 @@ def test_gemini_计时模块已导入():
 
 def test_webchat不会吞掉取消异常():
     语法树 = _读取语法树("dashboard/services/chat_service.py")
-    捕获基类异常 = [
-        节点
-        for 节点 in ast.walk(语法树)
-        if isinstance(节点, ast.ExceptHandler)
-        and isinstance(节点.type, ast.Name)
-        and 节点.type.id == "BaseException"
-    ]
-    assert not 捕获基类异常, "WebChat 流式处理不能吞掉 CancelledError"
+    吞掉取消的捕获 = []
+    for 节点 in ast.walk(语法树):
+        if not (
+            isinstance(节点, ast.ExceptHandler)
+            and isinstance(节点.type, ast.Name)
+            and 节点.type.id == "BaseException"
+        ):
+            continue
+        # handler 体内有裸 raise（清理后原样重抛）不算吞，只拦真正吞掉异常的写法
+        有裸重抛 = any(
+            isinstance(子节点, ast.Raise) and 子节点.exc is None and 子节点.cause is None
+            for 子节点 in ast.walk(节点)
+        )
+        if not 有裸重抛:
+            吞掉取消的捕获.append(节点)
+    assert not 吞掉取消的捕获, "WebChat 流式处理不能吞掉 CancelledError（except BaseException 必须原样重抛）"
 
 
 def test_微信输入状态finally不返回():

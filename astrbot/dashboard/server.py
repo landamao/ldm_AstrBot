@@ -16,19 +16,12 @@ from hypercorn.asyncio import serve
 from hypercorn.config import Config as HyperConfig
 from hypercorn.logging import AccessLogAtoms
 from hypercorn.logging import Logger as HypercornLogger
-
-from astrbot.core import logger
 from astrbot.core.config.default import VERSION
+from astrbot.core import logger
+from astrbot.core.dashboard_assets import resolve_dashboard_dist
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
 from astrbot.core.db import BaseDatabase
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-from astrbot.core.utils.io import (
-    get_bundled_dashboard_dist_path,
-    get_dashboard_dist_version,
-    get_local_ip_addresses,
-    is_dashboard_dist_compatible,
-    should_use_bundled_dashboard_dist,
-)
+from astrbot.core.utils.io import get_local_ip_addresses
 from astrbot.dashboard.asgi_runtime import (
     DashboardRequestState,
     FastAPIAppAdapter,
@@ -189,46 +182,19 @@ class AstrBotDashboard:
         self.config = core_lifecycle.astrbot_config
         self.db = db
 
-        # Path priority:
-        # 1. Explicit webui_dir argument
-        # 2. data/dist/ when it matches the core version
-        # 3. astrbot/dashboard/dist/ when it matches the core version
-        if webui_dir and os.path.exists(webui_dir):
-            self.data_path = os.path.abspath(webui_dir)
-        else:
-            user_dist = os.path.join(get_astrbot_data_path(), "dist")
-            bundled_dist = get_bundled_dashboard_dist_path()
-            user_version = get_dashboard_dist_version(user_dist)
-            if os.path.exists(user_dist) and is_dashboard_dist_compatible(
-                user_dist,
-                VERSION,
-            ):
-                self.data_path = os.path.abspath(user_dist)
-            elif should_use_bundled_dashboard_dist(
-                user_dist,
-                VERSION,
-            ) or is_dashboard_dist_compatible(bundled_dist, VERSION):
-                self.data_path = str(bundled_dist)
-                logger.info("使用随包 WebUI 资源: %s", self.data_path)
-            elif (
-                os.path.exists(user_dist) and (Path(user_dist) / "index.html").is_file()
-            ):
-                logger.warning(
-                    "WebUI 版本与核心不匹配（当前 %s，期望 v%s），仍回退使用现有 data/dist。"
-                    "在匹配版本的 WebUI 可用前，部分管理面板功能可能异常。",
-                    user_version,
-                    VERSION,
-                )
-                self.data_path = os.path.abspath(user_dist)
-            elif os.path.exists(user_dist):
-                logger.warning(
-                    "data/dist 的 WebUI 文件不完整（核心版本 v%s），已忽略。",
-                    VERSION,
-                )
-                self.data_path = None
-            else:
-                # Fall back to expected user path (will fail gracefully later)
-                self.data_path = os.path.abspath(user_dist)
+        # Path priority（统一委托 resolve_dashboard_dist）:
+        # 1. 显式指定的 webui_dir 参数（存在即用）
+        # 2. 项目根 dashboard/dist（源码内置，优先）
+        # 3. 随包 astrbot/dashboard/dist
+        # 4. data/dist（历史遗留，仅作最后回退）
+        if webui_dir and not os.path.exists(webui_dir):
+            logger.warning(
+                "指定的 WebUI 目录不存在: %s，将使用默认解析逻辑。",
+                webui_dir,
+            )
+            webui_dir = None
+        resolved_dist = resolve_dashboard_dist(webui_dir)
+        self.data_path = str(resolved_dist) if resolved_dist is not None else None
 
         self._rate_limiter_registry = _RateLimiterRegistry()
         self._init_jwt_secret()

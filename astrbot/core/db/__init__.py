@@ -859,6 +859,11 @@ class BaseDatabase(abc.ABC):
         """Get alias metadata, optionally restricted to the given UMO list."""
         ...
 
+    @abc.abstractmethod
+    async def delete_umo_aliases(self, umos: list[str]) -> int:
+        """Delete alias metadata for the given UMOs. Returns deleted row count."""
+        ...
+
     # ====
     # ChatUI Project Management
     # ====

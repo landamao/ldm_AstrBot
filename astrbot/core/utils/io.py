@@ -520,63 +520,20 @@ def should_use_bundled_dashboard_dist(
 async def get_dashboard_version():
     """Return the effective WebUI version for the current runtime.
 
+    与运行时解析同一优先级（委托 resolve_dashboard_dist）：
+    显式目录 > 项目根 dashboard/dist > 随包 > data/dist。
+
     Returns:
-        The matching data/dist version, matching bundled version, or the raw
-        data/dist version when no compatible bundled WebUI is available.
+        The version declared by the resolved WebUI dist, or None when
+        no usable dist is found.
     """
 
-    from astrbot.core.config.default import VERSION
+    from astrbot.core.dashboard_assets import resolve_dashboard_dist
 
-    # First check user data directory (manually updated / downloaded dashboard).
-    dist_dir = os.path.join(get_astrbot_data_path(), "dist")
-    if os.path.exists(dist_dir):
-        user_version = get_dashboard_dist_version(dist_dir)
-        if is_dashboard_dist_compatible(dist_dir, VERSION):
-            return user_version
-
-        bundled = get_bundled_dashboard_dist_path()
-        if is_dashboard_dist_compatible(bundled, VERSION):
-            return get_dashboard_dist_version(bundled)
-        return user_version
-
-    bundled = get_bundled_dashboard_dist_path()
-    if is_dashboard_dist_compatible(bundled, VERSION):
-        return get_dashboard_dist_version(bundled)
-    return None
-
-
-async def download_dashboard(
-    path: str | None = None,
-    extract_path: str = "data",
-    latest: bool = True,
-    version: str | None = None,
-    proxy: str | None = None,
-    progress_callback=None,
-    extract: bool = True,
-    allow_insecure_ssl_fallback: bool = True,
-) -> None:
-    """从 landamao/ldm_AstrBot 同步 WebUI（不再走官方 soulter 源）。
-
-    注意：完整项目更新请走 UpdateService / AstrBotUpdator。
-    本函数主要用于兼容旧调用点（CLI、指令等）。
-    """
-    from astrbot.core.updator import AstrBotUpdator
-
-    logger.info("通过 ldm_AstrBot 更新器同步 WebUI（download_dashboard 兼容入口）。")
-    updator = AstrBotUpdator()
-    applied = await updator.apply_webui_only_from_package(
-        latest=latest,
-        version=version,
-        proxy=proxy or "",
-        progress_callback=progress_callback,
-    )
-    if not applied:
-        raise RuntimeError(
-            "ldm_AstrBot 更新包中未找到可用的 dashboard/dist 或 data/dist。"
-        )
-    # extract 参数保留兼容：apply_webui_only_from_package 已直接写入 data/dist
-    _ = (path, extract_path, extract, allow_insecure_ssl_fallback)
-    return None
+    resolved = resolve_dashboard_dist()
+    if resolved is None:
+        return None
+    return get_dashboard_dist_version(resolved)
 
 
 def extract_dashboard(zip_path: str | Path, extract_path: str | Path = "data") -> None:

@@ -74,8 +74,10 @@ def _service_error(exc: UpdateServiceError) -> JSONResponse:
             },
             status_code=200,
         )
+    # 业务错误（UpdateServiceError）的 message 是面向用户的中文文案，
+    # 原样透传给前端做 toast 提示（与配置校验报错同一链路）
     return JSONResponse(
-        {"status": "error", "message": "An internal error has occurred.", "data": None},
+        {"status": "error", "message": str(exc), "data": None},
         status_code=200,
     )
 
@@ -182,24 +184,81 @@ async def update_dashboard_core(
     return await _run(lambda: service.update_project(_model_dict(payload)))
 
 
-@router.post("/updates/dashboard")
-async def update_dashboard(
-    payload: UpdateRequest | None = None,
+@router.get("/updates/rollback-backups")
+async def list_rollback_backups(
     _auth: AuthContext = Depends(require_system_scope),
     service: UpdateService = Depends(get_service),
 ):
-    mirror_url = _model_dict(payload).get("mirror_url", "") if payload else ""
-    return await _run(lambda: service.update_dashboard(mirror_url=mirror_url))
+    """列出回滚备份（版本号、大小、备份时间，最新在前）。"""
+    return await _run(lambda: service.list_rollback_backups())
 
 
-@legacy_router.post("/dashboard")
-async def update_dashboard_assets(
-    payload: UpdateRequest | None = None,
+@legacy_router.get("/rollback-backups")
+async def list_rollback_backups_legacy(
     _username: str = Depends(require_dashboard_user),
     service: UpdateService = Depends(get_service),
 ):
-    mirror_url = _model_dict(payload).get("mirror_url", "") if payload else ""
-    return await _run(lambda: service.update_dashboard(mirror_url=mirror_url))
+    return await _run(lambda: service.list_rollback_backups())
+
+
+@router.post("/updates/rollback")
+async def rollback_to_backup(
+    payload: dict,
+    _auth: AuthContext = Depends(require_system_scope),
+    service: UpdateService = Depends(get_service),
+):
+    """回滚到指定版本备份（version 为空 = 最近一次），成功后自动全量重启。"""
+    try:
+        result = await service.rollback_to_version(
+            payload if isinstance(payload, dict) else {}
+        )
+        return _service_response(result)
+    except UpdateServiceError as exc:
+        return _service_error(exc)
+
+
+@legacy_router.post("/rollback")
+async def rollback_to_backup_legacy(
+    payload: dict,
+    _username: str = Depends(require_dashboard_user),
+    service: UpdateService = Depends(get_service),
+):
+    try:
+        result = await service.rollback_to_version(payload if isinstance(payload, dict) else {})
+        return _service_response(result)
+    except UpdateServiceError as exc:
+        return _service_error(exc)
+
+
+@router.post("/updates/rollback-backups/clear")
+async def clear_rollback_backups(
+    payload: dict,
+    _auth: AuthContext = Depends(require_system_scope),
+    service: UpdateService = Depends(get_service),
+):
+    """清理回滚备份：version 为空 = 清全部 zip；带 version = 只删该版本。"""
+    try:
+        result = await service.clear_rollback_backups(
+            payload if isinstance(payload, dict) else {}
+        )
+        return _service_response(result)
+    except UpdateServiceError as exc:
+        return _service_error(exc)
+
+
+@legacy_router.post("/rollback-backups/clear")
+async def clear_rollback_backups_legacy(
+    payload: dict,
+    _username: str = Depends(require_dashboard_user),
+    service: UpdateService = Depends(get_service),
+):
+    try:
+        result = await service.clear_rollback_backups(
+            payload if isinstance(payload, dict) else {}
+        )
+        return _service_response(result)
+    except UpdateServiceError as exc:
+        return _service_error(exc)
 
 
 @router.post("/pip/install")

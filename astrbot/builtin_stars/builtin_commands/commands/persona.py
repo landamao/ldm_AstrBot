@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
+from astrbot.core import sp
 from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 if TYPE_CHECKING:
@@ -62,6 +63,18 @@ class PersonaCommands:
         )
         force_applied_persona_id = None
 
+        # 会话服务配置（自定义规则），set/unset 时若有规则人格则直接改规则
+        session_service_config = (
+            await sp.get_async(
+                scope="umo",
+                scope_id=umo,
+                key="session_service_config",
+                default={},
+            )
+            or {}
+        )
+        force_applied_persona_id = session_service_config.get("persona_id") or None
+
         curr_cid_title = "无"
         if cid:
             conv = await self.context.conversation_manager.get_conversation(
@@ -81,10 +94,11 @@ class PersonaCommands:
                 "provider_settings",
                 {},
             )
+            # 规则里的 force_applied_persona_id 已在方法开头读取，无需覆盖
             (
                 persona_id,
                 _,
-                force_applied_persona_id,
+                _,
                 _,
             ) = await self.context.persona_manager.resolve_selected_persona(
                 umo=umo,
@@ -169,6 +183,21 @@ class PersonaCommands:
                 msg = f"人格{ps}不存在"
             message.set_result(MessageEventResult().message(msg))
         elif l[1] == "unset":
+            if force_applied_persona_id:
+                # 自定义规则强制了人格 → 从规则里移除（其余字段保留）
+                session_service_config.pop("persona_id", None)
+                await sp.put_async(
+                    "umo",
+                    umo,
+                    "session_service_config",
+                    session_service_config,
+                )
+                message.set_result(
+                    MessageEventResult()
+                    .message("已从自定义规则移除人格强制，恢复按对话/默认人格生效。")
+                    .use_t2i(False),
+                )
+                return
             if not cid:
                 message.set_result(
                     MessageEventResult().message("当前没有对话，无法取消人格。"),
@@ -181,13 +210,6 @@ class PersonaCommands:
             message.set_result(MessageEventResult().message("取消人格成功。"))
         else:
             ps = "".join(l[1:]).strip()
-            if not cid:
-                message.set_result(
-                    MessageEventResult().message(
-                        f"当前没有对话，请先开始对话或使用 {获取第一个唤醒词()}new 创建一个对话。",
-                    ),
-                )
-                return
             if persona := next(
                 builtins.filter(
                     lambda persona: persona["name"] == ps,
@@ -195,19 +217,37 @@ class PersonaCommands:
                 ),
                 None,
             ):
+                if force_applied_persona_id:
+                    # 自定义规则强制了人格 → 直接改规则值，实时生效
+                    session_service_config["persona_id"] = ps
+                    await sp.put_async(
+                        "umo",
+                        umo,
+                        "session_service_config",
+                        session_service_config,
+                    )
+                    message.set_result(
+                        MessageEventResult()
+                        .message(
+                            f"已将自定义规则的人格设为「{ps}」，立即生效。如需清空上下文请注意使用 {获取第一个唤醒词()}reset。",
+                        )
+                        .use_t2i(False),
+                    )
+                    return
+                if not cid:
+                    message.set_result(
+                        MessageEventResult().message(
+                            f"当前没有对话，请先开始对话或使用 {获取第一个唤醒词()}new 创建一个对话。",
+                        ),
+                    )
+                    return
                 await self.context.conversation_manager.update_conversation_persona_id(
                     message.unified_msg_origin,
                     ps,
                 )
-                force_warn_msg = ""
-                if force_applied_persona_id:
-                    force_warn_msg = (
-                        "提醒：由于自定义规则，您现在切换的人格将不会生效。"
-                    )
-
                 message.set_result(
                     MessageEventResult().message(
-                        f"设置成功。如果您正在切换到不同的人格，请注意使用 {获取第一个唤醒词()}reset 来清空上下文，防止原人格对话影响现人格。{force_warn_msg}",
+                        f"设置成功。如果您正在切换到不同的人格，请注意使用 {获取第一个唤醒词()}reset 来清空上下文，防止原人格对话影响现人格。",
                     ),
                 )
             else:

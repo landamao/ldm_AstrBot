@@ -30,7 +30,7 @@ async def check_dashboard(astrbot_root: Path) -> None:
     from .version_comparator import VersionComparator
 
     # If the wheel ships bundled dashboard assets, no network download is needed.
-    if _BUNDLED_DIST.exists():
+    if _BUNDLED_DIST.exists() or (astrbot_root / "dashboard" / "dist").exists():
         click.echo("Dashboard is bundled with the package – skipping download.")
         return
 
@@ -39,7 +39,8 @@ async def check_dashboard(astrbot_root: Path) -> None:
         match dashboard_version:
             case None:
                 click.echo(
-                    "Dashboard is not installed. 已禁用 WebUI 自动下载；请手动构建 dashboard 并复制到 data/dist。"
+                    "Dashboard is not installed. 已禁用 WebUI 自动下载；"
+                    "请构建 dashboard 并部署到项目根 dashboard/dist，或重新安装 ldm（安装包自带 WebUI）。"
                 )
                 return
 
@@ -48,11 +49,13 @@ async def check_dashboard(astrbot_root: Path) -> None:
                     click.echo("Dashboard is already up to date")
                     return
                 click.echo(
-                    f"Dashboard version: {dashboard_version}. 已禁用 WebUI 自动下载/覆盖，请手动更新 data/dist。"
+                    f"Dashboard version: {dashboard_version}. 已禁用 WebUI 自动下载/覆盖，"
+                    "请重新构建 dashboard 并部署到项目根 dashboard/dist。"
                 )
                 return
     except FileNotFoundError:
         click.echo(
-            "Dashboard directory is missing. 已禁用 WebUI 自动下载；请手动构建 dashboard 并复制到 data/dist。"
+            "Dashboard directory is missing. 已禁用 WebUI 自动下载；"
+            "请构建 dashboard 并部署到项目根 dashboard/dist，或重新安装 ldm（安装包自带 WebUI）。"
         )
         return

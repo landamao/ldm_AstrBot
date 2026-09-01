@@ -1977,9 +1977,17 @@ class ChatService:
         )
         skip_user_history = bool(post_data.get("_skip_user_history"))
         saved_user_record = None
-
+        # 重试清理成功时：用户消息已被保留（只换 checkpoint），复用不新插
+        if new_checkpoint_from_truncate is not None:
+            saved_user_record = await self.db.get_platform_message_history_by_id(
+                truncate_user_message_id
+            )
+            if saved_user_record is None:
+                raise ChatServiceError(
+                    f"User message {truncate_user_message_id} not found"
+                )
         message_parts_for_storage = strip_message_parts_path_fields(message_parts)
-        if not skip_user_history:
+        if not skip_user_history and saved_user_record is None:
             saved_user_record = await self.platform_history_mgr.insert(
                 platform_id=platform_history_id,
                 user_id=webchat_conv_id,
@@ -2723,6 +2731,125 @@ class ChatService:
         return await self.update_session_display_name(
             username, session_id, display_name
         )
+
+    async def delete_messages(
+        self,
+        username: str,
+        session_id: str,
+        message_ids: list,
+    ) -> dict:
+        """批量删除会话中选中的消息（ChatUI 多选删除）。
+
+        - 只删 platform 记录 + 关联 threads + thread 会话；
+        - 选中含用户消息 → 该轮整轮连带删除（bot 回复一起删），
+          并把该轮从 conversation history（LLM 上下文）中移除，
+          AI 不再记得被删内容；
+        - 只选中 bot 消息 → 只删平台记录，LLM 上下文不动。
+        """
+        if not session_id:
+            raise ChatServiceError("Missing key: session_id")
+        if not message_ids or not isinstance(message_ids, list):
+            raise ChatServiceError("Missing or invalid key: message_ids")
+
+        try:
+            target_ids = {int(mid) for mid in message_ids}
+        except (TypeError, ValueError) as exc:
+            raise ChatServiceError("Invalid message_ids") from exc
+
+        session = await self.db.get_platform_session_by_id(session_id)
+        if not session:
+            raise ChatServiceError(f"Session {session_id} not found")
+        if session.creator != username:
+            raise ChatServiceError("Permission denied")
+
+        history_list = await self.get_sorted_platform_history(session)
+        if not history_list:
+            raise ChatServiceError("Session has no messages")
+
+        # 校验全部消息都属于该会话
+        id_to_record = {
+            item.id: item
+            for item in history_list
+            if item.id is not None
+        }
+        missing = target_ids - set(id_to_record.keys())
+        if missing:
+            raise ChatServiceError(
+                f"Message not found in this session: {sorted(missing)[0]}"
+            )
+
+        # 轮次展开：选中用户消息 → 连带该轮全部记录（用户消息与其后的 bot 回复）
+        delete_ids: set[int] = set()
+        turn_user_records: list = []
+        current_turn_ids: set[int] = set()
+        current_turn_user: object | None = None
+        for item in history_list:
+            content = item.content if isinstance(item.content, dict) else {}
+            is_user = content.get("type") == "user"
+            if is_user:
+                # 遇到新用户消息 = 开启新一轮，先结算上一轮
+                if current_turn_user is not None and current_turn_user.id in target_ids:
+                    delete_ids |= current_turn_ids
+                    turn_user_records.append(current_turn_user)
+                current_turn_ids = set()
+                current_turn_user = item if item.id is not None else None
+                if item.id is not None:
+                    current_turn_ids.add(item.id)
+                continue
+            # 非 user 记录归属当前轮
+            if item.id is not None:
+                current_turn_ids.add(item.id)
+        # 结算最后一轮
+        if current_turn_user is not None and current_turn_user.id in target_ids:
+            delete_ids |= current_turn_ids
+            turn_user_records.append(current_turn_user)
+
+        # 只选中 bot 消息：不展开轮次，直接删
+        delete_ids |= target_ids
+
+        # threads：被删记录挂在父消息上的分支一并删
+        thread_ids = await self.db.delete_webchat_threads_by_parent_message_ids(
+            session_id,
+            list(delete_ids),
+        )
+        await self.delete_threads_by_ids(thread_ids, username)
+
+        # 删平台记录
+        for message_id in delete_ids:
+            await self.platform_history_mgr.delete_by_id(message_id)
+
+        # LLM 上下文：删掉的轮次从 conversation history 中整轮移除
+        removed_turns = len(turn_user_records)
+        if turn_user_records:
+            conversation_id, conv_history = (
+                await self.load_current_conversation_history(session)
+            )
+            if conversation_id and conv_history:
+                kept = conv_history
+                for user_record in turn_user_records:
+                    checkpoint_id = user_record.llm_checkpoint_id
+                    if not checkpoint_id:
+                        continue
+                    turn_range = find_turn_range(kept, checkpoint_id)
+                    if not turn_range:
+                        continue
+                    start, end = turn_range
+                    kept = kept[:start] + kept[end + 1 :]
+                await self.conv_mgr.update_conversation(
+                    unified_msg_origin=build_webchat_unified_msg_origin(session),
+                    conversation_id=conversation_id,
+                    history=kept,
+                )
+
+        await self.db.update_platform_session(session_id=session_id)
+        logger.info(
+            f"用户 {username} 在会话 {session_id} 删除了 {len(delete_ids)} 条消息"
+            f"（含 {removed_turns} 个完整轮次，关联分支 {len(thread_ids)} 个）。"
+        )
+        return {
+            "deleted": len(delete_ids),
+            "removed_turns": removed_turns,
+        }
 
     @staticmethod
     def _dashboard_payload(payload: object) -> dict:

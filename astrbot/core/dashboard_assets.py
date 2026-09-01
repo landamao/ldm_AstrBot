@@ -12,6 +12,7 @@ from astrbot.core.utils.version_comparator import VersionComparator
 
 __all__ = [
     "get_dashboard_version",
+    "get_project_dist_path",
     "resolve_dashboard_dist",
 ]
 
@@ -30,7 +31,7 @@ def _read_dashboard_version(dist_dir: str | Path) -> str | None:
         if version_file.exists():
             return version_file.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("Failed to read WebUI version from %s: %s", version_file, exc)
+        logger.warning("读取 WebUI 版本文件失败（%s）: %s", version_file, exc)
     return None
 
 
@@ -131,58 +132,85 @@ def _should_use_bundled_dist(user_dist: str | Path, current_version: str) -> boo
     return not _is_version_compatible(user_version, current_version)
 
 
+def get_project_dist_path() -> Path:
+    """Return the WebUI dist under the project root (dashboard/dist).
+
+    WebUI 本质是源码的一部分，随源码树走，不依赖 data 目录，
+    避免不同启动参数的 data 目录导致 WebUI 失效。
+    """
+    return Path(get_astrbot_path()) / "dashboard" / "dist"
+
+
 def resolve_dashboard_dist(webui_dir: str | Path | None = None) -> Path | None:
     """Select the Dashboard dist that should be served.
+
+    解析优先级（唯一权威解析器，main.py / server.py / io.py 均委托到这里）：
+    1. 显式指定的 --webui-dir / LDMBOT_WEBUI_DIR 目录（存在即用，不校验版本）
+    2. 项目根 dashboard/dist（源码内置 WebUI，版本兼容即用）
+    3. 随包 astrbot/dashboard/dist（wheel 安装场景）
+    4. data/dist（历史遗留位置，仅作最后回退，兼容旧部署）
 
     Args:
         webui_dir: Optional explicitly configured Dashboard directory.
 
     Returns:
-        Explicit, managed, bundled, or stale fallback dist in priority order;
-        None when an existing managed dist is incomplete.
+        Selected dist directory; None only when data/dist 遗留目录不完整。
     """
     explicit_dist = Path(webui_dir).absolute() if webui_dir else None
     if explicit_dist is not None and explicit_dist.exists():
         if not _is_dist_compatible(explicit_dist, VERSION):
             explicit_version = _read_dashboard_version(explicit_dist) or "unknown"
             logger.warning(
-                "Serving the explicitly configured WebUI directory even though it "
-                "does not declare a version matching core: %s, expected v%s (%s). "
-                "Some dashboard features may not work until matching assets are "
-                "available.",
+                "显式指定的 WebUI 目录版本与核心不匹配，仍将使用该目录: "
+                "目录版本 %s，核心期望 v%s（%s）。"
+                "在匹配的资源可用前，部分面板功能可能异常。",
                 explicit_version,
                 VERSION,
                 explicit_dist,
             )
         return explicit_dist
 
-    user_dist = Path(get_astrbot_data_path()) / "dist"
+    project_dist = get_project_dist_path()
     bundled_dist = _get_bundled_dist_path()
+    if project_dist != bundled_dist:
+        # 源码树运行：优先用源码内构建产物 dashboard/dist
+        if _is_dist_compatible(project_dist, VERSION):
+            return project_dist.absolute()
+        if project_dist.exists() and (project_dist / "index.html").is_file():
+            logger.warning(
+                "使用项目根 dashboard/dist，但其版本与核心不匹配（当前 %s，期望 v%s）。"
+                "请重新构建 dashboard 并部署到 dashboard/dist，或重新安装 ldm（安装包自带匹配版本的 WebUI）。",
+                _read_dashboard_version(project_dist) or "未知",
+                VERSION,
+            )
+            return project_dist.absolute()
+
+    # wheel 安装 / 兜底：随包 WebUI
+    if _is_dist_compatible(bundled_dist, VERSION):
+        logger.info("使用随包 WebUI 目录: %s", bundled_dist)
+        return bundled_dist
+
+    # 历史遗留：data/dist 仅作最后回退
+    user_dist = Path(get_astrbot_data_path()) / "dist"
     user_version = _read_dashboard_version(user_dist)
     if user_dist.exists() and _is_dist_compatible(user_dist, VERSION):
+        logger.info("使用历史遗留的 data/dist WebUI: %s", user_dist)
         return user_dist.absolute()
-    if _should_use_bundled_dist(user_dist, VERSION) or _is_dist_compatible(
-        bundled_dist,
-        VERSION,
-    ):
-        logger.info("Using bundled dashboard dist: %s", bundled_dist)
-        return bundled_dist
     if user_dist.exists() and (user_dist / "index.html").is_file():
         logger.warning(
-            "Using existing data/dist as a fallback even though WebUI version "
-            "mismatches core: %s, expected v%s. Some dashboard features may not "
-            "work until matching assets are available.",
-            user_version,
+            "回退使用历史遗留的 data/dist，但其版本与核心不匹配（当前 %s，期望 v%s）。"
+            "建议重新构建 dashboard 并部署到项目根 dashboard/dist，或重新安装 ldm（安装包自带匹配版本的 WebUI）。",
+            user_version or "未知",
             VERSION,
         )
         return user_dist.absolute()
     if user_dist.exists():
         logger.warning(
-            "Ignoring data/dist because WebUI files are incomplete for core v%s.",
+            "忽略 data/dist：WebUI 文件不完整，无法匹配核心 v%s。",
             VERSION,
         )
         return None
-    return user_dist.absolute()
+    return None
 
 
 async def get_dashboard_version(
@@ -191,8 +219,8 @@ async def get_dashboard_version(
     """Return the version of explicit or currently effective Dashboard assets.
 
     Args:
-        dist_dir: Optional Dashboard dist directory. When omitted, the managed
-            and bundled assets are inspected in runtime priority order.
+        dist_dir: Optional Dashboard dist directory. When omitted, resolved
+            via resolve_dashboard_dist（与运行时同一优先级）.
 
     Returns:
         Version declared by the selected assets, or None when it cannot be read.
@@ -200,20 +228,10 @@ async def get_dashboard_version(
     if dist_dir is not None:
         return _read_dashboard_version(dist_dir)
 
-    user_dist = Path(get_astrbot_data_path()) / "dist"
-    if user_dist.exists():
-        user_version = _read_dashboard_version(user_dist)
-        if _is_dist_compatible(user_dist, VERSION):
-            return user_version
-        bundled_dist = _get_bundled_dist_path()
-        if _is_dist_compatible(bundled_dist, VERSION):
-            return _read_dashboard_version(bundled_dist)
-        return user_version
-
-    bundled_dist = _get_bundled_dist_path()
-    if _is_dist_compatible(bundled_dist, VERSION):
-        return _read_dashboard_version(bundled_dist)
-    return None
+    resolved = resolve_dashboard_dist()
+    if resolved is None:
+        return None
+    return _read_dashboard_version(resolved)
 
 
 async def _download_package(
@@ -252,7 +270,7 @@ async def _download_package(
             "https://astrbot-registry.soulter.top/download/"
             f"astrbot-dashboard/{version}/dist.zip"
         )
-        logger.info("Downloading AstrBot WebUI from %s", hosted_url)
+        logger.info("正在从 %s 下载 AstrBot WebUI", hosted_url)
         try:
             await download_file(
                 hosted_url,
@@ -262,10 +280,10 @@ async def _download_package(
                 allow_insecure_ssl_fallback=allow_insecure_ssl_fallback,
             )
             if not zipfile.is_zipfile(zip_path):
-                raise RuntimeError("Downloaded Dashboard package is not a valid ZIP")
+                raise RuntimeError("下载的 WebUI 包不是有效 ZIP 文件")
         except Exception as exc:
             logger.warning(
-                "Hosted Dashboard package failed: %s. Falling back to GitHub.",
+                "托管 WebUI 包下载失败: %s。回退到 GitHub 下载。",
                 exc,
             )
             fallback_url = (
@@ -288,7 +306,7 @@ async def _download_package(
         )
         if proxy:
             fallback_url = f"{proxy.rstrip('/')}/{fallback_url}"
-        logger.info("Downloading AstrBot WebUI from %s", fallback_url)
+        logger.info("正在从 %s 下载 AstrBot WebUI", fallback_url)
         await download_file(
             fallback_url,
             str(zip_path),

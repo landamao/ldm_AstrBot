@@ -124,13 +124,30 @@ def clear_dir_contents(target: Path) -> None:
 
 
 def _resolve_webui_dir(webui_dir: str | None) -> str | None:
-    """解析实际生效的 WebUI 目录：显式指定（--webui-dir/LDMBOT_WEBUI_DIR）且存在 → 用之；否则 None（回退 data/dist）。"""
+    """解析显式指定的 WebUI 目录：--webui-dir/LDMBOT_WEBUI_DIR 指定且存在 → 用之；否则 None。"""
     if webui_dir and os.path.isdir(webui_dir):
         return webui_dir
     env_dir = os.environ.get("LDMBOT_WEBUI_DIR")
     if env_dir and os.path.isdir(env_dir):
         return env_dir
     return None
+
+
+def _实际生效webui目录(webui_dir: str | None, data_dir: str | None = None) -> Path:
+    """解析实际生效的 WebUI 目录（与运行时 resolve_dashboard_dist 同一优先级）。
+
+    纯标准库实现（本模块不得 import astrbot 包）：
+    1. 显式指定（--webui-dir/LDMBOT_WEBUI_DIR）且存在 → 用之
+    2. 项目根 dashboard/dist 存在 → 用之（WebUI 随源码树走）
+    3. data/dist（历史遗留回退）
+    """
+    显式 = _resolve_webui_dir(webui_dir)
+    if 显式:
+        return Path(显式)
+    项目dist = Path(_默认项目根()) / "dashboard" / "dist"
+    if 项目dist.is_dir():
+        return 项目dist
+    return Path(resolve_data_dir(data_dir)) / "dist"
 
 
 def _zip_tree(zf: zipfile.ZipFile, src: Path, 根归档: str) -> None:
@@ -166,7 +183,8 @@ def backup_current_version(
     """更新前备份当前版本到 data/ldmbot_rollback/ldmbot_<版本>.zip。
 
     包内含三样：astrbot/ 目录 + dist/ 目录 + 根目录 main.py
-    （dist = 实际生效 WebUI 目录，默认 data/dist，跟随 --webui-dir/LDMBOT_WEBUI_DIR）。
+    （dist = 实际生效 WebUI 目录：显式 --webui-dir/LDMBOT_WEBUI_DIR →
+    项目根 dashboard/dist → 历史遗留 data/dist）。
     多个版本可同时保留，重名则覆盖。备份失败抛出异常，由调用方中断更新
     （防止旧版本丢失后无法回滚）。
     """
@@ -175,15 +193,11 @@ def backup_current_version(
     if not 源码目录.is_dir():
         raise RuntimeError(f"备份失败: 项目源码目录不存在: {源码目录}")
 
-    # dist：显式指定（--webui-dir/LDMBOT_WEBUI_DIR）且存在 → 用之；否则 data/dist
+    # dist：与运行时同一优先级解析实际生效目录
     dist目录: Path | None = None
-    显式webui = _resolve_webui_dir(webui_dir)
-    if 显式webui:
-        dist目录 = Path(显式webui)
-    else:
-        data_dist = Path(resolve_data_dir(data_dir)) / "dist"
-        if data_dist.is_dir():
-            dist目录 = data_dist
+    实际dist = _实际生效webui目录(webui_dir, data_dir)
+    if 实际dist.is_dir():
+        dist目录 = 实际dist
 
     rollback_dir = ensure_rollback_dir(data_dir)
     zip_path = rollback_dir / 备份文件名模板.format(version=version)
@@ -304,8 +318,7 @@ def rollback(
         # 3. 恢复 dist/（备份中有才恢复；无则保持现状并提示）
         包dist = tmp_root / "dist"
         if 包dist.is_dir():
-            显式webui = _resolve_webui_dir(webui_dir)
-            当前dist = Path(显式webui) if 显式webui else Path(resolve_data_dir(data_dir)) / "dist"
+            当前dist = _实际生效webui目录(webui_dir, data_dir)
             当前dist.parent.mkdir(parents=True, exist_ok=True)
             clear_dir_contents(当前dist)
             shutil.copytree(包dist, 当前dist, dirs_exist_ok=True)

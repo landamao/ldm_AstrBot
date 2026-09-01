@@ -18,6 +18,8 @@ from astrbot.core.config import VERSION
 from astrbot.core.utils.astrbot_path import (
     get_astrbot_backups_path,
     get_astrbot_data_path,
+    get_astrbot_plugin_data_path,
+    get_astrbot_plugin_path,
 )
 from astrbot.core.utils.io import get_dashboard_version
 from astrbot.core.utils.update_rollback import get_rollback_dir
@@ -130,6 +132,8 @@ async def get_about_info(
             "uptime": uptime,
             "data_dir": get_astrbot_data_path(),
             "webui_dir": os.path.realpath(webui_dir),
+            "plugin_dir": get_astrbot_plugin_path(),
+            "plugin_data_dir": get_astrbot_plugin_data_path(),
             "backup_dir": get_astrbot_backups_path(),
             "rollback_dir": str(get_rollback_dir()),
         },

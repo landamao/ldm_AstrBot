@@ -55,13 +55,15 @@ class SessionManagementService:
         )
 
     async def list_known_umos(self) -> list[str]:
+        """已知 UMO 列表 = 仍有对话数据的 UMO（conversations 表）。
+
+        不并集 umo_aliases：昵称残留会让已删除对话的 UMO 混进
+        「添加规则」等下拉，干扰操作。昵称仅用于显示。
+        """
         async with self.db_helper.get_db() as session:
             session: AsyncSession
             result = await session.execute(select(ConversationV2.user_id).distinct())
             umos = {str(row[0]) for row in result.fetchall() if row[0]}
-
-        aliases = await self.db_helper.get_umo_aliases()
-        umos.update(str(alias.umo) for alias in aliases if alias.umo)
         return sorted(umos)
 
     async def get_umo_alias_map(self, umos: list[str]) -> dict:

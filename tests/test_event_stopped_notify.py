@@ -1,6 +1,7 @@
 """验证 stop_event 文案格式与 WebChat 落库 part。
 
 运行：~/ldmbot/.venv/bin/python tests/test_event_stopped_notify.py
+也可用 pytest 收集（async 用例已带 pytest.mark.asyncio 标记）。
 """
 
 import asyncio
@@ -9,6 +10,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 SRC = str(Path(__file__).resolve().parent.parent)
 if SRC not in sys.path:
@@ -54,6 +57,7 @@ def test_accumulator():
     print("test_accumulator: PASS")
 
 
+@pytest.mark.asyncio
 async def test_notify_webchat_once():
     event = MagicMock()
     event.get_extra.return_value = None
@@ -71,6 +75,7 @@ async def test_notify_webchat_once():
     print("test_notify_webchat_once: PASS")
 
 
+@pytest.mark.asyncio
 async def test_notify_non_webchat_no_send():
     event = MagicMock()
     event.get_extra.return_value = None

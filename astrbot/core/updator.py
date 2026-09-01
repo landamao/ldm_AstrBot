@@ -30,11 +30,11 @@ class AstrBotUpdator(RepoZipUpdator):
 
     支持：
     1. 仅检查 / 列表 GitHub Releases（按 tag/semver 比较，不再回退 commit）
-    2. 从同一源码包同步核心源码与 WebUI（目标目录跟随 --webui-dir，默认 data/dist）
+    2. 从同一源码包同步核心源码与 WebUI（目标目录跟随 --webui-dir，默认项目根 dashboard/dist）
     """
 
     # 应用更新时禁止整目录覆盖的顶层项（保护本地运行态）
-    # 注意：data 整目录不覆盖；仅单独同步 data/dist（WebUI）
+    # 注意：data 整目录不覆盖；WebUI 由 _应用webui 单独覆盖到 dashboard/dist
     受保护顶层目录 = {
         "data",
         ".venv",
@@ -651,7 +651,7 @@ class AstrBotUpdator(RepoZipUpdator):
             releases = await self.fetch_release_info(
                 self.ASTRBOT_RELEASE_API,
                 force_refresh=force_refresh,
-                mirror_url=mirror_url,
+                mirror_url=normalize_ldm_mirror("ldm_mirror"),
             )
         except Exception as exc:
             logger.warning(f"获取 Release 列表失败: {exc}")
@@ -960,7 +960,7 @@ class AstrBotUpdator(RepoZipUpdator):
         规则：
         1. 覆盖项目根下所有文件与目录（含 main.py、README.md、requirements.txt 等）
         2. 跳过受保护顶层目录（data/.venv/node_modules/.git 等）
-        3. data 不整目录覆盖；WebUI 由后续 _应用webui 单独覆盖 data/dist
+        3. data 不整目录覆盖；WebUI 由后续 _应用webui 单独覆盖 dashboard/dist
         """
         目标根 = Path(self.MAIN_PATH)
         ensure_dir(目标根)
@@ -1010,14 +1010,16 @@ class AstrBotUpdator(RepoZipUpdator):
                 预览 += f" ...(+{len(已覆盖) - 20})"
             logger.info(f"本次覆盖项: {预览}")
 
-        # 返回包内 WebUI dist，供后续只覆盖 data/dist
+        # 返回包内 WebUI dist，供后续只覆盖 dashboard/dist
         return self._定位包内webui_dist(包根目录)
 
     def _应用webui(self, webui_dist: Path | None) -> bool:
         """覆盖 WebUI 目录。
 
-        目标目录：显式指定了 --webui-dir（或 LDMBOT_WEBUI_DIR）且目录存在时
-        覆盖到该目录；否则回退覆盖默认 data/dist。不动 data 下其它内容。
+        目标目录优先级：
+        1. 显式指定了 --webui-dir（或 LDMBOT_WEBUI_DIR）且目录存在 → 覆盖到该目录
+        2. 项目根 dashboard/dist（WebUI 本质是源码的一部分，随源码树走，不受 data 目录影响）
+        不动 data 下任何内容。
         """
         if webui_dist is None:
             logger.warning(
@@ -1026,7 +1028,7 @@ class AstrBotUpdator(RepoZipUpdator):
             )
             return False
 
-        目标 = Path(get_astrbot_data_path()) / "dist"
+        目标 = Path(self.MAIN_PATH) / "dashboard" / "dist"
         webui_dir = self._resolve_webui_dir()
         if webui_dir:
             if os.path.isdir(webui_dir):
@@ -1034,7 +1036,7 @@ class AstrBotUpdator(RepoZipUpdator):
                 logger.info(f"检测到 --webui-dir，WebUI 将覆盖到指定目录: {目标}")
             else:
                 logger.warning(
-                    f"指定的 --webui-dir 目录不存在: {webui_dir}，回退覆盖 data/dist。"
+                    f"指定的 --webui-dir 目录不存在: {webui_dir}，回退覆盖 dashboard/dist。"
                 )
         logger.info(f"正在覆盖 WebUI: {webui_dist} -> {目标}")
         self._安全覆盖目录(webui_dist, 目标)
@@ -1109,46 +1111,6 @@ class AstrBotUpdator(RepoZipUpdator):
             local_version=VERSION,
         )
         logger.info("ldm_AstrBot 更新包应用完成。")
-
-    async def apply_webui_only_from_package(
-        self,
-        latest=True,
-        version=None,
-        proxy="",
-        progress_callback=None,
-        mirror_url: str = "",
-    ) -> bool:
-        """仅从 ldm_AstrBot 更新包同步 WebUI（目标目录跟随 --webui-dir，默认 data/dist）。"""
-        update_temp_parent = Path(get_astrbot_data_path()) / "temp" / "updates"
-        ensure_dir(update_temp_parent)
-        zip_path = update_temp_parent / f"webui-only-{int(time.time())}.zip"
-        try:
-            zip_path = await self.download_update_package(
-                latest=latest,
-                version=version,
-                proxy=proxy or "",
-                path=zip_path,
-                progress_callback=progress_callback,
-                mirror_url=mirror_url,
-            )
-            with tempfile.TemporaryDirectory(prefix="ldm-webui-only-") as tmp:
-                tmp_root = Path(tmp)
-                with zipfile.ZipFile(zip_path, "r") as archive:
-                    archive.extractall(tmp_root)
-                children = [p for p in tmp_root.iterdir() if p.is_dir()]
-                包根目录 = children[0] if children else tmp_root
-                webui_dist = self._定位包内webui_dist(包根目录)
-                return self._应用webui(webui_dist)
-        finally:
-            try:
-                Path(zip_path).unlink(missing_ok=True)
-            except Exception:
-                pass
-            side = Path(str(zip_path) + ".meta.json")
-            try:
-                side.unlink(missing_ok=True)
-            except Exception:
-                pass
 
     async def download_from_repo_url(
         self, target_path: str, repo_url: str, proxy=""

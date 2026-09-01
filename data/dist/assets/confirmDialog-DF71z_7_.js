@@ -1,1 +1,0 @@
-import{cr as i}from"./index-aN1AExDd.js";function a(){return i("$confirm",void 0)}async function c(r,o){const n=o??void 0;if(n)try{return await n({message:r})}catch{return!1}return window.confirm(r)}export{c as a,a as u};

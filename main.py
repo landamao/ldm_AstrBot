@@ -462,7 +462,7 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
     _parser.add_argument(
         "--webui-dir",
         type=str,
-        help="指定 WebUI 静态文件目录路径（默认 data/dist）",
+        help="指定 WebUI 静态文件目录路径（默认优先项目根 dashboard/dist）",
         default=None,
     )
     _parser.add_argument(
@@ -602,7 +602,6 @@ def _prompt_and_set_reset_password() -> None:
 _apply_startup_env_flags(sys.argv[1:])
 
 from astrbot.core import LogBroker, LogManager, db_helper, logger  # noqa: E402
-from astrbot.core.config.default import VERSION  # noqa: E402
 from astrbot.core.initial_loader import InitialLoader  # noqa: E402
 from astrbot.core.utils.astrbot_path import (  # noqa: E402
     get_astrbot_config_path,
@@ -613,12 +612,7 @@ from astrbot.core.utils.astrbot_path import (  # noqa: E402
     get_astrbot_site_packages_path,
     get_astrbot_temp_path,
 )
-from astrbot.core.utils.io import (  # noqa: E402
-    get_bundled_dashboard_dist_path,
-    get_dashboard_dist_version,
-    is_dashboard_dist_compatible,
-    is_dashboard_version_compatible,
-)
+from astrbot.core.dashboard_assets import resolve_dashboard_dist  # noqa: E402
 from astrbot.core.utils.runtime_env import is_packaged_desktop_runtime  # noqa: E402
 
 # 日志系统已就绪：若横幅还在播，立刻挂起控制台，避免 import 后续日志打穿动画
@@ -655,73 +649,36 @@ def check_env() -> None:
 
 
 async def check_dashboard_files(webui_dir: str | None = None):
-    """Resolve and repair dashboard static files for startup.
+    """Resolve the WebUI dist directory for startup.
+
+    解析优先级统一委托 resolve_dashboard_dist：
+    1. 显式指定的 --webui-dir（存在即用）
+    2. 项目根 dashboard/dist（源码内置，优先）
+    3. 随包 astrbot/dashboard/dist
+    4. data/dist（历史遗留，仅作最后回退）
 
     Args:
         webui_dir: Optional explicit WebUI directory path from CLI.
 
     Returns:
-        The directory path to serve, or None when no usable WebUI can be prepared.
+        The directory path to serve, or None when no usable WebUI can be found.
     """
 
-    # 指定webui目录
-    if webui_dir:
-        if os.path.exists(webui_dir):
-            logger.info("使用指定的 WebUI 目录: %s", webui_dir)
-            return webui_dir
-        logger.warning("指定的 WebUI 目录不存在: %s，将使用默认逻辑。", webui_dir)
-
-    data_dist_path = Path(get_astrbot_data_path()) / "dist"
-    bundled_dist = get_bundled_dashboard_dist_path()
-    if data_dist_path.exists():
-        v = get_dashboard_dist_version(data_dist_path)
-        if is_dashboard_dist_compatible(data_dist_path, VERSION):
-            logger.info("WebUI 版本已是最新。")
-            return str(data_dist_path)
-
-        if is_dashboard_version_compatible(v, VERSION):
-            logger.warning(
-                "WebUI files are incomplete for v%s. 为保护本地自定义 WebUI，已禁止自动重新下载/覆盖 data/dist。",
-                VERSION,
-            )
-        elif v is not None:
-            logger.warning(
-                "WebUI version mismatch: %s, expected v%s. 为保护本地自定义 WebUI，已禁止自动重新下载/覆盖 data/dist。",
-                v,
-                VERSION,
-            )
-        else:
-            logger.warning(
-                "WebUI version file is missing. 为保护本地自定义 WebUI，已禁止自动重新下载/覆盖 data/dist。",
-            )
-
-        if (data_dist_path / "index.html").is_file():
-            logger.warning(
-                "继续使用当前 data/dist WebUI。若页面异常，请手动构建 dashboard 并复制到 data/dist，且保留 data/dist/assets/version。"
-            )
-            return str(data_dist_path)
-
+    resolved = resolve_dashboard_dist(webui_dir)
+    if resolved is None:
         logger.warning(
-            "data/dist 存在但缺少 index.html，且自动下载 WebUI 已禁用；WebUI 功能将不可用。"
+            "未找到可用的 WebUI 目录（dashboard/dist 与 data/dist 均不可用）；"
+            "请构建 dashboard 并部署到项目根 dashboard/dist，或重新安装 ldm（安装包自带 WebUI），"
+            "也可用 --webui-dir 手动指定。"
         )
         return None
-
-    if is_dashboard_dist_compatible(bundled_dist, VERSION):
-        logger.warning(
-            "data/dist 不存在，自动下载 WebUI 已禁用；将临时使用随包 WebUI v%s，不会复制或覆盖 data/dist。",
-            get_dashboard_dist_version(bundled_dist),
-        )
-        return str(bundled_dist)
-
-    logger.warning(
-        "data/dist 不存在，且没有兼容的随包 WebUI。自动下载 WebUI 已禁用；WebUI 功能将不可用。"
-    )
-    return None
+    logger.info("WebUI 目录: %s", resolved)
+    return str(resolved)
 
 
 async def main_async(webui_dir_arg: str | None) -> None:
     """主异步入口"""
-    # 检查仪表板文件
+    # 检查仪表板文件（仅用于启动日志与缺失告警）
     webui_dir = await check_dashboard_files(webui_dir_arg)
     if webui_dir is None:
         logger.warning(
@@ -732,7 +689,11 @@ async def main_async(webui_dir_arg: str | None) -> None:
     db = db_helper
 
     core_lifecycle = InitialLoader(db, log_broker)
-    core_lifecycle.webui_dir = webui_dir
+    # 传原始启动参数而非解析结果：解析结果回传会被 dashboard server
+    # 二次解析时误判为「用户显式指定的 --webui-dir」，版本不匹配时
+    # 打出错误的「显式指定的 WebUI 目录」警告（实际用户并未指定）。
+    # server.py 内部会用 resolve_dashboard_dist 按完整优先级重新解析。
+    core_lifecycle.webui_dir = webui_dir_arg
     await core_lifecycle.start()
 
 
@@ -752,7 +713,7 @@ if __name__ == "__main__":
     _parser.add_argument(
         "--webui-dir",
         type=str,
-        help="指定 WebUI 静态文件目录路径（默认 data/dist）",
+        help="指定 WebUI 静态文件目录路径（默认优先项目根 dashboard/dist）",
         default=None,
     )
     _parser.add_argument(

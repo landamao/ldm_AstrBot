@@ -494,6 +494,7 @@ class LiveChatService:
         # 发送前清掉该轮次的旧回复/报错记录，用户消息复用并换新 checkpoint
         truncate_from_message_id = message.get("_truncate_from_message_id")
         llm_checkpoint_id = str(uuid.uuid4())
+        reused_user_record = None
         if truncate_from_message_id is not None:
             try:
                 truncate_user_message_id = int(truncate_from_message_id)
@@ -545,7 +546,22 @@ class LiveChatService:
                 )
                 return
             llm_checkpoint_id = new_checkpoint
-
+            # 重试清理成功时：用户消息已被保留（只换 checkpoint），复用不新插
+            reused_user_record = await self.db.get_platform_message_history_by_id(
+                truncate_user_message_id
+            )
+            if reused_user_record is None:
+                await self.send_chat_payload(
+                    session,
+                    {
+                        "ct": "chat",
+                        "t": "error",
+                        "data": "User message not found",
+                        "code": "PROCESSING_ERROR",
+                    },
+                    send_json,
+                )
+                return
         session.is_processing = True
         session.should_interrupt = False
         back_queue = webchat_queue_mgr.get_or_create_back_queue(message_id, session_id)
@@ -574,13 +590,18 @@ class LiveChatService:
             )
 
             message_parts_for_storage = strip_message_parts_path_fields(message_parts)
-            saved_user_record = await self.platform_history_mgr.insert(
-                platform_id="webchat",
-                user_id=session_id,
-                content={"type": "user", "message": message_parts_for_storage},
-                sender_id=session.username,
-                sender_name=session.username,
-                llm_checkpoint_id=llm_checkpoint_id,
+            # 重试路径复用已保留的用户消息记录；正常路径新插
+            saved_user_record = (
+                reused_user_record
+                if reused_user_record is not None
+                else await self.platform_history_mgr.insert(
+                    platform_id="webchat",
+                    user_id=session_id,
+                    content={"type": "user", "message": message_parts_for_storage},
+                    sender_id=session.username,
+                    sender_name=session.username,
+                    llm_checkpoint_id=llm_checkpoint_id,
+                )
             )
             await self.send_chat_payload(
                 session,
