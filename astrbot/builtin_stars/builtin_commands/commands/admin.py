@@ -22,6 +22,7 @@ class AdminCommands:
 
     async def op(self, event: AstrMessageEvent, admin_id: str = "") -> None:
         """授权管理员。op <admin_id>"""
+        admin_id = str(admin_id or "").strip()
         if not admin_id:
             event.set_result(
                 MessageEventResult().message(
@@ -35,6 +36,7 @@ class AdminCommands:
 
     async def deop(self, event: AstrMessageEvent, admin_id: str = "") -> None:
         """取消授权管理员。deop <admin_id>"""
+        admin_id = str(admin_id or "").strip()
         if not admin_id:
             event.set_result(
                 MessageEventResult().message(
@@ -53,6 +55,7 @@ class AdminCommands:
 
     async def wl(self, event: AstrMessageEvent, sid: str = "") -> None:
         """添加白名单。wl <sid>"""
+        sid = str(sid or "").strip()
         if not sid:
             event.set_result(
                 MessageEventResult().message(
@@ -67,6 +70,7 @@ class AdminCommands:
 
     async def dwl(self, event: AstrMessageEvent, sid: str = "") -> None:
         """删除白名单。dwl <sid>"""
+        sid = str(sid or "").strip()
         if not sid:
             event.set_result(
                 MessageEventResult().message(
@@ -134,8 +138,6 @@ class AdminCommands:
         消息节奏：正在更新 → 更新成功 v旧 → v新，正在重启（或无更新/失败提示）。
         重启复用 restart() 的带写入重启记录链路（core_lifecycle.restart()）。
         """
-        import importlib
-
         from astrbot.core import pip_installer
         from astrbot.core.config.default import VERSION
         from astrbot.core.updator import AstrBotUpdator

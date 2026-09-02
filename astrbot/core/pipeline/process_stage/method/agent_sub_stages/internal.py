@@ -61,6 +61,11 @@ from ...follow_up import (
 )
 
 
+# 消息防抖 per-UMO 状态表：首条消息开窗等待静默期，窗口内后续消息被吸收
+# （文本与媒体组件并入赢家请求，被吸收消息不再触发打断、不请求 LLM）
+_DEBOUNCE_STATE: dict[str, dict] = {}
+
+
 def _safe_error_model(agent_runner) -> str | None:
     """安全获取 agent runner 当前使用的模型名，失败时返回 None。"""
     try:
@@ -201,10 +206,111 @@ class InternalAgentSubStage(Stage):
             return bool(interrupt_cfg.get("enable_private", True))
         return bool(interrupt_cfg.get("enable_group", True))
 
+    def _get_message_debounce_config(self, event: AstrMessageEvent) -> dict:
+        conf = self.ctx.plugin_manager.context.get_config(umo=event.unified_msg_origin)
+        platform_settings = conf.get("platform_settings", {}) if conf else {}
+        debounce_cfg = platform_settings.get("message_debounce", {}) or {}
+        return debounce_cfg if isinstance(debounce_cfg, dict) else {}
+
+    async def _message_debounce_wait(self, event: AstrMessageEvent) -> bool:
+        """消息防抖：私聊连发消息合并为一次 LLM 请求。
+
+        首条消息开窗等待静默期；窗口内后续消息被吸收（重置计时，文本与
+        图片/语音等组件并入缓冲），静默期满后由首条消息合并全部内容继续。
+        返回 False 表示本条被吸收，调用方应直接结束处理。
+        """
+        cfg = self._get_message_debounce_config(event)
+        if not cfg.get("enable", False) or not event.is_private_chat():
+            return True
+        try:
+            window = float(cfg.get("window", 2.0) or 2.0)
+        except (TypeError, ValueError):
+            window = 2.0
+        window = max(0.0, min(window, 60.0))
+        if window <= 0:
+            return True
+        try:
+            max_wait = float(cfg.get("max_wait", 60.0) or 60.0)
+        except (TypeError, ValueError):
+            max_wait = 60.0
+        max_wait = max(1.0, min(max_wait, 600.0))
+
+        umo = event.unified_msg_origin
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+
+        state = _DEBOUNCE_STATE.get(umo)
+        if state is not None and now < state["deadline"]:
+            # 防抖窗口进行中：吸收本条，重置静默计时（滑动窗口，累计上限 60s）
+            state["texts"].append(event.message_str or "")
+            state["outlines"].append(event.get_message_outline())
+            state["comps"].extend(
+                comp
+                for comp in event.get_messages()
+                if isinstance(comp, (Image, File, Record, Reply, Video))
+            )
+            state["deadline"] = min(now + window, state["hard_deadline"])
+            logger.info(
+                "消息防抖: 吸收消息 umo=%s 已缓冲=%s 条",
+                umo,
+                len(state["texts"]),
+            )
+            return False
+
+        entry: dict = {
+            "deadline": now + min(window, max_wait),
+            "hard_deadline": now + max_wait,
+            "texts": [],
+            "outlines": [],
+            "comps": [],
+        }
+        _DEBOUNCE_STATE[umo] = entry
+        try:
+            while True:
+                remaining = entry["deadline"] - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(remaining)
+                if _DEBOUNCE_STATE.get(umo) is not entry:
+                    # 边界竞态：静默期满瞬间新消息开了新窗口，本条直接放行
+                    return True
+            if entry["texts"] or entry["comps"]:
+                parts = [
+                    "[Message 1] "
+                    + (event.message_str.strip() or event.get_message_outline())
+                ]
+                for idx, (text, outline) in enumerate(
+                    zip(entry["texts"], entry["outlines"]), start=2
+                ):
+                    parts.append(f"[Message {idx}] {(text or '').strip() or outline}")
+                total = len(entry["texts"]) + 1
+                # 提示随 message_str 走：本次请求与历史落库内容一致，
+                # 后续会话也能知道这条是连发合并的
+                parts.append(
+                    f"<system_reminder>The user sent {total} messages in rapid "
+                    "succession within a short time. They have been merged into "
+                    "this single message in chronological order, each prefixed "
+                    "with [Message N].</system_reminder>"
+                )
+                event.message_str = "\n".join(parts)
+                if entry["comps"]:
+                    event.message_obj.message.extend(entry["comps"])
+                logger.info(
+                    "消息防抖: 合并 %s 条消息后继续 umo=%s",
+                    total,
+                    umo,
+                )
+            return True
+        finally:
+            if _DEBOUNCE_STATE.get(umo) is entry:
+                del _DEBOUNCE_STATE[umo]
+
     async def _maybe_interrupt_active_reply(
         self,
         event: AstrMessageEvent,
         interrupt_cfg: dict,
+        *,
+        wait_for_idle: bool = True,
     ) -> bool:
         """若同会话已有活跃 LLM 回复，则按配置打断并等待其收尾。
 
@@ -275,6 +381,10 @@ class InternalAgentSubStage(Stage):
                     await event.send(MessageChain().message(notify_text))
                 except Exception:
                     logger.warning("发送打断提示失败", exc_info=True)
+
+        if not wait_for_idle:
+            # 防抖窗口不能阻塞打断：停止信号已经发出，旧任务可在窗口内自行收尾。
+            return True
 
         try:
             wait_timeout = float(interrupt_cfg.get("wait_timeout", 8.0) or 8.0)
@@ -367,10 +477,32 @@ class InternalAgentSubStage(Stage):
             logger.debug("ready to request llm provider")
             interrupt_cfg = self._get_interrupt_reply_config(event)
             interrupted = False
-            if self._should_interrupt_reply(event, interrupt_cfg):
+            interrupt_started = False
+            # 先发停止信号，再进入防抖等待；否则静默窗口期间旧回复仍会继续分段发送。
+            if (
+                not has_provider_request
+                and self._should_interrupt_reply(event, interrupt_cfg)
+            ):
                 interrupted = await self._maybe_interrupt_active_reply(
                     event,
                     interrupt_cfg,
+                    wait_for_idle=False,
+                )
+                interrupt_started = interrupted
+
+            # 消息防抖（仅私聊自然聊天消息；插件 provider_request 不防抖）。
+            if not has_provider_request and not await self._message_debounce_wait(event):
+                return
+
+            # 防抖结束后等待旧任务收尾，但不重复发送停止提示或停止信号。
+            if interrupt_started:
+                await active_event_registry.wait_until_idle(
+                    event.unified_msg_origin,
+                    exclude=event,
+                    timeout=max(
+                        0.0,
+                        min(float(interrupt_cfg.get("wait_timeout", 8.0) or 8.0), 60.0),
+                    ),
                 )
 
             follow_up_capture = None

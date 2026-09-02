@@ -2057,6 +2057,8 @@ class ChatService:
 
         如果当前会话没有对话，会自动创建一个。
         persona_id 为 "[%None]" 时表示取消人格。
+        会话被自定义规则强制人格时，运行时规则优先于对话设置，
+        因此直接改规则值（与 /persona 指令联动逻辑一致），实时生效。
         """
         session = await self.db.get_platform_session_by_id(session_id)
         if not session:
@@ -2065,6 +2067,33 @@ class ChatService:
             raise ChatServiceError("Permission denied")
 
         unified_msg_origin = build_webchat_unified_msg_origin(session)
+
+        # 自定义规则强制人格 → 直接改规则值，运行时实时现读立即生效
+        cfg = (
+            await sp.get_async("umo", unified_msg_origin, "session_service_config", {})
+            or {}
+        )
+        if cfg.get("persona_id"):
+            if persona_id == "[%None]":
+                # 取消人格 = 从规则移除（其余字段保留），回落按对话/默认人格生效
+                cfg.pop("persona_id", None)
+            else:
+                cfg["persona_id"] = persona_id
+            await sp.put_async(
+                "umo", unified_msg_origin, "session_service_config", cfg
+            )
+            logger.info(
+                f"WebChat 人格: 会话 {unified_msg_origin} 的自定义规则人格"
+                f"已设为「{persona_id}」，立即生效",
+            )
+            return {
+                "conversation_id": await self.conv_mgr.get_curr_conversation_id(
+                    unified_msg_origin
+                ),
+                "persona_id": persona_id,
+                "from_rule": True,
+            }
+
         conversation_id = await self.conv_mgr.get_curr_conversation_id(
             unified_msg_origin
         )
@@ -2081,14 +2110,21 @@ class ChatService:
                 conversation_id=conversation_id,
                 persona_id=persona_id,
             )
-        return {"conversation_id": conversation_id, "persona_id": persona_id}
+        return {
+            "conversation_id": conversation_id,
+            "persona_id": persona_id,
+            "from_rule": False,
+        }
 
     async def get_session_persona(
         self,
         username: str,
         session_id: str,
     ) -> dict:
-        """获取 WebChat 会话当前对话的人格情景。"""
+        """获取 WebChat 会话当前对话的人格情景。
+
+        自定义规则强制人格时规则优先，返回值带 from_rule 标记。
+        """
         session = await self.db.get_platform_session_by_id(session_id)
         if not session:
             raise ChatServiceError(f"Session {session_id} not found")
@@ -2096,6 +2132,22 @@ class ChatService:
             raise ChatServiceError("Permission denied")
 
         unified_msg_origin = build_webchat_unified_msg_origin(session)
+
+        # 自定义规则强制人格 → 规则优先（与运行时 resolve_selected_persona 一致）
+        cfg = (
+            await sp.get_async("umo", unified_msg_origin, "session_service_config", {})
+            or {}
+        )
+        rule_persona_id = cfg.get("persona_id")
+        if rule_persona_id:
+            return {
+                "conversation_id": await self.conv_mgr.get_curr_conversation_id(
+                    unified_msg_origin
+                ),
+                "persona_id": rule_persona_id,
+                "from_rule": True,
+            }
+
         conversation_id = await self.conv_mgr.get_curr_conversation_id(
             unified_msg_origin
         )
@@ -2107,7 +2159,11 @@ class ChatService:
             )
             if conv:
                 persona_id = conv.persona_id
-        return {"conversation_id": conversation_id, "persona_id": persona_id}
+        return {
+            "conversation_id": conversation_id,
+            "persona_id": persona_id,
+            "from_rule": False,
+        }
 
     async def stop_session(self, username: str, session_id: str) -> dict:
         session = await self.db.get_platform_session_by_id(session_id)

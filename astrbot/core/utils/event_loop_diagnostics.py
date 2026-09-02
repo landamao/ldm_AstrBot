@@ -193,9 +193,9 @@ def create_event_loop_diagnostic_tasks() -> list[asyncio.Task]:
 
     if settings.watchdog_enabled:
         logger.info(
-            "Event loop faulthandler watchdog enabled: timeout=%.3fs interval=%.3fs. "
-            "If the loop is blocked, Python thread stacks will be written to %s "
-            "(rotates at %d bytes).",
+            "事件循环故障处理看门狗已启用：超时时间=%.3f秒，检查间隔=%.3f秒。"
+            "如果事件循环被阻塞，Python 线程堆栈将写入 %s "
+            "（达到 %d 字节后轮换）。",
             settings.watchdog_timeout,
             settings.watchdog_interval,
             settings.watchdog_log_path,

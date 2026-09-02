@@ -76,6 +76,9 @@ class LLMCommands:
         /llm all [on|off]    -> 全局禁用/启用 LLM（不指定则切换）
         /llm help            -> 显示帮助
         """
+        # 框架可能传入 int 或 str，统一转为 str
+        sid = str(sid or "").strip()
+        操作 = str(操作 or "").strip()
         # 未注入配置时的兜底（理论上 reserved 插件会注入）
         if self.config is None:
             cfg = self.context.get_config(umo=event.unified_msg_origin)

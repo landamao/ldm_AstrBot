@@ -95,7 +95,7 @@ _PAIR_MAP: dict[str, str] = {
 }
 _QUOTE_CHARS = {'"', "'", "`"}
 _SECONDARY_PUNCT = re.compile(r"[，,、；;]+")
-_DEFAULT_SPLIT_CHARS = ["。", "？", "！", "?", "!", "；", ";", "\n", "…"]
+_DEFAULT_SPLIT_CHARS = ["。", "？", "！", "?", "!", "；", ";", "\\n", "…"]
 
 
 def build_split_pattern(
@@ -590,7 +590,7 @@ def _segmented_reply_template() -> dict:
         pass
     # Fallback if import fails (should not happen in normal runtime)
     return {
-        "enable": False,
+        "enable": True,
         "config_mode": "simple",
         "only_llm_result": True,
         "send_speed": "natural",
@@ -600,12 +600,12 @@ def _segmented_reply_template() -> dict:
         "linear_base": 0.5,
         "linear_factor": 0.08,
         "fixed_delay": 1.5,
-        "words_count_threshold": 0,
+        "words_count_threshold": 400,
         "max_length_to_disable": 0,
         "min_length_to_split": 0,
         "split_mode": "chars",
         "regex": r"[。？！?!…\n]+",
-        "split_words": ["。", "？", "！", "?", "!", "；", ";", "\n", "…"],
+        "split_words": ["。", "？", "！", "?", "!", "；", ";", "\\n", "…"],
         "content_cleanup_rule": "",
         "clean_before_items": [],
         "clean_after_items": [],
@@ -696,11 +696,11 @@ def resolve_segmented_reply_config(raw: dict | None) -> dict:
 
     default_chars = list(
         template.get("split_words")
-        or ["。", "？", "！", "?", "!", "；", ";", "\n", "…"]
+        or ["。", "？", "！", "?", "!", "；", ";", "\\n", "…"]
     )
 
     out = {
-        "enable": pick("enable", cast=bool, default=False),
+        "enable": pick("enable", cast=bool, default=True),
         "only_llm_result": pick("only_llm_result", cast=bool, default=True),
         "config_mode": mode,
         "interval_method": pick("interval_method", cast=str, default="linear"),
@@ -709,7 +709,7 @@ def resolve_segmented_reply_config(raw: dict | None) -> dict:
         "linear_base": pick("linear_base", cast=float, default=0.5),
         "linear_factor": pick("linear_factor", cast=float, default=0.08),
         "fixed_delay": pick("fixed_delay", cast=float, default=1.5),
-        "words_count_threshold": pick("words_count_threshold", cast=int, default=0),
+        "words_count_threshold": pick("words_count_threshold", cast=int, default=400),
         "max_length_to_disable": pick("max_length_to_disable", cast=int, default=0),
         "min_length_to_split": pick("min_length_to_split", cast=int, default=0),
         "split_mode": pick("split_mode", cast=str, default="chars"),

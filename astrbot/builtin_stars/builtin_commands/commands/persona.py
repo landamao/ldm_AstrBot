@@ -460,7 +460,11 @@ class PersonaCommands:
             message.set_result(MessageEventResult().message(msg).use_t2i(False))
         elif l[1] == "view":
             if len(l) == 2:
-                message.set_result(MessageEventResult().message("请输入人格情景名"))
+                message.set_result(
+                    MessageEventResult().message(
+                        f"请输入人格情景名。使用方法：{获取第一个唤醒词()}persona view <人格名>"
+                    )
+                )
                 return
             ps = l[2].strip()
             if persona := next(
@@ -473,7 +477,7 @@ class PersonaCommands:
                 msg = f"人格{ps}的详细信息：\n"
                 msg += f"{persona['prompt']}\n"
             else:
-                msg = f"人格{ps}不存在"
+                msg = f"人格「{ps}」不存在。使用 {获取第一个唤醒词()}persona list 查看所有人格。"
             message.set_result(MessageEventResult().message(msg))
         elif l[1] == "unset":
             raw = "".join(l[2:]).strip()
@@ -560,6 +564,6 @@ class PersonaCommands:
                 )
                 message.set_result(
                     MessageEventResult().message(
-                        f"不存在该人格情景。使用 {获取第一个唤醒词()}persona list 查看所有。",
+                        f"人格「{ps}」不存在。使用 {获取第一个唤醒词()}persona list 查看所有人格。"
                     ),
                 )

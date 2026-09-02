@@ -11,7 +11,7 @@ class NameCommand:
     async def name(self, event: AstrMessageEvent, alias: str) -> None:
         umo = event.unified_msg_origin
         auto_name = get_event_auto_name(event)
-        alias = normalize_umo_name(alias)
+        alias = normalize_umo_name(str(alias or ""))
 
         # 无参数：查询当前设置
         if not alias:

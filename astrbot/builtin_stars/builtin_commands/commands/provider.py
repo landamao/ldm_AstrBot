@@ -13,6 +13,8 @@ from astrbot.core.provider.entities import ProviderType
 from astrbot.core.utils.error_redaction import safe_error
 from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
+from .utils.param_utils import 校验非空, 转整数
+
 if TYPE_CHECKING:
     from astrbot.core.provider.provider import Provider
 
@@ -521,12 +523,21 @@ class ProviderCommands:
             event.set_result(MessageEventResult().message(ret))
         elif idx == "tts":
             if idx2 is None:
-                event.set_result(MessageEventResult().message("请输入序号。"))
+                event.set_result(MessageEventResult().message(
+                    f"使用方法：{获取第一个唤醒词()}provider tts <序号> 切换 TTS 提供商。"
+                ))
                 return
-            if idx2 > len(self.context.get_all_tts_providers()) or idx2 < 1:
-                event.set_result(MessageEventResult().message("无效的提供商序号。"))
+            num, err = 转整数(idx2, "TTS 提供商序号", 最小值=1)
+            if err:
+                event.set_result(MessageEventResult().message(err))
                 return
-            provider = self.context.get_all_tts_providers()[idx2 - 1]
+            tts_providers = self.context.get_all_tts_providers()
+            if num > len(tts_providers):
+                event.set_result(MessageEventResult().message(
+                    f"TTS 提供商序号超出范围，共 {len(tts_providers)} 个。"
+                ))
+                return
+            provider = tts_providers[num - 1]
             id_ = provider.meta().id
             await self.context.provider_manager.set_provider(
                 provider_id=id_,
@@ -540,12 +551,21 @@ class ProviderCommands:
             )
         elif idx == "stt":
             if idx2 is None:
-                event.set_result(MessageEventResult().message("请输入序号。"))
+                event.set_result(MessageEventResult().message(
+                    f"使用方法：{获取第一个唤醒词()}provider stt <序号> 切换 STT 提供商。"
+                ))
                 return
-            if idx2 > len(self.context.get_all_stt_providers()) or idx2 < 1:
-                event.set_result(MessageEventResult().message("无效的提供商序号。"))
+            num, err = 转整数(idx2, "STT 提供商序号", 最小值=1)
+            if err:
+                event.set_result(MessageEventResult().message(err))
                 return
-            provider = self.context.get_all_stt_providers()[idx2 - 1]
+            stt_providers = self.context.get_all_stt_providers()
+            if num > len(stt_providers):
+                event.set_result(MessageEventResult().message(
+                    f"STT 提供商序号超出范围，共 {len(stt_providers)} 个。"
+                ))
+                return
+            provider = stt_providers[num - 1]
             id_ = provider.meta().id
             await self.context.provider_manager.set_provider(
                 provider_id=id_,
@@ -557,11 +577,24 @@ class ProviderCommands:
                     f"成功切换到提供商 [{provider.display_provider_id()}]。"
                 )
             )
-        elif isinstance(idx, int):
-            if idx > len(self.context.get_all_providers()) or idx < 1:
-                event.set_result(MessageEventResult().message("无效的提供商序号。"))
+        else:
+            # 尝试将 idx 转为整数（兼容框架传入 str "3" 或 int 3）
+            num, err = 转整数(idx, "提供商序号", 最小值=1)
+            if err:
+                event.set_result(MessageEventResult().message(
+                    f"无效的参数「{idx}」。\n"
+                    f"使用方法：{获取第一个唤醒词()}provider <序号> 切换 LLM 提供商，"
+                    f"{获取第一个唤醒词()}provider test 测试连通性，"
+                    f"{获取第一个唤醒词()}provider tts/stt <序号> 切换 TTS/STT 提供商。"
+                ))
                 return
-            provider = self.context.get_all_providers()[idx - 1]
+            llm_providers = list(self.context.get_all_providers())
+            if num > len(llm_providers):
+                event.set_result(MessageEventResult().message(
+                    f"LLM 提供商序号超出范围，共 {len(llm_providers)} 个。"
+                ))
+                return
+            provider = llm_providers[num - 1]
             id_ = provider.meta().id
             await self.context.provider_manager.set_provider(
                 provider_id=id_,
@@ -573,8 +606,6 @@ class ProviderCommands:
                     f"成功切换到提供商 [{provider.display_provider_id()}] · 模型 [{provider.get_model()}]。"
                 )
             )
-        else:
-            event.set_result(MessageEventResult().message("无效的参数。"))
 
     async def _switch_model_by_name(
         self, message: AstrMessageEvent, model_name: str, prov: Provider
@@ -679,20 +710,27 @@ class ProviderCommands:
 
             ret = "".join(parts)
             message.set_result(MessageEventResult().message(ret).use_t2i(False))
-        elif isinstance(idx_or_name, int):
-            models = await self._get_models_or_reply_error(
-                message,
-                prov,
-                config,
-                error_prefix="获取模型列表失败: ",
-            )
-            if models is None:
-                return
-            if idx_or_name > len(models) or idx_or_name < 1:
-                message.set_result(MessageEventResult().message("模型序号错误。"))
-            else:
+        else:
+            # 尝试转为整数编号（兼容框架传入 int 3 或 str "3"）
+            num, err = 转整数(idx_or_name, "模型编号", 最小值=1)
+            if not err:
+                models = await self._get_models_or_reply_error(
+                    message,
+                    prov,
+                    config,
+                    error_prefix="获取模型列表失败: ",
+                )
+                if models is None:
+                    return
+                if num > len(models):
+                    message.set_result(
+                        MessageEventResult().message(
+                            f"模型序号超出范围，共 {len(models)} 个。"
+                        )
+                    )
+                    return
                 try:
-                    new_model = models[idx_or_name - 1]
+                    new_model = models[num - 1]
                     message.set_result(
                         MessageEventResult().message(
                             self._apply_model(
@@ -709,8 +747,13 @@ class ProviderCommands:
                         ),
                     )
                     return
-        else:
-            await self._switch_model_by_name(message, idx_or_name, prov)
+            else:
+                # 不是数字 → 按模型名处理
+                model_name, name_err = 校验非空(idx_or_name, "模型名")
+                if name_err:
+                    message.set_result(MessageEventResult().message(name_err))
+                    return
+                await self._switch_model_by_name(message, model_name, prov)
 
     async def key(self, message: AstrMessageEvent, index: int | None = None) -> None:
         prov = self.context.get_using_provider(message.unified_msg_origin)
@@ -729,27 +772,35 @@ class ProviderCommands:
 
             parts.append(f"\n当前 Key: {curr_key[:8]}")
             parts.append("\n当前模型: " + prov.get_model())
-            parts.append(f"\n使用 {获取第一个唤醒词()}key <idx> 切换 Key。")
+            parts.append(f"\n使用 {获取第一个唤醒词()}key <序号> 切换 Key。")
 
             ret = "".join(parts)
             message.set_result(MessageEventResult().message(ret).use_t2i(False))
         else:
+            num, err = 转整数(index, "Key 序号", 最小值=1)
+            if err:
+                message.set_result(MessageEventResult().message(err))
+                return
             keys_data = prov.get_keys()
-            if index > len(keys_data) or index < 1:
-                message.set_result(MessageEventResult().message("Key 序号错误。"))
-            else:
-                try:
-                    new_key = keys_data[index - 1]
-                    prov.set_key(new_key)
-                    self.invalidate_provider_models_cache(
-                        prov.meta().id,
-                        umo=message.unified_msg_origin,
+            if num > len(keys_data):
+                message.set_result(
+                    MessageEventResult().message(
+                        f"Key 序号超出范围，共 {len(keys_data)} 个。"
                     )
-                    message.set_result(MessageEventResult().message("切换 Key 成功。"))
-                except Exception as e:
-                    message.set_result(
-                        MessageEventResult().message(
-                            safe_error("切换 Key 未知错误: ", e)
-                        ),
-                    )
-                    return
+                )
+                return
+            try:
+                new_key = keys_data[num - 1]
+                prov.set_key(new_key)
+                self.invalidate_provider_models_cache(
+                    prov.meta().id,
+                    umo=message.unified_msg_origin,
+                )
+                message.set_result(MessageEventResult().message("切换 Key 成功。"))
+            except Exception as e:
+                message.set_result(
+                    MessageEventResult().message(
+                        safe_error("切换 Key 未知错误: ", e)
+                    ),
+                )
+                return

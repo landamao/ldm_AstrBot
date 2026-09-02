@@ -8,6 +8,7 @@ from astrbot.core.star.star_handler import StarHandlerMetadata, star_handlers_re
 from astrbot.core.utils.command_parser import CommandParserMixin
 from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
+from .utils.param_utils import 转整数
 from .utils.rst_scene import RstScene
 
 
@@ -69,17 +70,16 @@ class AlterCmdCommands(CommandParserMixin):
             return
 
         if cmd_name == "reset" and cmd_type == "scene" and token.len >= 4:
-            scene_num = token.get(3)
+            scene_num_raw = token.get(3)
             perm_type = token.get(4)
 
-            if scene_num is None or perm_type is None:
+            if scene_num_raw is None or perm_type is None:
                 await event.send(MessageChain().message("场景编号和权限类型不能为空"))
                 return
 
-            if not scene_num.isdigit() or int(scene_num) < 1 or int(scene_num) > 3:
-                await event.send(
-                    MessageChain().message("场景编号必须是 1-3 之间的数字"),
-                )
+            scene_num, err = 转整数(scene_num_raw, "场景编号", 最小值=1, 最大值=3)
+            if err:
+                await event.send(MessageChain().message(err))
                 return
 
             if perm_type not in ["admin", "member"]:
@@ -88,7 +88,6 @@ class AlterCmdCommands(CommandParserMixin):
                 )
                 return
 
-            scene_num = int(scene_num)
             scene = RstScene.from_index(scene_num)
             scene_key = scene.key
 

@@ -15,6 +15,7 @@ from datetime import datetime
 import psutil
 
 from astrbot.core.config import VERSION
+from astrbot.core.dashboard_assets import resolve_dashboard_dist
 from astrbot.core.utils.astrbot_path import (
     get_astrbot_backups_path,
     get_astrbot_data_path,
@@ -56,10 +57,10 @@ def _describe_os() -> tuple[str, str]:
                 release = "11"
         except (ValueError, AttributeError):
             pass
-        return (f"Windows {release}".strip(), version)
+        return f"Windows {release}".strip(), version
     if system == "Linux":
-        return (_read_linux_pretty_name() or "Linux", platform.release())
-    return (system, platform.release())
+        return _read_linux_pretty_name() or "Linux", platform.release()
+    return system, platform.release()
 
 
 def _startup_command() -> str:
@@ -94,6 +95,46 @@ def _startup_time_info() -> tuple[str, str]:
     )
 
 
+def _global_proxy_status() -> str:
+    """全局代理使用情况（以当前进程环境变量为准）。
+
+    代理规则仅在启动时应用一次（core_lifecycle.__init__）：
+    1. 配置了 http_proxy → 写入环境变量；
+    2. 未配置且开启「未配置代理时清除系统代理」→ 清除环境变量，
+       并设 no_proxy=localhost,127.0.0.1,::1；
+    3. 否则保留启动前 shell 导出的代理变量。
+
+    WebUI 改代理配置只落盘，当前进程环境不变，重启才重新应用，
+    故配置与进程环境不一致时如实标注「重启后生效」。
+    """
+    from astrbot.core import astrbot_config
+
+    配置值 = (astrbot_config.get("http_proxy", "") or "").strip()
+    清除开关 = bool(astrbot_config.get("clear_system_proxy_when_unset", False))
+    环境值 = (
+        os.environ.get("https_proxy")
+        or os.environ.get("HTTPS_PROXY")
+        or os.environ.get("http_proxy")
+        or os.environ.get("HTTP_PROXY")
+        or ""
+    ).strip()
+
+    if 环境值:
+        if 配置值 and 配置值 == 环境值:
+            return f"{环境值}（来自配置文件）"
+        if 配置值:
+            return f"{环境值}（来自启动环境变量；配置文件为 {配置值}，重启后生效）"
+        if 清除开关:
+            return f"{环境值}（来自启动环境变量；重启后将清除）"
+        return f"{环境值}（来自启动环境变量）"
+    if 配置值:
+        return f"未使用代理，直连（配置文件为 {配置值}，重启后生效）"
+    if os.environ.get("no_proxy") == "localhost,127.0.0.1,::1":
+        # 启动时清除行为留下的特征值，说明当前进程的代理变量已被清空
+        return "已清除系统代理，localhost 直连"
+    return "未使用代理，直连"
+
+
 async def get_about_info(
     dashboard_static_folder: str | None = None,
 ) -> dict:
@@ -101,7 +142,8 @@ async def get_about_info(
 
     Args:
         dashboard_static_folder: 面板实际在用的 WebUI dist 目录；
-            为空时回退到 data/dist。
+            为空时委托 resolve_dashboard_dist 按统一优先级解析，
+            与 WebUI 服务端口径一致。
     """
     os_name, os_version = _describe_os()
     try:
@@ -110,10 +152,7 @@ async def get_about_info(
         webui_version = None
     startup_time, uptime = _startup_time_info()
 
-    webui_dir = dashboard_static_folder or os.path.join(
-        get_astrbot_data_path(),
-        "dist",
-    )
+    webui_dir = dashboard_static_folder or resolve_dashboard_dist()
 
     return {
         "system": {
@@ -130,8 +169,9 @@ async def get_about_info(
             "startup_dir": os.getcwd(),
             "startup_time": startup_time,
             "uptime": uptime,
+            "global_proxy": _global_proxy_status(),
             "data_dir": get_astrbot_data_path(),
-            "webui_dir": os.path.realpath(webui_dir),
+            "webui_dir": os.path.realpath(webui_dir) if webui_dir else None,
             "plugin_dir": get_astrbot_plugin_path(),
             "plugin_data_dir": get_astrbot_plugin_data_path(),
             "backup_dir": get_astrbot_backups_path(),

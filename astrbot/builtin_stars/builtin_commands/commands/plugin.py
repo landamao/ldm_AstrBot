@@ -157,6 +157,7 @@ class PluginCommands:
         if DEMO_MODE:
             event.set_result(MessageEventResult().message("演示模式下无法禁用插件。"))
             return
+        plugin_name = str(plugin_name or "").strip()
         if not plugin_name:
             event.set_result(
                 MessageEventResult().message(
@@ -185,6 +186,7 @@ class PluginCommands:
         if DEMO_MODE:
             event.set_result(MessageEventResult().message("演示模式下无法启用插件。"))
             return
+        plugin_name = str(plugin_name or "").strip()
         if not plugin_name:
             event.set_result(
                 MessageEventResult().message(
@@ -213,6 +215,7 @@ class PluginCommands:
         if DEMO_MODE:
             event.set_result(MessageEventResult().message("演示模式下无法安装插件。"))
             return
+        plugin_repo = str(plugin_repo or "").strip()
         if not plugin_repo:
             event.set_result(
                 MessageEventResult().message(
@@ -239,6 +242,7 @@ class PluginCommands:
         if DEMO_MODE:
             event.set_result(MessageEventResult().message("演示模式下无法重启插件。"))
             return
+        plugin_name = str(plugin_name or "").strip()
         if not plugin_name:
             event.set_result(
                 MessageEventResult().message(
@@ -281,6 +285,7 @@ class PluginCommands:
         if DEMO_MODE:
             event.set_result(MessageEventResult().message("演示模式下无法更新插件。"))
             return
+        plugin_name = str(plugin_name or "").strip()
         if not plugin_name:
             event.set_result(
                 MessageEventResult().message(
@@ -376,6 +381,7 @@ class PluginCommands:
 
     async def plugin_help(self, event: AstrMessageEvent, plugin_name: str = "") -> None:
         """获取插件帮助"""
+        plugin_name = str(plugin_name or "").strip()
         if not plugin_name:
             event.set_result(
                 MessageEventResult().message(

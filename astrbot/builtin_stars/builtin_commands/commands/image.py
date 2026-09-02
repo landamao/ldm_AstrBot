@@ -466,8 +466,14 @@ class ImageCommands:
             return
         model_id = (model_id or "").strip()
         prompt = str(prompt or "").strip()
-        if not model_id or not prompt:
+        if not model_id and not prompt:
             self._reply(event, f"使用方法：{获取第一个唤醒词()}image model <模型ID> <提示词>")
+            return
+        if not model_id:
+            self._reply(event, f"请输入模型ID。使用方法：{获取第一个唤醒词()}image model <模型ID> <提示词>")
+            return
+        if not prompt:
+            self._reply(event, f"请输入提示词。使用方法：{获取第一个唤醒词()}image model <模型ID> <提示词>")
             return
         await self._start(event, prompt, model_id)
 

@@ -485,18 +485,63 @@ class ConfigProfileService:
         self.acm = core_lifecycle.astrbot_config_mgr
         self.db = db
 
+    _MISSING = object()
+
+    @classmethod
+    def _inject_metadata_defaults(cls, metadata: dict, defaults: dict) -> None:
+        """递归为 metadata 叶子项注入 default（按点路径从 defaults 取值）。
+
+        仅用于主配置文件恢复默认值按钮：找到默认值的项才注入，
+        取不到（动态项/特殊选择器）则不注入，前端据此不显示恢复按钮。
+        """
+
+        def lookup(path: str):
+            cur = defaults
+            for part in path.split("."):
+                if isinstance(cur, dict) and part in cur:
+                    cur = cur[part]
+                else:
+                    return cls._MISSING
+            return cur
+
+        def walk(items: dict) -> None:
+            for key, item in items.items():
+                if not isinstance(item, dict):
+                    continue
+                # 仅 object 类型的 items 才是嵌套配置；list/dict 的 items 是元素描述
+                sub_items = item.get("items")
+                if item.get("type") == "object" and isinstance(sub_items, dict):
+                    walk(sub_items)
+                    continue
+                val = lookup(str(key))
+                if val is not cls._MISSING:
+                    item["default"] = copy.deepcopy(val)
+
+        for group in metadata.values():
+            if not isinstance(group, dict):
+                continue
+            for section in group.get("metadata", {}).values():
+                if isinstance(section, dict) and isinstance(
+                    section.get("items"), dict
+                ):
+                    walk(section["items"])
+
     def get_profile_schema(self) -> dict:
+        metadata = ConfigMetadataI18n.convert_to_i18n_keys(CONFIG_METADATA_3)
+        self._inject_metadata_defaults(metadata, DEFAULT_CONFIG)
         return {
             "config": DEFAULT_CONFIG,
-            "metadata": ConfigMetadataI18n.convert_to_i18n_keys(CONFIG_METADATA_3),
+            "metadata": metadata,
         }
 
     def get_system_schema(self) -> dict:
+        metadata = ConfigMetadataI18n.convert_to_i18n_keys(
+            CONFIG_METADATA_3_SYSTEM
+        )
+        self._inject_metadata_defaults(metadata, DEFAULT_CONFIG)
         return {
             "config": self.acm.confs["default"],
-            "metadata": ConfigMetadataI18n.convert_to_i18n_keys(
-                CONFIG_METADATA_3_SYSTEM
-            ),
+            "metadata": metadata,
         }
 
     def get_system_config(self) -> dict:
@@ -554,9 +599,11 @@ class ConfigProfileService:
     def get_profile(self, config_id: str) -> dict:
         if config_id not in self.acm.confs:
             raise ValueError(f"Config file {config_id} does not exist")
+        metadata = ConfigMetadataI18n.convert_to_i18n_keys(CONFIG_METADATA_3)
+        self._inject_metadata_defaults(metadata, DEFAULT_CONFIG)
         return {
             "config": self.acm.confs[config_id],
-            "metadata": ConfigMetadataI18n.convert_to_i18n_keys(CONFIG_METADATA_3),
+            "metadata": metadata,
         }
 
     def get_profile_from_dashboard_query(

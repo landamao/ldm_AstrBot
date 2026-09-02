@@ -123,7 +123,16 @@ def _parse_env_bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-class _ProxyAwareHypercornLogger(HypercornLogger):
+class _ChineseHypercornLogger(HypercornLogger):
+    async def info(self, message: str, *args: Any, **kwargs: Any) -> None:
+        if message.startswith("Running on "):
+            message = "正在运行于 " + message[len("Running on "):]
+        elif message == "CTRL + C to quit":
+            message = "按 Ctrl+C 退出"
+        await super().info(message, *args, **kwargs)
+
+
+class _ProxyAwareHypercornLogger(_ChineseHypercornLogger):
     @staticmethod
     def _get_request_log_host(request_scope) -> str | None:
         forwarded_for = None
@@ -656,8 +665,7 @@ class AstrBotDashboard:
         # 配置 Hypercorn
         config = HyperConfig()
         config.bind = [f"{host}:{port}"]
-        if bool(self.config.get("dashboard", {}).get("trust_proxy_headers", False)):
-            config.logger_class = _ProxyAwareHypercornLogger
+        config.logger_class = _ProxyAwareHypercornLogger
         if ssl_enable:
             config.certfile = resolved_ssl_config["certfile"]
             config.keyfile = resolved_ssl_config["keyfile"]

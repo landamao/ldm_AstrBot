@@ -9,6 +9,22 @@ class SetUnsetCommands:
 
     async def set_variable(self, event: AstrMessageEvent, key: str, value: str) -> None:
         """设置会话变量"""
+        key = str(key or "").strip()
+        value = str(value or "").strip()
+        if not key:
+            event.set_result(
+                MessageEventResult().message(
+                    f"请输入变量名。使用方法：{获取第一个唤醒词()}set <变量名> <值>"
+                ),
+            )
+            return
+        if not value:
+            event.set_result(
+                MessageEventResult().message(
+                    f"请输入变量值。使用方法：{获取第一个唤醒词()}set {key} <值>"
+                ),
+            )
+            return
         uid = event.unified_msg_origin
         session_var = await sp.session_get(uid, "session_variables", {})
         session_var[key] = value
@@ -22,6 +38,14 @@ class SetUnsetCommands:
 
     async def unset_variable(self, event: AstrMessageEvent, key: str) -> None:
         """移除会话变量"""
+        key = str(key or "").strip()
+        if not key:
+            event.set_result(
+                MessageEventResult().message(
+                    f"请输入变量名。使用方法：{获取第一个唤醒词()}unset <变量名>"
+                ),
+            )
+            return
         uid = event.unified_msg_origin
         session_var = await sp.session_get(uid, "session_variables", {})
 

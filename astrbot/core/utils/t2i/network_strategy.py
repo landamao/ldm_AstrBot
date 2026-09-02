@@ -129,10 +129,10 @@ class NetworkRenderStrategy(RenderStrategy):
                             if ep.get("active") and ep.get("url")
                         ]
                         logger.info(
-                            f"Successfully got {len(self.endpoints)} official T2I endpoints.",
+                            f"已成功获取 {len(self.endpoints)} 个官方 T2I 端点。",
                         )
         except Exception as e:
-            logger.error(f"Failed to get official endpoints: {e}")
+            logger.error(f"获取官方 T2I 端点失败：{e}")
 
     def _clean_url(self, url: str):
         url = url.removesuffix("/")

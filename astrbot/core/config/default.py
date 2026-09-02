@@ -73,7 +73,7 @@ DEFAULT_CONFIG = {
         "reply_with_quote": False,
         "path_mapping": [],
         "segmented_reply": {
-            "enable": False,
+            "enable": True,
             # simple | advanced | pro
             "config_mode": "simple",
             "only_llm_result": True,
@@ -87,7 +87,7 @@ DEFAULT_CONFIG = {
             "linear_factor": 0.08,
             "fixed_delay": 1.5,
             # 超过该字数则不分段（0 表示不限制；兼容旧 words_count_threshold 语义）
-            "words_count_threshold": 0,
+            "words_count_threshold": 400,
             "max_length_to_disable": 0,
             "min_length_to_split": 0,
             # chars=符号列表（推荐）| regex | words(兼容旧配置，等同 chars)
@@ -101,7 +101,7 @@ DEFAULT_CONFIG = {
                 "!",
                 "；",
                 ";",
-                "\n",
+                "\\n",
                 "…",
             ],
             "content_cleanup_rule": "",
@@ -128,6 +128,14 @@ DEFAULT_CONFIG = {
         "friend_message_needs_wake_prefix": False,
         "ignore_bot_self_message": False,
         "ignore_at_all": False,
+        # 消息防抖：私聊连发消息合并为一次 LLM 请求（防抖静默期满才真正请求）
+        "message_debounce": {
+            "enable": True,
+            # 防抖静默窗口（秒）：窗口内每收到新消息就重置计时
+            "window": 2.0,
+            # 累计等待上限（秒）：滑动窗口最多延长到这里，防止刷屏饿死
+            "max_wait": 60.0,
+        },
         "interrupt_reply": {
             "enable": True,
             "enable_private": True,
@@ -193,6 +201,7 @@ DEFAULT_CONFIG = {
         "llm_compress_keep_recent_ratio": 0.15,
         "llm_compress_provider_id": "",
         "max_context_length": -1,  # 默认不限制
+        "fallback_max_context_tokens": 128000,  # 上下文窗口兜底值（模型不在内置元数据时）
         "dequeue_context_length": 1,
         "streaming_response": False,
         "show_tool_use_status": False,
@@ -1133,6 +1142,14 @@ CONFIG_METADATA_2 = {
                     "ignore_at_all": {
                         "type": "bool",
                         "hint": "启用后，机器人会忽略 @ 全体成员 的消息事件。",
+                    },
+                    "message_debounce": {
+                        "type": "object",
+                        "items": {
+                            "enable": {"type": "bool"},
+                            "window": {"type": "float"},
+                            "max_wait": {"type": "float"},
+                        },
                     },
                     "interrupt_reply": {
                         "type": "object",
@@ -4651,6 +4668,27 @@ CONFIG_METADATA_3 = {
                             "platform_settings.segmented_reply.config_mode": ["advanced", "pro"],
                         },
                     },
+                    "platform_settings.segmented_reply.split_mode": {
+                        "description": "分段模式",
+                        "type": "string",
+                        "options": ["chars", "regex", "words"],
+                        "labels": ["符号列表", "正则表达式", "分段词列表(兼容)"],
+                        "hint": "推荐「符号列表」。words 为旧配置兼容项。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                        },
+                    },
+                    "platform_settings.segmented_reply.regex": {
+                        "description": "分段正则表达式",
+                        "hint": "匹配分隔符本身的正则，例如 [。？！?!…\\n]+",
+                        "type": "string",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                            "platform_settings.segmented_reply.split_mode": "regex",
+                        },
+                    },
                     "platform_settings.segmented_reply.split_words": {
                         "description": "从哪些符号后断开",
                         "type": "list",
@@ -4658,6 +4696,7 @@ CONFIG_METADATA_3 = {
                         "condition": {
                             "platform_settings.segmented_reply.enable": True,
                             "platform_settings.segmented_reply.config_mode": ["advanced", "pro"],
+                            "platform_settings.segmented_reply.split_mode": ["chars", "words"],
                         },
                     },
                     "platform_settings.segmented_reply.no_split_around": {
@@ -4767,27 +4806,6 @@ CONFIG_METADATA_3 = {
                             "platform_settings.segmented_reply.balanced_split": True,
                         },
                     },
-                    "platform_settings.segmented_reply.split_mode": {
-                        "description": "分段模式",
-                        "type": "string",
-                        "options": ["chars", "regex", "words"],
-                        "labels": ["符号列表", "正则表达式", "分段词列表(兼容)"],
-                        "hint": "推荐「符号列表」。words 为旧配置兼容项。",
-                        "condition": {
-                            "platform_settings.segmented_reply.enable": True,
-                            "platform_settings.segmented_reply.config_mode": "pro",
-                        },
-                    },
-                    "platform_settings.segmented_reply.regex": {
-                        "description": "分段正则表达式",
-                        "hint": "匹配分隔符本身的正则，例如 [。？！?!…\\n]+",
-                        "type": "string",
-                        "condition": {
-                            "platform_settings.segmented_reply.enable": True,
-                            "platform_settings.segmented_reply.config_mode": "pro",
-                            "platform_settings.segmented_reply.split_mode": "regex",
-                        },
-                    },
                     "platform_settings.segmented_reply.content_cleanup_rule": {
                         "description": "分段后清理正则",
                         "type": "string",
@@ -4803,6 +4821,33 @@ CONFIG_METADATA_3 = {
                         "condition": {
                             "platform_settings.segmented_reply.enable": True,
                             "platform_settings.segmented_reply.config_mode": "pro",
+                        },
+                    },
+                },
+            },
+            "message_debounce": {
+                "description": "消息防抖",
+                "type": "object",
+                "items": {
+                    "platform_settings.message_debounce.enable": {
+                        "description": "启用消息防抖",
+                        "type": "bool",
+                        "hint": "仅私聊生效。用户连发多条消息时，只等最后一条的静默期结束后请求一次 LLM，窗口内的消息会合并成一条请求（按 [Message N] 标注先后）。窗口内的消息不触发打断、不单独请求。",
+                    },
+                    "platform_settings.message_debounce.window": {
+                        "description": "防抖静默窗口（秒）",
+                        "type": "float",
+                        "hint": "收到新消息后等待这段时间，期间又收到新消息则重置计时继续等待。建议 1-5 秒，最长 60 秒。设为 0 等同关闭防抖。",
+                        "condition": {
+                            "platform_settings.message_debounce.enable": True,
+                        },
+                    },
+                    "platform_settings.message_debounce.max_wait": {
+                        "description": "累计等待上限（秒）",
+                        "type": "float",
+                        "hint": "连发刷屏时防抖最多累计等多久：到时间后即使仍在连发也强制放行请求。仅在持续刷屏超过该时长时生效，正常聊天不受影响；设得比静默窗口还小则等效于缩短窗口。范围 1-600 秒，默认 60。",
+                        "condition": {
+                            "platform_settings.message_debounce.enable": True,
                         },
                     },
                 },

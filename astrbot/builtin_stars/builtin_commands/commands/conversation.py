@@ -16,6 +16,7 @@ from astrbot.core.platform.message_type import MessageType
 from astrbot.core.utils.active_event_registry import active_event_registry
 from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
+from .utils.param_utils import 转整数, 转整数或None
 from .utils.rst_scene import RstScene
 
 THIRD_PARTY_AGENT_RUNNER_KEY = {
@@ -175,6 +176,11 @@ class ConversationCommands:
             )
             return
 
+        page, err = 转整数(page, "页码", 最小值=1)
+        if err:
+            message.set_result(MessageEventResult().message(err).use_t2i(False))
+            return
+
         size_per_page = 6
 
         conv_mgr = self.context.conversation_manager
@@ -220,6 +226,11 @@ class ConversationCommands:
                     f"{THIRD_PARTY_AGENT_RUNNER_STR} 对话列表功能暂不支持。",
                 ),
             )
+            return
+
+        page, err = 转整数(page, "页码", 最小值=1)
+        if err:
+            message.set_result(MessageEventResult().message(err).use_t2i(False))
             return
 
         size_per_page = 6
@@ -333,30 +344,33 @@ class ConversationCommands:
 
     async def groupnew_conv(self, message: AstrMessageEvent, sid: str = "") -> None:
         """创建新群聊对话"""
-        if sid:
-            session = str(
-                MessageSession(
-                    platform_name=message.platform_meta.id,
-                    message_type=MessageType("GroupMessage"),
-                    session_id=sid,
-                ),
-            )
-
-            cpersona = await self._get_current_persona_id(session)
-            cid = await self.context.conversation_manager.new_conversation(
-                session,
-                message.get_platform_id(),
-                persona_id=cpersona,
-            )
+        sid = (sid or "").strip()
+        if not sid:
             message.set_result(
                 MessageEventResult().message(
-                    f"群聊 {session} 已切换到新对话: 新对话({cid[:4]})。",
+                    f"请输入群聊 ID。使用方法：{获取第一个唤醒词()}groupnew <群聊ID>"
                 ),
             )
-        else:
-            message.set_result(
-                MessageEventResult().message("请输入群聊 ID。/groupnew 群聊ID。"),
-            )
+            return
+        session = str(
+            MessageSession(
+                platform_name=message.platform_meta.id,
+                message_type=MessageType("GroupMessage"),
+                session_id=sid,
+            ),
+        )
+
+        cpersona = await self._get_current_persona_id(session)
+        cid = await self.context.conversation_manager.new_conversation(
+            session,
+            message.get_platform_id(),
+            persona_id=cpersona,
+        )
+        message.set_result(
+            MessageEventResult().message(
+                f"群聊 {session} 已切换到新对话: 新对话({cid[:4]})。",
+            ),
+        )
 
     async def switch_conv(
         self,
@@ -364,30 +378,31 @@ class ConversationCommands:
         index: int | None = None,
     ) -> None:
         """通过 /ls 前面的序号切换对话"""
-        if not isinstance(index, int):
+        # index 可能是 None（省略）、int、或 str（框架传入的数字串）
+        num, err = 转整数或None(index, "对话序号", 最小值=1)
+        if err:
             message.set_result(
                 MessageEventResult().message(
-                    f"类型错误，请输入数字对话序号。使用 {获取第一个唤醒词()}ls 查看对话列表。"
+                    f"{err}\n使用 {获取第一个唤醒词()}ls 查看对话列表。"
                 ),
             )
             return
-
-        if index is None:
+        if num is None:
             message.set_result(
                 MessageEventResult().message(
-                    f"请输入对话序号。{获取第一个唤醒词()}switch 对话序号。{获取第一个唤醒词()}ls 查看对话 {获取第一个唤醒词()}new 新建对话",
+                    f"请输入对话序号。{获取第一个唤醒词()}switch 对话序号。{获取第一个唤醒词()}ls 查看对话 {获取第一个唤醒词()}new 新建对话"
                 ),
             )
             return
         conversations = await self.context.conversation_manager.get_conversations(
             message.unified_msg_origin,
         )
-        if index > len(conversations) or index < 1:
+        if num > len(conversations):
             message.set_result(
-                MessageEventResult().message(f"对话序号错误，请使用 {获取第一个唤醒词()}ls 查看对话列表。"),
+                MessageEventResult().message(f"对话序号超出范围，共 {len(conversations)} 个对话。使用 {获取第一个唤醒词()}ls 查看对话列表。"),
             )
         else:
-            conversation = conversations[index - 1]
+            conversation = conversations[num - 1]
             title = conversation.title if conversation.title else "新对话"
             await self.context.conversation_manager.switch_conversation(
                 message.unified_msg_origin,
@@ -401,8 +416,13 @@ class ConversationCommands:
 
     async def rename_conv(self, message: AstrMessageEvent, new_name: str = "") -> None:
         """重命名对话"""
+        new_name = (new_name or "").strip()
         if not new_name:
-            message.set_result(MessageEventResult().message("请输入新的对话名称。"))
+            message.set_result(
+                MessageEventResult().message(
+                    f"请输入新的对话名称。使用方法：{获取第一个唤醒词()}rename <新名称>"
+                )
+            )
             return
         await self.context.conversation_manager.update_conversation_title(
             message.unified_msg_origin,
