@@ -21,6 +21,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_p
 from astrbot.core.utils.io import ensure_dir, on_error
 from astrbot.core.utils.github_proxy import normalize_ldm_mirror
 from astrbot.core.utils.update_rollback import backup_current_version, clear_dir_contents
+from astrbot.core.utils.zip_fix import fix_zip_entry_names
 
 from .zip_updator import ReleaseInfo, RepoZipUpdator
 
@@ -1063,6 +1064,7 @@ class AstrBotUpdator(RepoZipUpdator):
                 corrupt = archive.testzip()
                 if corrupt:
                     raise RuntimeError(f"更新包校验失败: {corrupt}")
+                fix_zip_entry_names(archive)
                 archive_root_name = self._resolve_archive_root_dir(archive.namelist())
                 archive.extractall(tmp_root)
 
@@ -1132,6 +1134,7 @@ class AstrBotUpdator(RepoZipUpdator):
         """解压 zip，并把压缩包内第一个根目录内容移动到 target_dir。"""
         ensure_dir(target_dir)
         with zipfile.ZipFile(zip_path, "r") as z:
+            fix_zip_entry_names(z)
             update_dir = self._resolve_archive_root_dir(z.namelist())
             z.extractall(target_dir)
         logger.debug(f"解压文件完成: {zip_path}")

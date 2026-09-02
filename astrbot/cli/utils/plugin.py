@@ -102,6 +102,9 @@ def get_git_repo(url: str, target_path: Path, proxy: str | None = None) -> None:
                 resp.raise_for_status()
             zip_content = BytesIO(resp.content)
         with ZipFile(zip_content) as z:
+            from astrbot.core.utils.zip_fix import fix_zip_entry_names
+
+            fix_zip_entry_names(z)
             z.extractall(temp_dir)
             namelist = z.namelist()
             root_dir = Path(namelist[0]).parts[0] if namelist else ""

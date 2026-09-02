@@ -9,6 +9,7 @@ from astrbot.core.config.default import VERSION
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_path
 from astrbot.core.utils.io import download_file, ensure_dir
 from astrbot.core.utils.version_comparator import VersionComparator
+from astrbot.core.utils.zip_fix import fix_zip_entry_names
 
 __all__ = [
     "get_dashboard_version",
@@ -340,6 +341,7 @@ def _extract_package(
     extract_root = Path(extract_path).resolve()
     ensure_dir(extract_root)
     with zipfile.ZipFile(zip_path, "r") as archive:
+        fix_zip_entry_names(archive)
         for member in archive.infolist():
             target_path = (extract_root / member.filename).resolve()
             if not target_path.is_relative_to(extract_root):

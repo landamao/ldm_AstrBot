@@ -19,6 +19,30 @@ from pathlib import Path
 回滚目录名 = "ldmbot_rollback"
 备份文件名模板 = "ldmbot_{version}.zip"
 
+
+def _修复压缩包文件名(zf: zipfile.ZipFile) -> None:
+    """就地修补无 UTF-8 标志位条目的文件名（cp437 还原字节 → utf-8/gbk 重解码）。
+
+    本模块不得依赖 astrbot 包，故从 astrbot.core.utils.zip_fix 内联同等逻辑。
+    备份 zip 由本模块自己打包（Python zipfile，UTF-8 标志自动正确），此修补
+    是兜底：兼容外部工具替换过的备份包。
+    """
+    for info in zf.infolist():
+        if info.flag_bits & 0x800:
+            continue
+        try:
+            raw = info.filename.encode("cp437")
+        except UnicodeEncodeError:
+            continue
+        for encoding in ("utf-8", "gbk"):
+            try:
+                fixed = raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+            if fixed != info.filename:
+                info.filename = fixed
+            break
+
 说明文本 = (
     "本目录存放更新前的旧版本备份（zip 形式），\n"
     "供新版本异常时用启动参数 --rollback 回滚，例如：\n"
@@ -289,6 +313,7 @@ def rollback(
                         f"{_红}回滚失败: 备份文件损坏（{目标zip.name}: {corrupt}）。{_重置}"
                     )
                     return False
+                _修复压缩包文件名(zf)
                 zf.extractall(tmp_root)
         except zipfile.BadZipFile as exc:
             print(f"{_红}回滚失败: 备份文件不是有效 zip（{目标zip.name}）: {exc}。{_重置}")

@@ -19,7 +19,7 @@ from astrbot.core.tools.image_generation_tools import (
 from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 NATIVE_PERMISSION_MESSAGE = (
-    "您(ID: {sender_id})的权限不足以使用此指令。通过 {wake_prefix}sid 获取 ID 并请管理员添加。"
+    "你(ID: {sender_id})的权限不足以使用此指令。通过 {wake_prefix}sid 获取 ID 并请管理员添加。"
 )
 
 
@@ -519,7 +519,7 @@ class ImageCommands:
             self._reply(event, self._list_tasks(own, show_user=False))
             return
         if not is_admin:
-            self._reply(event, "您的权限不足以查看其他用户的生图任务。")
+            self._reply(event, "你的权限不足以查看其他用户的生图任务。")
             return
         if arg.lower() == "all":
             self._reply(event, self._list_tasks(tasks, show_user=True))

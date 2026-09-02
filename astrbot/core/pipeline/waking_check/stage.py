@@ -262,7 +262,7 @@ class WakingCheckStage(Stage):
                     if self.no_permission_reply:
                         await event.send(
                             MessageChain().message(
-                                f"您(ID: {event.get_sender_id()})的权限不足以使用此指令。通过 {获取第一个唤醒词()}sid 获取 ID 并请管理员添加。",
+                                f"你(ID: {event.get_sender_id()})的权限不足以使用此指令。通过 {获取第一个唤醒词()}sid 获取 ID 并请管理员添加。",
                             ),
                         )
                     logger.info(

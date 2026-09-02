@@ -13,6 +13,7 @@ import httpx
 from astrbot.core import logger
 from astrbot.core.utils.io import ensure_dir, on_error
 from astrbot.core.utils.version_comparator import VersionComparator
+from astrbot.core.utils.zip_fix import fix_zip_entry_names
 
 
 class ReleaseInfo:
@@ -383,6 +384,7 @@ class RepoZipUpdator:
         """解压缩文件, 并将压缩包内**第一个**文件夹内的文件移动到 target_dir"""
         ensure_dir(target_dir)
         with zipfile.ZipFile(zip_path, "r") as z:
+            fix_zip_entry_names(z)
             update_dir = self._resolve_archive_root_dir(z.namelist())
             z.extractall(target_dir)
         logger.debug(f"解压文件完成: {zip_path}")

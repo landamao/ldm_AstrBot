@@ -5,7 +5,7 @@ PLUGIN_ERROR_TEMPLATES = {
     "reserved_plugin_cannot_uninstall": "该插件是 ldm 保留插件，无法卸载。",
     "failed_plugin_dir_remove_error": (
         "移除失败插件成功，但是删除插件文件夹失败: {error}。"
-        "您可以手动删除该文件夹，位于 addons/plugins/ 下。"
+        "你可以手动删除该文件夹，位于 addons/plugins/ 下。"
     ),
 }
 

@@ -825,7 +825,7 @@ class File(BaseMessageComponent):
         """异步获取文件。请注意在使用后清理下载的文件, 以免占用过多空间
 
         Args:
-            allow_return_url: 是否允许以文件 http 下载链接的形式返回，这允许您自行控制是否需要下载文件。
+            allow_return_url: 是否允许以文件 http 下载链接的形式返回，这允许你自行控制是否需要下载文件。
             注意，如果为 True，也可能返回文件路径。
         Returns:
             str: 文件路径或者 http 下载链接

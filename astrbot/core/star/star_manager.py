@@ -1754,7 +1754,7 @@ class PluginManager:
                 remove_dir(os.path.join(ppath, root_dir_name))
             except Exception as e:
                 raise Exception(
-                    f"移除插件成功，但是删除插件文件夹失败: {e!s}。您可以手动删除该文件夹，位于 addons/plugins/ 下。",
+                    f"移除插件成功，但是删除插件文件夹失败: {e!s}。你可以手动删除该文件夹，位于 addons/plugins/ 下。",
                 )
 
             plugin_id = plugin.plugin_id

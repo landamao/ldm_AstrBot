@@ -67,7 +67,7 @@ class ConversationCommands:
             message.set_result(
                 MessageEventResult().message(
                     f"在{scene.name}场景下，reset命令需要管理员权限，"
-                    f"您 (ID {message.get_sender_id()}) 不是管理员，无法执行此操作。",
+                    f"你 (ID {message.get_sender_id()}) 不是管理员，无法执行此操作。",
                 ),
             )
             return
@@ -419,7 +419,7 @@ class ConversationCommands:
             # 群聊，没开独立会话，发送人不是管理员
             message.set_result(
                 MessageEventResult().message(
-                    f"会话处于群聊，并且未开启独立会话，并且您 (ID {message.get_sender_id()}) 不是管理员，因此没有权限删除当前对话。",
+                    f"会话处于群聊，并且未开启独立会话，并且你 (ID {message.get_sender_id()}) 不是管理员，因此没有权限删除当前对话。",
                 ),
             )
             return

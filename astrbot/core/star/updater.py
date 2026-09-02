@@ -18,6 +18,7 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_temp_path,
 )
 from astrbot.core.utils.io import ensure_dir, remove_dir
+from astrbot.core.utils.zip_fix import fix_zip_entry_names
 
 from ..star.star import StarMetadata
 from ..zip_updater import _RepoZipUpdater
@@ -458,6 +459,7 @@ class _PluginUpdater(_RepoZipUpdater):
         ensure_dir(target_dir)
         logger.info(f"Extracting archive: {zip_path}")
         with zipfile.ZipFile(zip_path, "r") as z:
+            fix_zip_entry_names(z)
             update_dir = self._resolve_archive_root_dir(z.namelist())
             z.extractall(target_dir)
 

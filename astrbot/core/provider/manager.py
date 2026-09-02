@@ -273,7 +273,7 @@ class ProviderManager:
 
         if not provider and provider_id:
             logger.warning(
-                f"没有找到 ID 为 {provider_id} 的提供商，这可能是由于您修改了提供商（模型）ID 导致的。"
+                f"没有找到 ID 为 {provider_id} 的提供商，这可能是由于你修改了提供商（模型）ID 导致的。"
             )
 
         return provider

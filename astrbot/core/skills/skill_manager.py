@@ -20,6 +20,7 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_skills_path,
     get_astrbot_temp_path,
 )
+from astrbot.core.utils.zip_fix import fix_zip_entry_names
 
 SKILLS_CONFIG_FILENAME = "skills.json"
 SANDBOX_SKILLS_CACHE_FILENAME = "sandbox_skills_cache.json"
@@ -733,6 +734,7 @@ class SkillManager:
         installed_skills = []
 
         with zipfile.ZipFile(zip_path) as zf:
+            fix_zip_entry_names(zf)
             names = [
                 name
                 for name in (entry.replace("\\", "/") for entry in zf.namelist())

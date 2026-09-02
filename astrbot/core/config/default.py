@@ -1265,7 +1265,7 @@ CONFIG_METADATA_2 = {
                         "items": {
                             "enable": {
                                 "type": "bool",
-                                "hint": "启用此功能前，您需要手动在设备中安装 baidu-aip 库。一般来说，安装指令如下: `pip3 install baidu-aip`",
+                                "hint": "启用此功能前，你需要手动在设备中安装 baidu-aip 库。一般来说，安装指令如下: `pip3 install baidu-aip`",
                             },
                             "app_id": {"description": "APP ID", "type": "string"},
                             "api_key": {"description": "API Key", "type": "string"},
@@ -2682,7 +2682,7 @@ CONFIG_METADATA_2 = {
                     "gm_resp_image_modal": {
                         "description": "启用图片模态",
                         "type": "bool",
-                        "hint": "启用后，将支持返回图片内容。需要模型支持，否则会报错。具体支持模型请查看 Google Gemini 官方网站。温馨提示，如果您需要生成图片，请关闭 `启用群员识别` 配置获得更好的效果。",
+                        "hint": "启用后，将支持返回图片内容。需要模型支持，否则会报错。具体支持模型请查看 Google Gemini 官方网站。温馨提示，如果你需要生成图片，请关闭 `启用群员识别` 配置获得更好的效果。",
                     },
                     "gm_native_search": {
                         "description": "启用原生搜索功能",
@@ -4424,7 +4424,7 @@ CONFIG_METADATA_3 = {
                     "content_safety.baidu_aip.enable": {
                         "description": "使用百度内容安全审核",
                         "type": "bool",
-                        "hint": "您需要手动安装 baidu-aip 库。",
+                        "hint": "你需要手动安装 baidu-aip 库。",
                     },
                     "content_safety.baidu_aip.app_id": {
                         "description": "App ID",

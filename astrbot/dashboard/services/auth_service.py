@@ -84,7 +84,7 @@ DEFAULT_PASSWORD_LOGIN_FAILURE_MESSAGE = (
     "astrbot password has been replaced by a random strong password printed in "
     "the startup logs. Check the initial password in the logs and try again. "
     "Learn more: https://docs.astrbot.app/en/faq.html\n\n"
-    "登录失败。如果您是初次使用，旧版默认 astrbot 密码已改为启动日志中输出的"
+    "登录失败。如果你是初次使用，旧版默认 astrbot 密码已改为启动日志中输出的"
     "随机强密码。请使用日志中提供的的初始密码来登录。了解更多："
     "https://docs.astrbot.app/faq.html"
 )

@@ -131,7 +131,7 @@ class ProviderFishAudioTTSAPI(TTSProvider):
                 raise ValueError(
                     f"无效的FishAudio参考模型ID: '{self.reference_id}'. "
                     f"请确保ID是32位十六进制字符串（例如: 626bb6d3f3364c9cbc3aa6a67300a664）。"
-                    f"您可以从 https://fish.audio/zh-CN/discovery 获取有效的模型ID。",
+                    f"你可以从 https://fish.audio/zh-CN/discovery 获取有效的模型ID。",
                 )
             reference_id = self.reference_id.strip()
         else:

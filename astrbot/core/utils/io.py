@@ -553,6 +553,9 @@ def extract_dashboard(zip_path: str | Path, extract_path: str | Path = "data") -
     with tempfile.TemporaryDirectory(prefix="ldm-extract-dashboard-") as tmp:
         tmp_root = Path(tmp)
         with zipfile.ZipFile(zip_path, "r") as z:
+            from astrbot.core.utils.zip_fix import fix_zip_entry_names
+
+            fix_zip_entry_names(z)
             z.extractall(tmp_root)
 
         children = [p for p in tmp_root.iterdir() if p.is_dir()]
