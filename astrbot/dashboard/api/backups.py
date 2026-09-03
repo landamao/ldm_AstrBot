@@ -8,6 +8,7 @@ from astrbot.dashboard.async_utils import run_maybe_async
 from astrbot.dashboard.responses import error, ok
 from astrbot.dashboard.schemas import (
     BackupImportRequest,
+    BackupExportRequest,
     BackupRenameRequest,
     BackupUploadInitRequest,
     BackupUploadSessionRequest,
@@ -145,18 +146,20 @@ async def list_dashboard_backups(
 
 @router.post("/backups")
 async def create_backup(
+    payload: BackupExportRequest | None = None,
     _auth: AuthContext = Depends(require_system_scope),
     service: BackupService = Depends(get_service),
 ):
-    return await _run(service.export_backup, prefix="创建备份失败")
+    return await _run(lambda: service.export_backup(payload), prefix="创建备份失败")
 
 
 @legacy_router.post("/export")
 async def export_dashboard_backup(
+    payload: BackupExportRequest | None = None,
     _username: str = Depends(require_dashboard_user),
     service: BackupService = Depends(get_service),
 ):
-    return await _run(service.export_backup, prefix="创建备份失败")
+    return await _run(lambda: service.export_backup(payload), prefix="创建备份失败")
 
 
 @router.post("/backups/upload")

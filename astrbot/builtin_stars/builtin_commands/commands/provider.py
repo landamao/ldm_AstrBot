@@ -705,7 +705,7 @@ class ProviderCommands:
             curr_model = prov.get_model() or "无"
             parts.append(f"\n当前模型: 「{curr_model}」")
             parts.append(
-                f"\nTips: 使用 {获取第一个唤醒词()}model <模型名/编号> 切换模型。输入模型名时可自动跨提供商查找并切换；跨提供商也可使用 {获取第一个唤醒词()}provider 切换。"
+                f"\n提示: 使用 {获取第一个唤醒词()}model <模型名/编号> 切换模型。输入模型名时可自动跨提供商查找并切换；跨提供商也可使用 {获取第一个唤醒词()}provider 切换。"
             )
 
             ret = "".join(parts)

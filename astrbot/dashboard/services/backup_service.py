@@ -274,16 +274,23 @@ class BackupService:
             "backup_dir": self.backup_dir,
         }
 
-    def export_backup(self) -> dict:
+    def export_backup(self, payload: object = None) -> dict:
+        if hasattr(payload, "model_dump"):
+            data = payload.model_dump(exclude_none=True)
+        else:
+            data = self._payload(payload)
+        filename_suffix = str(data.get("filename_suffix") or "").strip()
+        if filename_suffix:
+            filename_suffix = re.sub(r"[^\w\-.一-龥]", "_", filename_suffix).strip(".")
         task_id = str(uuid.uuid4())
         self._init_task(task_id, "export", "pending")
-        asyncio.create_task(self.background_export_task(task_id))
+        asyncio.create_task(self.background_export_task(task_id, filename_suffix))
         return {
             "task_id": task_id,
             "message": "export task created, processing in background",
         }
 
-    async def background_export_task(self, task_id: str) -> None:
+    async def background_export_task(self, task_id: str, filename_suffix: str = "") -> None:
         try:
             self._update_progress(task_id, status="processing", message="正在初始化...")
             kb_manager = getattr(self.core_lifecycle, "kb_manager", None)
@@ -295,6 +302,7 @@ class BackupService:
             zip_path = await exporter.export_all(
                 output_dir=self.backup_dir,
                 progress_callback=self._make_progress_callback(task_id),
+                filename_suffix=filename_suffix,
             )
             self._set_task_result(
                 task_id,
@@ -524,6 +532,8 @@ class BackupService:
             raise BackupServiceError(
                 "请先确认导入。导入将会清空并覆盖现有数据，此操作不可撤销。"
             )
+        restore_webui_port = payload.get("restore_webui_port", False)
+        restore_account_password = payload.get("restore_account_password", False)
 
         zip_path = os.path.join(self.backup_dir, filename)
         if not os.path.exists(zip_path):
@@ -531,14 +541,28 @@ class BackupService:
 
         task_id = str(uuid.uuid4())
         self._init_task(task_id, "import", "pending")
-        asyncio.create_task(self.background_import_task(task_id, zip_path))
+        asyncio.create_task(
+            self.background_import_task(
+                task_id,
+                zip_path,
+                restore_webui_port=restore_webui_port,
+                restore_account_password=restore_account_password,
+            )
+        )
 
         return {
             "task_id": task_id,
             "message": "import task created, processing in background",
         }
 
-    async def background_import_task(self, task_id: str, zip_path: str) -> None:
+    async def background_import_task(
+        self,
+        task_id: str,
+        zip_path: str,
+        *,
+        restore_webui_port: bool = False,
+        restore_account_password: bool = False,
+    ) -> None:
         try:
             self._update_progress(task_id, status="processing", message="正在初始化...")
             kb_manager = getattr(self.core_lifecycle, "kb_manager", None)
@@ -551,6 +575,8 @@ class BackupService:
                 zip_path=zip_path,
                 mode="replace",
                 progress_callback=self._make_progress_callback(task_id),
+                restore_webui_port=restore_webui_port,
+                restore_account_password=restore_account_password,
             )
 
             if result.success:

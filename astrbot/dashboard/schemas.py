@@ -66,12 +66,18 @@ class BackupUploadInitRequest(OpenModel):
     total_size: int | None = None
 
 
+class BackupExportRequest(OpenModel):
+    filename_suffix: str | None = None
+
+
 class BackupUploadSessionRequest(OpenModel):
     upload_id: str | None = None
 
 
 class BackupImportRequest(OpenModel):
     confirmed: bool | None = None
+    restore_webui_port: bool | None = None
+    restore_account_password: bool | None = None
 
 
 class BackupRenameRequest(OpenModel):

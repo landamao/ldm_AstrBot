@@ -285,7 +285,10 @@ def rollback(
     """
     project_root = Path(project_root or _默认项目根())
     rollback_dir = get_rollback_dir(data_dir)
-    目标zip = find_backup(version, data_dir)
+    if version and Path(version).expanduser().is_file():
+        目标zip = Path(version).expanduser().resolve()
+    else:
+        目标zip = find_backup(version, data_dir)
 
     if 目标zip is None:
         if version:

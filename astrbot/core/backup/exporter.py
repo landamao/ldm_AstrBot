@@ -68,6 +68,7 @@ class AstrBotExporter:
         self,
         output_dir: str | None = None,
         progress_callback: Any | None = None,
+        filename_suffix: str = "",
     ) -> str:
         """导出所有数据到 ZIP 文件
 
@@ -85,7 +86,8 @@ class AstrBotExporter:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        zip_filename = f"ldmbot_backup_{timestamp}.zip"
+        suffix = f"_{filename_suffix}" if filename_suffix else ""
+        zip_filename = f"ldmbot_backup_{timestamp}{suffix}.zip"
         zip_path = os.path.join(output_dir, zip_filename)
 
         logger.info(f"开始导出备份到 {zip_path}")

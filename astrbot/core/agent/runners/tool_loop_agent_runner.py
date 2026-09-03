@@ -187,10 +187,11 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         "Partial output before interruption is preserved.]"
     )
     FOLLOW_UP_NOTICE_TEMPLATE = (
-        "\n\n[SYSTEM NOTICE] User sent follow-up messages while tool execution "
-        "was in progress. Prioritize these follow-up instructions in your next "
-        "actions. In your very next action, briefly acknowledge to the user "
-        "that their follow-up message(s) were received before continuing.\n"
+        "\n\n[SYSTEM NOTICE] User sent follow-up messages while tool execution was in progress. "
+        "These follow-up messages have been merged into this single message in chronological order, "
+        "each prefixed with [Message N]. Prioritize these follow-up instructions in your next actions. "
+        "In your very next action, briefly acknowledge to the user that their follow-up message(s) "
+        "were received before continuing.\n"
         "{follow_up_lines}"
     )
     MAX_STEPS_REACHED_PROMPT = (
@@ -937,7 +938,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
     @staticmethod
     def _format_follow_up_line(idx: int, text: str) -> str:
         """follow-up 消息注入格式：保持全英文，与 NOTICE 模板语言一致"""
-        return f"Message {idx + 1}: {text}"
+        return f"[Message {idx + 1}] {text}"
 
     def _consume_follow_up_notice(self) -> str:
         if not self._pending_follow_ups:

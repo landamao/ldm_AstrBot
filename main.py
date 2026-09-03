@@ -374,8 +374,8 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
 启动参数:
   --data-dir <路径>        指定 data 目录路径（等价 LDMBOT_DATA_DIR）
   --webui-dir <路径>       指定 WebUI 静态文件目录路径（默认 data/dist）
-  --rollback, --回滚 [版本号]  回滚到旧版本备份（不带版本号=最近一次备份，
-                           如 --rollback 4.26.26；备份在 data/ldmbot_rollback/）
+  --restore-backup [路径]      交互式恢复数据备份；不填路径时从备份目录选择
+  --rollback, --回滚 [版本号]  回滚到旧版本备份；不填版本号时进入交互式选择
   --reset-password, --重置密码  重置管理面板密码（交互式输入新密码，留空用默认 "ldm"）
                            改完直接退出，需重新启动
   -h, --help               显示本帮助信息
@@ -443,14 +443,16 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
     LDMBOT_BUILD_DASHBOARD=1          构建时编译 Dashboard 前端
 
 用法示例:
-  python main.py                                  正常启动
-  python main.py --data-dir /path/to/data         指定 data 目录
-  python main.py --webui-dir /path/to/dist        指定 WebUI 目录
-  python main.py --rollback                       回滚到最近一次备份
-  python main.py --rollback 4.26.26               回滚到指定版本备份
-  python main.py --reset-password                 重置管理面板密码
-  LDMBOT_DASHBOARD_PORT=8080 python main.py       指定端口启动
-  LDMBOT_NO_BANNER=1 python main.py               跳过横幅动画
+  ./.venv/bin/python main.py                                  正常启动
+  ./.venv/bin/python main.py --data-dir /path/to/data         指定 data 目录
+  ./.venv/bin/python main.py --webui-dir /path/to/dist        指定 WebUI 目录
+  ./.venv/bin/python main.py --rollback                       进入交互式选择回滚备份
+  ./.venv/bin/python main.py --rollback 4.26.26               回滚到指定版本备份
+  ./.venv/bin/python main.py --restore-backup                  交互式选择并恢复数据备份
+  ./.venv/bin/python main.py --restore-backup /path/to/backup.zip  恢复指定数据备份
+  ./.venv/bin/python main.py --reset-password                 重置管理面板密码
+  LDMBOT_DASHBOARD_PORT=8080 ./.venv/bin/python main.py       指定端口启动
+  LDMBOT_NO_BANNER=1 ./.venv/bin/python main.py               跳过横幅动画
 """,
     )
     _parser.add_argument(
@@ -504,6 +506,7 @@ def _apply_startup_env_flags(argv: list[str]) -> None:
     startup_parser.add_argument("--data-dir", type=str, default=None)
     startup_parser.add_argument("--webui-dir", type=str, default=None)
     startup_parser.add_argument("--rollback", "--回滚", nargs="?", const="", default=None)
+    startup_parser.add_argument("--restore-backup", "--恢复备份", nargs="?", const="", default=None)
     startup_args, _ = startup_parser.parse_known_args(argv)
     if startup_args.data_dir:
         os.environ["LDMBOT_DATA_DIR"] = startup_args.data_dir
@@ -535,6 +538,24 @@ def _do_rollback(version: str | None, webui_dir: str | None = None) -> None:
             raise RuntimeError(f"无法加载回滚模块: {模块路径}")
         回滚模块 = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(回滚模块)
+
+        if version is None:
+            备份列表 = 回滚模块.list_backups()
+            if not 备份列表:
+                print(f"{red}回滚失败：没有找到可用的回滚备份。{reset}")
+                sys.exit(1)
+            print("可回滚的备份包：")
+            for index, 备份路径 in enumerate(备份列表, 1):
+                print(f"  {index}. {备份路径.name}")
+            选择 = input("请输入序号，或直接输入备份文件路径：").strip()
+            try:
+                目标备份 = 备份列表[int(选择) - 1]
+            except (ValueError, IndexError):
+                目标备份 = Path(选择).expanduser().resolve()
+            if not 目标备份.is_file():
+                print(f"{red}回滚失败：备份文件不存在: {目标备份}{reset}")
+                sys.exit(1)
+            version = str(目标备份)
 
         回滚成功 = 回滚模块.rollback(
             version=version,
@@ -697,6 +718,62 @@ async def main_async(webui_dir_arg: str | None) -> None:
     await core_lifecycle.start()
 
 
+async def restore_backup_interactive(backup_path: str | None) -> None:
+    """启动前交互式恢复数据备份。"""
+    from astrbot.core.backup.importer import AstrBotImporter
+    from astrbot.core.utils.astrbot_path import get_astrbot_backups_path, get_astrbot_data_path
+
+    if not backup_path:
+        backup_dir = Path(get_astrbot_backups_path())
+        backups = sorted(backup_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not backups:
+            print("备份目录中没有 ZIP 备份文件。")
+            sys.exit(1)
+        print("可恢复的备份包：")
+        for index, path in enumerate(backups, 1):
+            print(f"  {index}. {path.name}")
+        choice = input("请输入序号，或直接输入备份文件路径：").strip()
+        try:
+            backup_path = str(backups[int(choice) - 1])
+        except (ValueError, IndexError):
+            backup_path = choice
+
+    path = Path(backup_path).expanduser().resolve()
+    if not path.is_file():
+        print(f"备份文件不存在: {path}")
+        sys.exit(1)
+    importer = AstrBotImporter(
+        main_db=db_helper,
+        config_path=str(Path(get_astrbot_data_path()) / "cmd_config.json"),
+    )
+    check = importer.pre_check(str(path))
+    if not check.valid:
+        print(f"备份检查失败: {check.error}")
+        sys.exit(1)
+    print(f"备份版本: {check.backup_version}，当前版本: {check.current_version}")
+    if input("是否恢复备份中的 WebUI 端口号？[y/N]: ").strip().lower() == "y":
+        restore_webui_port = True
+    else:
+        restore_webui_port = False
+    if input("是否恢复备份中的账号密码？[y/N]: ").strip().lower() == "y":
+        restore_account_password = True
+    else:
+        restore_account_password = False
+    if input("确认恢复？这将覆盖现有数据 [y/N]: ").strip().lower() != "y":
+        print("已取消恢复。")
+        sys.exit(0)
+    result = await importer.import_all(
+        str(path),
+        restore_webui_port=restore_webui_port,
+        restore_account_password=restore_account_password,
+    )
+    if not result.success:
+        print("恢复失败: " + "; ".join(result.errors))
+        sys.exit(1)
+    print("恢复完成：已默认保留当前 WebUI 端口号和账号密码，请重新启动 ldm 生效。")
+    sys.exit(0)
+
+
 if __name__ == "__main__":
     # argparse 在前面 --help 拦截处已定义，这里只解析实际启动参数
     _parser = argparse.ArgumentParser(
@@ -730,6 +807,14 @@ if __name__ == "__main__":
         default=None,
         help="回滚到旧版本备份（不带版本号=最近一次备份，如 --rollback 4.26.26）",
     )
+    _parser.add_argument(
+        "--restore-backup",
+        "--恢复备份",
+        nargs="?",
+        const="",
+        default=None,
+        help="交互式恢复数据备份（不填路径时从备份目录选择）",
+    )
     args = _parser.parse_args()
 
     # 零阻塞：不 join 横幅；挂起控制台日志，动画结束后再冲刷
@@ -742,4 +827,6 @@ if __name__ == "__main__":
     LogManager.set_queue_handler(logger, log_broker)
 
     # 只使用一次 asyncio.run()
+    if args.restore_backup is not None:
+        asyncio.run(restore_backup_interactive(args.restore_backup or None))
     asyncio.run(main_async(args.webui_dir))

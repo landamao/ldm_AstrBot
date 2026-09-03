@@ -369,6 +369,8 @@ class AstrBotImporter:
         zip_path: str,
         mode: str = "replace",  # "replace" 清空后导入
         progress_callback: Any | None = None,
+        restore_webui_port: bool = False,
+        restore_account_password: bool = False,
     ) -> ImportResult:
         """从 ZIP 文件导入所有数据
 
@@ -468,9 +470,28 @@ class AstrBotImporter:
                             backup_path = f"{self.config_path}.bak"
                             shutil.copy2(self.config_path, backup_path)
 
-                        with open(self.config_path, "wb") as f:
-                            f.write(config_content)
-                        result.imported_files["config"] = 1
+                        if not restore_webui_port or not restore_account_password:
+                            try:
+                                current_config = json.loads(Path(self.config_path).read_text(encoding="utf-8"))
+                                imported_config = json.loads(config_content)
+                                if not restore_webui_port:
+                                    current_dashboard = current_config.get("dashboard", {})
+                                    if "port" in current_dashboard:
+                                        imported_config.setdefault("dashboard", {})["port"] = current_dashboard["port"]
+                                if not restore_account_password:
+                                    current_dashboard = current_config.get("dashboard", {})
+                                    imported_dashboard = imported_config.setdefault("dashboard", {})
+                                    for key in ("username", "password", "pbkdf2_password", "password_storage_upgraded", "password_change_required"):
+                                        if key in current_dashboard:
+                                            imported_dashboard[key] = current_dashboard[key]
+                                config_content = json.dumps(imported_config, ensure_ascii=False, indent=2).encode("utf-8")
+                            except (OSError, json.JSONDecodeError, TypeError) as exc:
+                                result.add_warning(f"保留当前 WebUI 设置失败，将跳过配置文件导入: {exc}")
+                                config_content = None
+                        if config_content is not None:
+                            with open(self.config_path, "wb") as f:
+                                f.write(config_content)
+                            result.imported_files["config"] = 1
                     except Exception as e:
                         result.add_warning(f"导入配置文件失败: {e}")
 

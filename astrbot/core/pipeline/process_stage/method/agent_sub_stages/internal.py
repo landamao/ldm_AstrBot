@@ -265,6 +265,7 @@ class InternalAgentSubStage(Stage):
             "comps": [],
         }
         _DEBOUNCE_STATE[umo] = entry
+        event.set_extra("agent_debounce_waiting", True)
         try:
             while True:
                 remaining = entry["deadline"] - loop.time()
@@ -302,6 +303,7 @@ class InternalAgentSubStage(Stage):
                 )
             return True
         finally:
+            event.set_extra("agent_debounce_waiting", False)
             if _DEBOUNCE_STATE.get(umo) is entry:
                 del _DEBOUNCE_STATE[umo]
 

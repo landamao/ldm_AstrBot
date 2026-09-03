@@ -29,7 +29,7 @@ class ActiveEventRegistry:
     def has_active(self, umo: str, exclude: AstrMessageEvent | None = None) -> bool:
         """当前 UMO 是否仍有活跃事件。"""
         for event in list(self._events.get(umo, [])):
-            if event is not exclude:
+            if event is not exclude and not event.get_extra("agent_debounce_waiting"):
                 return True
         return False
 
@@ -75,12 +75,13 @@ class ActiveEventRegistry:
         """
         count = 0
         for event in list(self._events.get(umo, [])):
-            if event is not exclude:
-                event.set_extra("agent_stop_requested", True)
-                if extra_updates:
-                    for key, value in extra_updates.items():
-                        event.set_extra(key, value)
-                count += 1
+            if event is exclude or event.get_extra("agent_debounce_waiting"):
+                continue
+            event.set_extra("agent_stop_requested", True)
+            if extra_updates:
+                for key, value in extra_updates.items():
+                    event.set_extra(key, value)
+            count += 1
         return count
 
     async def wait_until_idle(
