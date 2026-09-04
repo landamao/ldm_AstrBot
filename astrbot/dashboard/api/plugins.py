@@ -635,11 +635,18 @@ async def list_plugin_sources(
 
 @router.get("/plugins/pinned")
 async def get_pinned_plugins(
+    request: Request,
     _auth: AuthContext = Depends(require_plugin_scope),
     service: PluginService = Depends(get_service),
 ):
-    """获取 WebUI 已安装插件置顶列表（服务端全局偏好，跨浏览器共享）。"""
-    return ok({"names": await service.get_pinned_plugins()})
+    """获取 WebUI 已安装插件排序列表（服务端全局偏好，跨浏览器共享）。"""
+    names = await service.get_pinned_plugins()
+    current_hash = service.compute_pinned_plugins_hash(names)
+    client_hash = request.query_params.get("hash")
+    if client_hash and client_hash == current_hash:
+        # 哈希一致说明排序未变化，客户端可直接使用本地缓存
+        return ok({"names": None, "hash": current_hash, "unchanged": True})
+    return ok({"names": names, "hash": current_hash, "unchanged": False})
 
 
 @router.put("/plugins/pinned")
@@ -648,10 +655,11 @@ async def put_pinned_plugins(
     _auth: AuthContext = Depends(require_plugin_scope),
     service: PluginService = Depends(get_service),
 ):
-    """覆盖保存 WebUI 已安装插件置顶列表。"""
+    """覆盖保存 WebUI 已安装插件排序列表。"""
     body = await _json_or_empty(request)
     names = await service.set_pinned_plugins(body)
-    return ok({"names": names}, message="置顶列表已保存")
+    current_hash = service.compute_pinned_plugins_hash(names)
+    return ok({"names": names, "hash": current_hash}, message="排序已保存")
 
 
 @router.post("/plugin-sources")

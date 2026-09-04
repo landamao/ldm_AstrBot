@@ -1119,7 +1119,7 @@ class PluginManager:
                 if specified_dir_name and root_dir_name != specified_dir_name:
                     continue
 
-                logger.info("正在加载插件 %s ...", root_dir_name)
+                logger.info(f"正在加载插件「{root_dir_name}」...")
 
                 # 尝试导入模块
                 try:
@@ -1237,7 +1237,7 @@ class PluginManager:
                     else:
                         # 禁用态不保留旧实例，避免后续重复 load 叠 partial(self)
                         metadata.star_cls = None
-                        logger.info("插件 %s 已被禁用。", metadata.name)
+                        logger.info(f"插件「{metadata.name}」已被禁用。")
 
                     metadata.module = module
                     metadata.root_dir_name = root_dir_name

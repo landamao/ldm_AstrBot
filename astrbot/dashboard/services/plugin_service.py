@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import ssl
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -50,6 +51,8 @@ PLUGIN_UPDATE_FAILED_MESSAGE = "更新失败，请查看服务端日志。"
 PLUGIN_INSTALL_SOURCES_KEY = "plugin_install_sources"
 # WebUI 已安装插件置顶列表（插件 name 有序列表），存在全局 preference，跨浏览器共享
 PLUGIN_PINNED_EXTENSIONS_KEY = "dashboard_pinned_plugins"
+# 插件市场缓存短 TTL（秒）：缓存写入后这段时间内直接使用本地缓存，跳过远程 MD5 校验
+PLUGIN_MARKET_CACHE_TTL_SECONDS = 5 * 60
 PLUGIN_DEFAULT_REGISTRY_NAME = "Default"
 PLUGIN_UPDATE_DISABLED_MESSAGE = "该插件不是通过插件市场安装，无法检测或执行更新。"
 PLUGIN_UPDATE_SOURCE_REQUIRED_MESSAGE = "请先选择插件安装源后再更新。"
@@ -440,6 +443,14 @@ class PluginService:
         normalized = self.normalize_pinned_plugin_names(names)
         await sp.global_put(PLUGIN_PINNED_EXTENSIONS_KEY, normalized)
         return normalized
+
+    @staticmethod
+    def compute_pinned_plugins_hash(names: list[str]) -> str:
+        """计算插件排序列表的内容哈希，用于前端判断排序是否发生变化。"""
+        payload = json.dumps(
+            names, ensure_ascii=False, separators=(",", ":"), sort_keys=False
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @staticmethod
     def resolve_plugin_install_source(
@@ -1191,6 +1202,20 @@ class PluginService:
 
     async def is_cache_valid(self, source: RegistrySource) -> bool:
         try:
+            # 短 TTL：缓存写入后一段时间内直接视为有效，跳过远程 MD5 校验，
+            # 避免每次进入插件管理页/市场都打外网导致卡顿
+            if os.path.exists(source.cache_file):
+                try:
+                    age = time.time() - os.path.getmtime(source.cache_file)
+                    if 0 <= age < PLUGIN_MARKET_CACHE_TTL_SECONDS:
+                        logger.debug(
+                            "插件市场缓存在 TTL 内（%d 秒前写入），跳过远程 MD5 校验",
+                            int(age),
+                        )
+                        return True
+                except OSError:
+                    pass
+
             cached_md5 = self.load_cached_md5(source.cache_file)
             if not cached_md5:
                 logger.debug("本地插件市场缓存无 MD5，视为无效")
@@ -1843,7 +1868,7 @@ class PluginService:
         )
         await self.remove_plugin_install_source(root_dir_name)
         await self.sync_skills_after_plugin_change()
-        logger.info(f"卸载插件 {plugin_name} 成功")
+        logger.info(f"卸载插件「{plugin_name}」成功")
         return None, "卸载成功"
 
     async def uninstall_failed_plugin(self, data: object) -> tuple[None, str]:
@@ -2006,7 +2031,7 @@ class PluginService:
         await self.refresh_plugin_install_source_after_update(plugin_name, update_info)
         await self.plugin_manager.reload(plugin_name)
         await self.sync_skills_after_plugin_change()
-        logger.info(f"更新插件 {plugin_name} 成功。")
+        logger.info(f"更新插件「{plugin_name}」成功。")
         return None, "更新成功。"
 
     async def update_all_plugins(self, data: object) -> tuple[dict, str]:
@@ -2108,7 +2133,7 @@ class PluginService:
             message = "停用成功。"
             log_action = "停用"
         await self.sync_skills_after_plugin_change()
-        logger.info(f"{log_action}插件 {plugin_name} 。")
+        logger.info(f"{log_action}插件「{plugin_name}」。")
         return None, message
 
     def resolve_plugin_dir(self, plugin_name: str) -> Path:
@@ -2122,9 +2147,9 @@ class PluginService:
                 break
 
         if not plugin_obj:
-            raise PluginServiceError(f"插件 {plugin_name} 不存在")
+            raise PluginServiceError(f"插件「{plugin_name}」不存在")
         if not plugin_obj.root_dir_name:
-            raise PluginServiceError(f"插件 {plugin_name} 目录不存在")
+            raise PluginServiceError(f"插件「{plugin_name}」目录不存在")
 
         plugin_dir = (
             Path(
@@ -2135,7 +2160,7 @@ class PluginService:
             / plugin_obj.root_dir_name
         )
         if not plugin_dir.is_dir():
-            raise PluginServiceError(f"无法找到插件 {plugin_name} 的目录")
+            raise PluginServiceError(f"无法找到插件「{plugin_name}」的目录")
         return plugin_dir
 
     def get_plugin_readme(self, plugin_name: str | None) -> tuple[dict, str]:
@@ -2147,8 +2172,8 @@ class PluginService:
         readme_path = plugin_dir / "README.md"
 
         if not readme_path.is_file():
-            logger.warning(f"插件 {plugin_name} 没有README文件")
-            raise PluginServiceError(f"插件 {plugin_name} 没有README文件")
+            logger.warning(f"插件「{plugin_name}」没有README文件")
+            raise PluginServiceError(f"插件「{plugin_name}」没有README文件")
 
         try:
             data = {"content": readme_path.read_text(encoding="utf-8")}
@@ -2157,7 +2182,7 @@ class PluginService:
                 data["asset_token"] = asset_token
             return data, "成功获取README内容"
         except Exception as exc:
-            logger.warning(f"读取插件 {plugin_name} README 文件失败: {exc}")
+            logger.warning(f"读取插件「{plugin_name}」README 文件失败: {exc}")
             raise PluginServiceError(
                 "读取README文件失败",
                 public_message="读取README文件失败",
@@ -2266,7 +2291,7 @@ class PluginService:
         return self.get_plugin_readme(plugin_name)
 
     def get_plugin_changelog(self, plugin_name: str | None) -> tuple[dict, str]:
-        logger.debug(f"正在获取插件 {plugin_name} 的更新日志")
+        logger.debug(f"正在获取插件「{plugin_name}」的更新日志")
         if not plugin_name:
             logger.warning("插件名称为空")
             raise PluginServiceError("插件名称不能为空")
@@ -2284,13 +2309,13 @@ class PluginService:
                     data["asset_token"] = asset_token
                 return data, "成功获取更新日志"
             except Exception as exc:
-                logger.warning(f"读取插件 {plugin_name} 更新日志失败: {exc}")
+                logger.warning(f"读取插件「{plugin_name}」更新日志失败: {exc}")
                 raise PluginServiceError(
                     "读取更新日志失败",
                     public_message="读取更新日志失败",
                 ) from exc
 
-        logger.warning(f"插件 {plugin_name} 没有更新日志文件")
+        logger.info(f"插件「{plugin_name}」没有更新日志文件")
         return {"content": None}, "该插件没有更新日志文件"
 
     def get_plugin_changelog_from_dashboard_query(
