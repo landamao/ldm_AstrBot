@@ -24,6 +24,7 @@ from astrbot.core.utils.astrbot_path import (
 
 # 从共享常量模块导入
 from .constants import (
+    BACKUP_CONFIG_FILES,
     BACKUP_MANIFEST_VERSION,
     KB_METADATA_MODELS,
     MAIN_DB_MODELS,
@@ -43,7 +44,7 @@ class AstrBotExporter:
     - 主数据库所有表（data/data_v4.db）
     - 知识库元数据（data/knowledge_base/kb.db）
     - 每个知识库的向量文档数据
-    - 配置文件（data/cmd_config.json）
+    - 配置文件（data/cmd_config.json、data/mcp_server.json、data/skills.json）
     - 附件文件
     - 知识库多媒体文件
     - 插件目录（data/plugins）
@@ -51,6 +52,10 @@ class AstrBotExporter:
     - 配置目录（data/config）
     - T2I 模板目录（data/t2i_templates）
     - WebChat 数据目录（data/webchat）
+
+    数据库和知识库导出失败会直接让整个备份失败；
+    单个文件（附件、目录内文件、KB 媒体文件）导出失败会记录到
+    manifest 的 export_errors 字段，不会静默吞掉。
     """
 
     def __init__(
@@ -63,6 +68,8 @@ class AstrBotExporter:
         self.kb_manager = kb_manager
         self.config_path = config_path
         self._checksums: dict[str, str] = {}
+        self._export_errors: list[str] = []
+        self._exported_config_files: list[str] = []
 
     async def export_all(
         self,
@@ -161,11 +168,7 @@ class AstrBotExporter:
                 # 3. 导出配置文件
                 if progress_callback:
                     await progress_callback("config", 0, 100, "正在导出配置文件...")
-                if os.path.exists(self.config_path):
-                    with open(self.config_path, encoding="utf-8") as f:
-                        config_content = f.read()
-                    zf.writestr("config/cmd_config.json", config_content)
-                    self._add_checksum("config/cmd_config.json", config_content)
+                self._exported_config_files = self._export_config_files(zf)
                 if progress_callback:
                     await progress_callback("config", 100, 100, "配置文件导出完成")
 
@@ -220,8 +223,9 @@ class AstrBotExporter:
                         f"导出表 {table_name}: {len(export_data[table_name])} 条记录"
                     )
                 except Exception as e:
-                    logger.warning(f"导出表 {table_name} 失败: {e}")
-                    export_data[table_name] = []
+                    # 数据库是备份的核心，任何一张表导出失败都让整个备份失败，
+                    # 避免生成"看起来成功"却缺数据的备份
+                    raise RuntimeError(f"导出主数据库表 {table_name} 失败: {e}") from e
 
         return export_data
 
@@ -244,31 +248,30 @@ class AstrBotExporter:
                         f"导出知识库表 {table_name}: {len(export_data[table_name])} 条记录"
                     )
                 except Exception as e:
-                    logger.warning(f"导出知识库表 {table_name} 失败: {e}")
-                    export_data[table_name] = []
+                    raise RuntimeError(
+                        f"导出知识库表 {table_name} 失败: {e}"
+                    ) from e
 
         return export_data
 
     async def _export_kb_documents(self, kb_helper: Any) -> dict[str, Any]:
         """导出知识库的文档块数据"""
-        try:
-            from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
+        from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
 
-            vec_db: FaissVecDB = kb_helper.vec_db
-            if not vec_db or not vec_db.document_storage:
-                return {"documents": []}
-
-            # 获取所有文档
-            docs = await vec_db.document_storage.get_documents(
-                metadata_filters={},
-                offset=0,
-                limit=None,  # 获取全部
+        vec_db: FaissVecDB = kb_helper.vec_db
+        if not vec_db or not vec_db.document_storage:
+            raise RuntimeError(
+                f"知识库 {kb_helper.kb.kb_name} 的向量存储不可用，无法导出文档数据"
             )
 
-            return {"documents": docs}
-        except Exception as e:
-            logger.warning(f"导出知识库文档失败: {e}")
-            return {"documents": []}
+        # 获取所有文档
+        docs = await vec_db.document_storage.get_documents(
+            metadata_filters={},
+            offset=0,
+            limit=None,  # 获取全部
+        )
+
+        return {"documents": docs}
 
     async def _export_faiss_index(
         self,
@@ -277,33 +280,37 @@ class AstrBotExporter:
         kb_id: str,
     ) -> None:
         """导出 FAISS 索引文件"""
-        try:
-            index_path = kb_helper.kb_dir / "index.faiss"
-            if index_path.exists():
-                archive_path = f"databases/kb_{kb_id}/index.faiss"
+        index_path = kb_helper.kb_dir / "index.faiss"
+        if index_path.exists():
+            archive_path = f"databases/kb_{kb_id}/index.faiss"
+            try:
                 zf.write(str(index_path), archive_path)
                 logger.debug(f"导出 FAISS 索引: {archive_path}")
-        except Exception as e:
-            logger.warning(f"导出 FAISS 索引失败: {e}")
+            except Exception as e:
+                raise RuntimeError(f"导出 FAISS 索引 {index_path} 失败: {e}") from e
 
     async def _export_kb_media_files(
         self, zf: zipfile.ZipFile, kb_helper: Any, kb_id: str
     ) -> None:
         """导出知识库的多媒体文件"""
-        try:
-            media_dir = kb_helper.kb_medias_dir
-            if not media_dir.exists():
-                return
+        media_dir = kb_helper.kb_medias_dir
+        if not media_dir.exists():
+            return
 
-            for root, _, files in os.walk(media_dir):
-                for file in files:
-                    file_path = Path(root) / file
-                    # 计算相对路径
-                    rel_path = file_path.relative_to(kb_helper.kb_dir)
-                    archive_path = f"files/kb_media/{kb_id}/{rel_path}"
+        for root, _, files in os.walk(media_dir):
+            for file in files:
+                file_path = Path(root) / file
+                # 计算相对路径
+                rel_path = file_path.relative_to(kb_helper.kb_dir)
+                archive_path = f"files/kb_media/{kb_id}/{rel_path}"
+                try:
                     zf.write(str(file_path), archive_path)
-        except Exception as e:
-            logger.warning(f"导出知识库媒体文件失败: {e}")
+                except Exception as e:
+                    # 单个媒体文件失败不中断备份，但必须记录，不能静默
+                    self._export_errors.append(
+                        f"导出知识库 {kb_id} 媒体文件 {file_path} 失败: {e}"
+                    )
+                    logger.warning(self._export_errors[-1])
 
     async def _export_directories(
         self, zf: zipfile.ZipFile
@@ -344,7 +351,11 @@ class AstrBotExporter:
                             file_count += 1
                             total_size += file_path.stat().st_size
                         except Exception as e:
-                            logger.warning(f"导出文件 {file_path} 失败: {e}")
+                            # 单个文件失败不中断备份，但记录到清单，不能静默
+                            self._export_errors.append(
+                                f"导出目录 {dir_name} 文件 {file_path} 失败: {e}"
+                            )
+                            logger.warning(self._export_errors[-1])
 
                 stats[dir_name] = {"files": file_count, "size": total_size}
                 logger.debug(
@@ -361,16 +372,48 @@ class AstrBotExporter:
     ) -> None:
         """导出附件文件"""
         for attachment in attachments:
+            attachment_id = attachment.get("attachment_id", "")
+            file_path = attachment.get("path", "")
             try:
-                file_path = attachment.get("path", "")
-                if file_path and os.path.exists(file_path):
-                    # 使用 attachment_id 作为文件名
-                    attachment_id = attachment.get("attachment_id", "")
-                    ext = os.path.splitext(file_path)[1]
-                    archive_path = f"files/attachments/{attachment_id}{ext}"
-                    zf.write(file_path, archive_path)
+                if not file_path or not os.path.exists(file_path):
+                    # 数据库有记录但文件已丢失，明确记录而非静默跳过
+                    self._export_errors.append(
+                        f"附件文件缺失（数据库有记录但文件不存在）: {file_path}"
+                    )
+                    logger.warning(self._export_errors[-1])
+                    continue
+                # 使用 attachment_id 作为文件名
+                ext = os.path.splitext(file_path)[1]
+                archive_path = f"files/attachments/{attachment_id}{ext}"
+                zf.write(file_path, archive_path)
             except Exception as e:
-                logger.warning(f"导出附件失败: {e}")
+                self._export_errors.append(f"导出附件 {file_path} 失败: {e}")
+                logger.warning(self._export_errors[-1])
+
+    def _export_config_files(self, zf: zipfile.ZipFile) -> list[str]:
+        """导出 data 根目录下的配置文件（cmd_config.json、mcp_server.json、skills.json）
+
+        Returns:
+            list: 已成功写入备份的配置文件名列表
+        """
+        exported: list[str] = []
+        data_dir = os.path.dirname(self.config_path)
+        for name in BACKUP_CONFIG_FILES:
+            if name == "cmd_config.json":
+                file_path = self.config_path
+            else:
+                file_path = os.path.join(data_dir, name)
+            if not os.path.exists(file_path):
+                continue
+            try:
+                with open(file_path, encoding="utf-8") as f:
+                    content = f.read()
+            except Exception as e:
+                raise RuntimeError(f"读取配置文件 {file_path} 失败: {e}") from e
+            zf.writestr(f"config/{name}", content)
+            self._add_checksum(f"config/{name}", content)
+            exported.append(name)
+        return exported
 
     def _model_to_dict(self, record: Any) -> dict:
         """将 SQLModel 实例转换为字典
@@ -453,6 +496,8 @@ class AstrBotExporter:
                 "main_db": "v4",
                 "kb_db": "v1",
             },
+            "has_knowledge_bases": bool(kb_meta_data.get("knowledge_bases")),
+            "has_config": bool(self._exported_config_files),
             "tables": {
                 "main_db": list(main_data.keys()),
                 "kb_metadata": list(kb_meta_data.keys()),
@@ -461,9 +506,11 @@ class AstrBotExporter:
             "files": {
                 "attachments": attachment_files,
                 "kb_media": kb_media_files,
+                "config": list(self._exported_config_files),
             },
             "directories": list(dir_stats.keys()),
             "checksums": self._checksums,
+            "export_errors": list(self._export_errors),
             "statistics": {
                 "main_db": {
                     table: len(records) for table, records in main_data.items()

@@ -81,5 +81,13 @@ def get_backup_directories() -> dict[str, str]:
     }
 
 
+# data 根目录下需要一并备份的配置文件。
+# 导出时存入 ZIP 的 config/ 段，导入时写回 data/ 根目录。
+BACKUP_CONFIG_FILES: tuple[str, ...] = (
+    "cmd_config.json",
+    "mcp_server.json",
+    "skills.json",
+)
+
 # 备份清单版本号
-BACKUP_MANIFEST_VERSION = "1.1"
+BACKUP_MANIFEST_VERSION = "1.2"

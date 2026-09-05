@@ -304,15 +304,22 @@ class BackupService:
                 progress_callback=self._make_progress_callback(task_id),
                 filename_suffix=filename_suffix,
             )
-            self._set_task_result(
-                task_id,
-                "completed",
-                result={
-                    "filename": os.path.basename(zip_path),
-                    "path": zip_path,
-                    "size": os.path.getsize(zip_path),
-                },
-            )
+            export_result = {
+                "filename": os.path.basename(zip_path),
+                "path": zip_path,
+                "size": os.path.getsize(zip_path),
+            }
+            # 导出过程中的文件级错误（附件缺失、单个文件读取失败等）记录在
+            # manifest 中，这里透出到任务结果，避免用户拿到缺数据的备份而不自知
+            manifest = self.get_backup_manifest(zip_path) or {}
+            export_errors = manifest.get("export_errors") or []
+            if export_errors:
+                export_result["warnings"] = export_errors
+                logger.warning(
+                    f"备份 {export_result['filename']} 存在 {len(export_errors)} "
+                    f"处文件级导出错误: {export_errors}"
+                )
+            self._set_task_result(task_id, "completed", result=export_result)
         except Exception as exc:
             logger.error(f"后台导出任务 {task_id} 失败: {exc}")
             logger.error(traceback.format_exc())

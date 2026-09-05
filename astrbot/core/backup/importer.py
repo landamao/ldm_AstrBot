@@ -7,6 +7,7 @@
 - 版本匹配时也需要用户确认
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -16,11 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete
+from sqlalchemy import delete, update
+from sqlmodel import col
 
 from astrbot.core import logger
 from astrbot.core.config.default import VERSION
 from astrbot.core.db import BaseDatabase
+from astrbot.core.db.po import Attachment
 from astrbot.core.utils.astrbot_path import (
     get_astrbot_data_path,
     get_astrbot_knowledge_base_path,
@@ -30,6 +33,7 @@ from astrbot.core.utils.version_comparator import VersionComparator
 
 # 从共享常量模块导入
 from .constants import (
+    BACKUP_CONFIG_FILES,
     KB_METADATA_MODELS,
     MAIN_DB_MODELS,
     get_backup_directories,
@@ -364,6 +368,34 @@ class AstrBotImporter:
             "message": "版本匹配",
         }
 
+    def _verify_checksums(self, zf: zipfile.ZipFile, manifest: dict) -> list[str]:
+        """校验备份内文件的 SHA256 校验和
+
+        Returns:
+            list: 校验失败条目的描述，为空表示全部通过（或备份无校验信息）
+        """
+        checksums = manifest.get("checksums") or {}
+        if not checksums:
+            return []
+
+        failed: list[str] = []
+        for path, expected in checksums.items():
+            algo, _, digest = str(expected).partition(":")
+            if algo != "sha256" or not digest:
+                failed.append(f"{path}: 不支持的校验格式 {expected!r}")
+                continue
+            try:
+                content = zf.read(path)
+            except KeyError:
+                failed.append(f"{path}: 备份中不存在")
+                continue
+            except Exception as e:
+                failed.append(f"{path}: 读取失败 {e}")
+                continue
+            if hashlib.sha256(content).hexdigest() != digest:
+                failed.append(f"{path}: 校验和不匹配（文件已损坏）")
+        return failed
+
     async def import_all(
         self,
         zip_path: str,
@@ -413,10 +445,19 @@ class AstrBotImporter:
                     result.add_error(str(e))
                     return result
 
+                # 校验和校验：必须在任何写操作（清库、覆盖文件）之前进行，
+                # 避免把损坏的备份导入一半
+                checksum_failures = self._verify_checksums(zf, manifest)
+                if checksum_failures:
+                    for failure in checksum_failures:
+                        result.add_error(f"备份文件校验失败: {failure}")
+                    return result
+
                 if progress_callback:
                     await progress_callback("validate", 100, 100, "验证完成")
 
-                # 2. 导入主数据库
+                # 2. 导入主数据库（清空与导入在同一事务中，失败自动回滚，
+                #    现有数据保持原样）
                 if progress_callback:
                     await progress_callback("main_db", 0, 100, "正在导入主数据库...")
 
@@ -424,16 +465,10 @@ class AstrBotImporter:
                     main_data_content = zf.read("databases/main_db.json")
                     main_data = json.loads(main_data_content)
 
-                    if mode == "replace":
-                        await self._clear_main_db()
-
-                    imported = await self._import_main_database(main_data)
+                    imported = await self._clear_and_import_main_db(main_data)
                     result.imported_tables.update(imported)
-                except DatabaseClearError as e:
-                    result.add_error(f"清空主数据库失败: {e}")
-                    return result
                 except Exception as e:
-                    result.add_error(f"导入主数据库失败: {e}")
+                    result.add_error(f"导入主数据库失败（已回滚，现有数据未受影响）: {e}")
                     return result
 
                 if progress_callback:
@@ -495,6 +530,24 @@ class AstrBotImporter:
                     except Exception as e:
                         result.add_warning(f"导入配置文件失败: {e}")
 
+                # 其余配置文件（mcp_server.json、skills.json）直接写回 data 根目录
+                data_dir = Path(self.config_path).parent
+                for config_name in BACKUP_CONFIG_FILES:
+                    if config_name == "cmd_config.json":
+                        continue
+                    archive_name = f"config/{config_name}"
+                    if archive_name not in zf.namelist():
+                        continue
+                    try:
+                        target_path = data_dir / config_name
+                        if target_path.exists():
+                            shutil.copy2(target_path, f"{target_path}.bak")
+                        with zf.open(archive_name) as src, open(target_path, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        result.imported_files[config_name] = 1
+                    except Exception as e:
+                        result.add_warning(f"导入配置文件 {config_name} 失败: {e}")
+
                 if progress_callback:
                     await progress_callback("config", 100, 100, "配置文件导入完成")
 
@@ -549,8 +602,22 @@ class AstrBotImporter:
         if version_check["status"] in {"major_diff", "minor_diff"}:
             logger.warning(f"版本差异警告: {version_check['message']}")
 
-    async def _clear_main_db(self) -> None:
-        """清空主数据库所有表"""
+    async def _clear_and_import_main_db(
+        self, data: dict[str, list[dict]]
+    ) -> dict[str, int]:
+        """清空并导入主数据库
+
+        清空与导入放在同一事务中：导入中途失败（如字段不兼容、约束冲突、
+        进程中断）时整个事务回滚，现有数据保持导入前的原样，
+        不会出现"已清空但只导入了一半"的状态。
+
+        单行导入失败通过 SAVEPOINT 隔离：仅跳过该行，不影响整体事务。
+
+        Returns:
+            dict: 每张表成功导入的记录数
+        """
+        imported: dict[str, int] = {}
+
         async with self.main_db.get_db() as session:
             async with session.begin():
                 for table_name, model_class in MAIN_DB_MODELS.items():
@@ -561,6 +628,33 @@ class AstrBotImporter:
                         raise DatabaseClearError(
                             f"清空表 {table_name} 失败: {e}"
                         ) from e
+
+                for table_name, rows in data.items():
+                    model_class = MAIN_DB_MODELS.get(table_name)
+                    if not model_class:
+                        logger.warning(f"未知的表: {table_name}")
+                        continue
+                    normalized_rows = self._preprocess_main_table_rows(
+                        table_name, rows
+                    )
+
+                    count = 0
+                    for row in normalized_rows:
+                        try:
+                            # 转换 datetime 字符串为 datetime 对象
+                            row = self._convert_datetime_fields(row, model_class)
+                            obj = model_class(**row)
+                            # 行级 SAVEPOINT：单行失败只回滚该行
+                            async with session.begin_nested():
+                                session.add(obj)
+                            count += 1
+                        except Exception as e:
+                            logger.warning(f"导入记录到 {table_name} 失败: {e}")
+
+                    imported[table_name] = count
+                    logger.debug(f"导入表 {table_name}: {count} 条记录")
+
+        return imported
 
     async def _clear_kb_data(self) -> None:
         """清空知识库数据"""
@@ -588,37 +682,6 @@ class AstrBotImporter:
                 logger.warning(f"清理知识库 {kb_id} 失败: {e}")
 
         self.kb_manager.kb_insts.clear()
-
-    async def _import_main_database(
-        self, data: dict[str, list[dict]]
-    ) -> dict[str, int]:
-        """导入主数据库数据"""
-        imported: dict[str, int] = {}
-
-        async with self.main_db.get_db() as session:
-            async with session.begin():
-                for table_name, rows in data.items():
-                    model_class = MAIN_DB_MODELS.get(table_name)
-                    if not model_class:
-                        logger.warning(f"未知的表: {table_name}")
-                        continue
-                    normalized_rows = self._preprocess_main_table_rows(table_name, rows)
-
-                    count = 0
-                    for row in normalized_rows:
-                        try:
-                            # 转换 datetime 字符串为 datetime 对象
-                            row = self._convert_datetime_fields(row, model_class)
-                            obj = model_class(**row)
-                            session.add(obj)
-                            count += 1
-                        except Exception as e:
-                            logger.warning(f"导入记录到 {table_name} 失败: {e}")
-
-                    imported[table_name] = count
-                    logger.debug(f"导入表 {table_name}: {count} 条记录")
-
-        return imported
 
     def _preprocess_main_table_rows(
         self, table_name: str, rows: list[dict[str, Any]]
@@ -844,40 +907,79 @@ class AstrBotImporter:
         zf: zipfile.ZipFile,
         attachments: list[dict],
     ) -> int:
-        """导入附件文件"""
+        """导入附件文件
+
+        附件记录中的 path 是导出机器上的绝对路径。同一安装目录内恢复时按
+        原路径还原；备份来自其他安装路径（换目录/换机器）时，附件改写到
+        当前 data/attachments 下，并同步重写数据库中的 path 字段，
+        保证恢复后附件仍然可访问。
+        """
         count = 0
+        path_rewrites: list[tuple[str, str]] = []
 
         attachments_dir = Path(self.config_path).parent / "attachments"
         attachments_dir.mkdir(parents=True, exist_ok=True)
 
+        # 先建 id -> path 索引，避免每个附件都全表扫一遍记录
+        attachments_by_id = {
+            att.get("attachment_id"): att for att in attachments if att.get("attachment_id")
+        }
+
         attachment_prefix = "files/attachments/"
         for name in zf.namelist():
-            if name.startswith(attachment_prefix) and name != attachment_prefix:
-                try:
-                    # 从附件记录中找到原始路径
-                    attachment_id = os.path.splitext(os.path.basename(name))[0]
-                    original_path = None
-                    for att in attachments:
-                        if att.get("attachment_id") == attachment_id:
-                            original_path = att.get("path")
-                            break
+            if not name.startswith(attachment_prefix) or name == attachment_prefix:
+                continue
+            try:
+                attachment_id = os.path.splitext(os.path.basename(name))[0]
+                ext = os.path.splitext(name)[1]
+                att = attachments_by_id.get(attachment_id)
+                original_path = att.get("path") if att else None
 
-                    if original_path:
-                        target_path = Path(original_path)
+                target_path: Path | None = None
+                if original_path:
+                    candidate = Path(original_path)
+                    if _validate_path_within(candidate, attachments_dir):
+                        # 同一安装目录：按原路径还原，数据库记录无需改动
+                        target_path = candidate
                     else:
-                        target_path = attachments_dir / os.path.basename(name)
+                        # 备份来自其他安装路径：重写到当前附件目录，
+                        # 保持原文件名；若文件名已被占用则改用 attachment_id
+                        candidate = attachments_dir / os.path.basename(original_path)
+                        if candidate.exists():
+                            candidate = attachments_dir / f"{attachment_id}{ext}"
+                        if _validate_path_within(candidate, attachments_dir):
+                            target_path = candidate
+                            path_rewrites.append((attachment_id, str(candidate)))
 
-                    # Validate path is within attachments directory (CWE-22)
-                    if not _validate_path_within(target_path, attachments_dir):
-                        logger.warning(f"附件路径越界，已跳过: {target_path}")
-                        continue
+                if target_path is None:
+                    # 找不到记录或原路径不可用：落到当前附件目录
+                    target_path = attachments_dir / os.path.basename(name)
 
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(name) as src, open(target_path, "wb") as dst:
-                        dst.write(src.read())
-                    count += 1
-                except Exception as e:
-                    logger.warning(f"导入附件 {name} 失败: {e}")
+                # Validate path is within attachments directory (CWE-22)
+                if not _validate_path_within(target_path, attachments_dir):
+                    logger.warning(f"附件路径越界，已跳过: {target_path}")
+                    continue
+
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(name) as src, open(target_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                count += 1
+            except Exception as e:
+                logger.warning(f"导入附件 {name} 失败: {e}")
+
+        if path_rewrites:
+            async with self.main_db.get_db() as session:
+                async with session.begin():
+                    for attachment_id, new_path in path_rewrites:
+                        await session.execute(
+                            update(Attachment)
+                            .where(col(Attachment.attachment_id) == attachment_id)
+                            .values(path=new_path)
+                        )
+            logger.info(
+                f"备份来自其他安装路径，已将 {len(path_rewrites)} 条附件路径"
+                f"重写到当前附件目录"
+            )
 
         return count
 
@@ -916,8 +1018,6 @@ class AstrBotImporter:
             target_dir = Path(backup_directories[dir_name])
             archive_prefix = f"directories/{dir_name}/"
 
-            file_count = 0
-
             try:
                 # 获取该目录下的所有文件
                 dir_files = [
@@ -929,28 +1029,24 @@ class AstrBotImporter:
                 if not dir_files:
                     continue
 
-                # 备份现有目录（如果存在）
-                if target_dir.exists():
-                    backup_path = Path(f"{target_dir}.bak")
-                    if backup_path.exists():
-                        shutil.rmtree(backup_path)
-                    shutil.move(str(target_dir), str(backup_path))
-                    logger.debug(f"已备份现有目录 {target_dir} 到 {backup_path}")
+                # 先解压到同级暂存目录，全部成功后才替换现有目录。
+                # 直接覆盖的话，中途失败会留下不完整的新目录；
+                # 暂存方案保证失败时旧目录原封不动。
+                staging_dir = target_dir.parent / f".{target_dir.name}.importing"
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                staging_dir.mkdir(parents=True, exist_ok=True)
 
-                # 创建目标目录
-                target_dir.mkdir(parents=True, exist_ok=True)
-
-                # 解压文件
-                for name in dir_files:
-                    try:
+                file_count = 0
+                try:
+                    for name in dir_files:
                         # 计算相对路径
                         rel_path = name[len(archive_prefix) :]
                         if not rel_path:  # 跳过目录条目
                             continue
 
-                        target_path = target_dir / rel_path
-                        # Validate path is within target directory (CWE-22)
-                        if not _validate_path_within(target_path, target_dir):
+                        target_path = staging_dir / rel_path
+                        # Validate path is within staging directory (CWE-22)
+                        if not _validate_path_within(target_path, staging_dir):
                             result.add_warning(f"文件路径越界，已跳过: {name}")
                             continue
 
@@ -961,10 +1057,22 @@ class AstrBotImporter:
                         target_path.parent.mkdir(parents=True, exist_ok=True)
 
                         with zf.open(name) as src, open(target_path, "wb") as dst:
-                            dst.write(src.read())
+                            shutil.copyfileobj(src, dst)
                         file_count += 1
-                    except Exception as e:
-                        result.add_warning(f"导入文件 {name} 失败: {e}")
+                except Exception as e:
+                    result.add_warning(f"解压目录 {dir_name} 失败，已放弃替换: {e}")
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+                    dir_stats[dir_name] = 0
+                    continue
+
+                # 解压完整：旧目录移入 .bak 保留，暂存目录就位
+                if target_dir.exists():
+                    backup_path = Path(f"{target_dir}.bak")
+                    if backup_path.exists():
+                        shutil.rmtree(backup_path)
+                    shutil.move(str(target_dir), str(backup_path))
+                    logger.debug(f"已备份现有目录 {target_dir} 到 {backup_path}")
+                shutil.move(str(staging_dir), str(target_dir))
 
                 dir_stats[dir_name] = file_count
                 logger.debug(f"导入目录 {dir_name}: {file_count} 个文件")

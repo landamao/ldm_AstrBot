@@ -907,6 +907,9 @@ class ProviderManager:
                     prov for prov in config["provider"] if prov.get("id") != tpid
                 ]
             config.save_config()
+            # sync in-memory config for API queries, otherwise deleted providers
+            # would still show up in provider list endpoints until next reload
+            self.providers_config = astrbot_config["provider"]
             logger.info(f"提供商 {target_prov_ids} 已从配置中删除。")
 
     async def update_provider(self, origin_provider_id: str, new_config: dict) -> None:

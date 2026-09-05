@@ -284,7 +284,8 @@ async def test_设置_人格名不存在不写任何数据():
         await cmds.persona(event)
     assert writes == []
     text = _result_text(event)
-    assert "不存在该人格情景" in text
+    assert "人格「不存在」不存在" in text
+    assert "persona list" in text
 
 
 # ==== unset ====

@@ -1,0 +1,1 @@
+import{cs as t}from"./index-CwHagYMM.js";function c(){return t("$confirm",void 0)}async function f(n,o){const r=o??void 0;if(r)try{return await r({message:n})}catch{return!1}return window.confirm(n)}async function u(n,o){const r=o??void 0;if(r)try{return await r({htmlMessage:n})}catch{return!1}const i=n.replace(/<[^>]*>/g,"");return window.confirm(i)}export{f as a,u as b,c as u};
