@@ -18,9 +18,12 @@ from astrbot.core.desktop_runtime import (
     is_desktop_managed_backend,
 )
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_path
-from astrbot.core.utils.io import ensure_dir, on_error
 from astrbot.core.utils.github_proxy import normalize_ldm_mirror
-from astrbot.core.utils.update_rollback import backup_current_version, clear_dir_contents
+from astrbot.core.utils.io import ensure_dir, on_error
+from astrbot.core.utils.update_rollback import (
+    backup_current_version,
+    clear_dir_contents,
+)
 from astrbot.core.utils.zip_fix import fix_zip_entry_names
 
 from .zip_updator import ReleaseInfo, RepoZipUpdator
@@ -52,8 +55,9 @@ class AstrBotUpdator(RepoZipUpdator):
     }
 
     # 这些根文件/目录会从更新包直接覆盖（若包内存在）
-    # 例如：main.py、README.md、requirements.txt、pyproject.toml、astrbot/、dashboard/ 等
-    # 实际策略：包内除「受保护顶层目录」外全部覆盖，不限于下面示例
+    # 例如：main.py、README.md、requirements.txt、pyproject.toml、astrbot/ 等
+    # 实际策略：包内除「受保护顶层目录」外全部覆盖，不限于下面示例；
+    # dashboard 例外：只同步 dist，本地 dashboard/ 源码不整目录覆盖（见 _应用源码包内容）
     根目录覆盖示例 = {
         "main.py",
         "README.md",
@@ -64,7 +68,6 @@ class AstrBotUpdator(RepoZipUpdator):
         "pyproject.toml",
         "uv.lock",
         "astrbot",
-        "dashboard",
         "scripts",
         "changelogs",
         "docs",
@@ -84,9 +87,7 @@ class AstrBotUpdator(RepoZipUpdator):
         # GitHub API 短缓存，降低限流概率
         self._releases_cache: list | None = None
         self._releases_cache_at: float = 0.0
-        self._cache_ttl_seconds = int(
-            os.environ.get("LDMBOT_UPDATE_CACHE_TTL", "300")
-        )
+        self._cache_ttl_seconds = int(os.environ.get("LDMBOT_UPDATE_CACHE_TTL", "300"))
         # 并发锁：防止 checkUpdate + getReleases 同时调用导致重复拉取和重复日志
         self._fetch_lock = asyncio.Lock()
 
@@ -178,7 +179,7 @@ class AstrBotUpdator(RepoZipUpdator):
             entry_xml,
             re.IGNORECASE | re.DOTALL,
         )
-        return (match.group(1).strip() if match else "")
+        return match.group(1).strip() if match else ""
 
     def _parse_releases_atom(self, xml_text: str) -> list[dict]:
         import re
@@ -302,7 +303,10 @@ class AstrBotUpdator(RepoZipUpdator):
             tags.append(self._build_tag_release_item(tag, sha))
 
         # 新版本在前：支持 v4.26.5 / v4.26.5-v2 / v4.26.5-v3
-        tags.sort(key=lambda item: self._tag_sort_key(str(item.get("tag_name") or "")), reverse=True)
+        tags.sort(
+            key=lambda item: self._tag_sort_key(str(item.get("tag_name") or "")),
+            reverse=True,
+        )
         return tags
 
     def _build_tag_release_item(self, tag: str, sha: str) -> dict:
@@ -381,14 +385,16 @@ class AstrBotUpdator(RepoZipUpdator):
             tag = item.get("tag_name", "")
             if not tag:
                 continue
-            ret.append({
-                "version": tag,
-                "published_at": item.get("published_at", ""),
-                "body": item.get("body", ""),
-                "tag_name": tag,
-                "zipball_url": item.get("url", "")
+            ret.append(
+                {
+                    "version": tag,
+                    "published_at": item.get("published_at", ""),
+                    "body": item.get("body", ""),
+                    "tag_name": tag,
+                    "zipball_url": item.get("url", "")
                     or f"{mirror_url}/releases/{tag}.zip",
-            })
+                }
+            )
         ret.sort(
             key=lambda item: self._tag_sort_key(str(item.get("tag_name") or "")),
             reverse=True,
@@ -445,8 +451,7 @@ class AstrBotUpdator(RepoZipUpdator):
             ret = await self.fetch_release_info_from_mirror(mirror_url)
             if ret:
                 logger.info(
-                    f"从 ldm 镜像服务器获取到 {len(ret)} 个版本"
-                    f"（{mirror_url}）"
+                    f"从 ldm 镜像服务器获取到 {len(ret)} 个版本（{mirror_url}）"
                 )
                 self._releases_cache = ret
                 self._releases_cache_at = now
@@ -694,7 +699,9 @@ class AstrBotUpdator(RepoZipUpdator):
             )
         return None
 
-    async def get_releases(self, force_refresh: bool = False, mirror_url: str = "") -> list:
+    async def get_releases(
+        self, force_refresh: bool = False, mirror_url: str = ""
+    ) -> list:
         """返回可安装的 GitHub Release 列表（仅 tag，新版本在前）。"""
         releases: list = []
         try:
@@ -757,9 +764,7 @@ class AstrBotUpdator(RepoZipUpdator):
             raise Exception(f"从 ldm 镜像获取版本信息失败: {exc}") from exc
 
         if not mirror_releases:
-            raise Exception(
-                f"ldm 镜像服务器（{mirror_url}）没有可用的版本，无法下载"
-            )
+            raise Exception(f"ldm 镜像服务器（{mirror_url}）没有可用的版本，无法下载")
 
         target_version = None
         file_url = None
@@ -775,17 +780,13 @@ class AstrBotUpdator(RepoZipUpdator):
                     file_url = f"{mirror_url}/releases/{target_version}.zip"
                     break
             if not file_url:
-                raise Exception(
-                    f"ldm 镜像服务器上没有找到版本 {version_text} 的更新包"
-                )
+                raise Exception(f"ldm 镜像服务器上没有找到版本 {version_text} 的更新包")
         else:
             raise Exception(
                 f"仅支持按 Release / tag 更新，不支持 commit 或分支: {version_text!r}"
             )
 
-        logger.info(
-            f"从 ldm 镜像服务器下载更新包: {target_version}（{mirror_url}）"
-        )
+        logger.info(f"从 ldm 镜像服务器下载更新包: {target_version}（{mirror_url}）")
 
         zip_path = Path(path)
         ensure_dir(zip_path.parent)
@@ -853,7 +854,9 @@ class AstrBotUpdator(RepoZipUpdator):
             try:
                 update_data = await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
             except Exception as exc:
-                raise Exception(f"获取 GitHub Release 失败，无法下载最新版: {exc}") from exc
+                raise Exception(
+                    f"获取 GitHub Release 失败，无法下载最新版: {exc}"
+                ) from exc
 
             if not update_data:
                 raise Exception(
@@ -961,10 +964,25 @@ class AstrBotUpdator(RepoZipUpdator):
         规则：
         1. 覆盖项目根下所有文件与目录（含 main.py、README.md、requirements.txt 等）
         2. 跳过受保护顶层目录（data/.venv/node_modules/.git 等）
-        3. data 不整目录覆盖；WebUI 由后续 _应用webui 单独覆盖 dashboard/dist
+        3. dashboard 不整目录覆盖：更新包的 dashboard/ 只带 WebUI 构建产物（dist），
+           本地 dashboard/ 还承载源码与工程文件，整目录覆盖会把它们全清掉；
+           dist 由后续 _应用webui 单独覆盖到实际生效的 WebUI 目录
         """
         目标根 = Path(self.MAIN_PATH)
         ensure_dir(目标根)
+
+        # 包内 dashboard/ 里 dist 之外的条目没有同步语义，提示后忽略
+        包dashboard = 包根目录 / "dashboard"
+        if 包dashboard.is_dir():
+            非dist条目 = sorted(
+                条目 for 条目 in os.listdir(包dashboard) if 条目 != "dist"
+            )
+            if 非dist条目:
+                logger.warning(
+                    "更新包 dashboard/ 内含 dist 之外的条目（%s），已忽略；"
+                    "WebUI 仅同步 dashboard/dist。",
+                    "、".join(非dist条目),
+                )
 
         已覆盖: list[str] = []
         已跳过: list[str] = []
@@ -972,6 +990,11 @@ class AstrBotUpdator(RepoZipUpdator):
         for 名称 in sorted(os.listdir(包根目录)):
             if 名称 in self.受保护顶层目录:
                 已跳过.append(名称)
+                continue
+            if 名称 == "dashboard":
+                # 本地 dashboard/ 下源码、工程文件与 dist 共存，只由 _应用webui
+                # 覆盖实际生效的 WebUI 目录，绝不整目录清空
+                已跳过.append("dashboard")
                 continue
             if 名称.endswith(".meta.json"):
                 continue
@@ -1089,7 +1112,9 @@ class AstrBotUpdator(RepoZipUpdator):
                     data_dir=get_astrbot_data_path(),
                 )
             except Exception as exc:
-                raise RuntimeError(f"更新前备份旧版本失败，已中断更新（避免旧版本丢失）: {exc}") from exc
+                raise RuntimeError(
+                    f"更新前备份旧版本失败，已中断更新（避免旧版本丢失）: {exc}"
+                ) from exc
             logger.info(f"更新前已备份当前版本 {VERSION} -> {backup_path}")
 
             webui_dist = self._应用源码包内容(包根目录)
@@ -1107,8 +1132,7 @@ class AstrBotUpdator(RepoZipUpdator):
         self._写入更新元数据(
             version=side_meta.get("version"),
             sha=side_meta.get("sha"),
-            source=side_meta.get("source")
-            or f"{self.仓库所有者}/{self.仓库名}",
+            source=side_meta.get("source") or f"{self.仓库所有者}/{self.仓库名}",
             webui_applied=webui_applied,
             local_version=VERSION,
         )

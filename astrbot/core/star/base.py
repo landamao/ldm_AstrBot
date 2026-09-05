@@ -105,10 +105,10 @@ class Star(CommandParserMixin, PluginKVStoreMixin):
         )
 
     async def initialize(self) -> None:
-        """当插件被激活时会调用这个方法"""
+        """可选异步初始化，当插件被激活时会调用这个方法"""
 
     async def terminate(self) -> None:
-        """当插件被禁用、重载插件时会调用这个方法"""
+        """可选异步终止，当插件被禁用、重载前会调用这个方法"""
 
     def __del__(self) -> None:
         """[Deprecated] 当插件被禁用、重载插件时会调用这个方法"""

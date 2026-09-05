@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from astrbot.core import logger
 from astrbot.core.config.astrbot_config import RateLimitStrategy
+from astrbot.core.message.components import Plain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from ..context import PipelineContext
@@ -22,11 +23,13 @@ class RateLimitStage(Stage):
     def __init__(self) -> None:
         # 存储每个会话的请求时间队列
         self.event_timestamps: defaultdict[str, deque[datetime]] = defaultdict(deque)
-        # 为每个会话设置一个锁，避免并发冲突
+        # 为每个会话设置一个锁，避免并发修改队列
         self.locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # 限流参数
         self.rate_limit_count: int = 0
         self.rate_limit_time: timedelta = timedelta(0)
+        # 空消息（如 NapCat 的"正在输入"状态消息）是否不计入限流
+        self.ignore_empty_message: bool = True
 
     async def initialize(self, ctx: PipelineContext) -> None:
         """初始化限流器，根据配置设置限流参数。"""
@@ -39,6 +42,25 @@ class RateLimitStage(Stage):
         self.rl_strategy = ctx.astrbot_config["platform_settings"]["rate_limit"][
             "strategy"
         ]  # stall or discard
+        self.ignore_empty_message = (
+            ctx.astrbot_config["platform_settings"]["rate_limit"].get(
+                "ignore_empty_message",
+                True,
+            )
+        )
+
+    @staticmethod
+    def _is_empty_message(event: AstrMessageEvent) -> bool:
+        """消息链为空或仅含空字符串文本组件时视为空消息。
+
+        只有真正没有内容的消息（如 NapCat 的"正在输入"状态事件）才算空；
+        用户发送的空格等有字符的文本是真实消息，仍正常计数。
+        图片、@ 等非文本组件存在时也不算空消息。
+        """
+        chain = event.message_obj.message
+        if not chain:
+            return True
+        return all(isinstance(comp, Plain) and not comp.text for comp in chain)
 
     async def process(
         self,
@@ -55,6 +77,11 @@ class RateLimitStage(Stage):
 
         """
         session_id = event.session_id
+
+        # 空消息不计数也不 stall：这类消息（如 NapCat 的"正在输入"状态）会
+        # 短时间大量刷新，参与计数会迅速触发限流，把正常消息一起拖住
+        if self.ignore_empty_message and self._is_empty_message(event):
+            return None
 
         async with self.locks[session_id]:  # 确保同一会话不会并发修改队列
             now = datetime.now()

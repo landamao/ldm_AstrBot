@@ -40,6 +40,7 @@ from astrbot.core.star.config import *
 # provider
 from astrbot.core.provider import Provider, ProviderMetaData
 from astrbot.core.db.po import Personality
+from astrbot.api.provider import ProviderRequest
 
 # platform
 from astrbot.core.platform import (

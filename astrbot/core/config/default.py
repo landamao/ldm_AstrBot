@@ -61,6 +61,7 @@ DEFAULT_CONFIG = {
             "time": 60,
             "count": 30,
             "strategy": "stall",  # stall, discard
+            "ignore_empty_message": True,
         },
         "reply_prefix": "",
         "forward_threshold": 400,
@@ -1117,6 +1118,7 @@ CONFIG_METADATA_2 = {
                                 "type": "string",
                                 "options": ["stall", "discard"],
                             },
+                            "ignore_empty_message": {"type": "bool"},
                         },
                     },
                     "no_permission_reply": {
@@ -4380,6 +4382,11 @@ CONFIG_METADATA_3 = {
                         "description": "速率限制策略",
                         "type": "string",
                         "options": ["stall", "discard"],
+                    },
+                    "platform_settings.rate_limit.ignore_empty_message": {
+                        "description": "空消息不计入限流",
+                        "type": "bool",
+                        "hint": "消息链为空或仅含空文本时不计数、不触发限流。适配 NapCat 等平台把“正在输入”等状态作为空消息短时间大量推送的情况。",
                     },
                 },
             },

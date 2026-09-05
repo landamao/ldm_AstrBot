@@ -1,5 +1,7 @@
 import asyncio
 import copy
+import hashlib
+import json
 import sys
 import time
 import traceback
@@ -99,6 +101,16 @@ class FollowUpTicket:
     text: str
     consumed: bool = False
     resolved: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@dataclass(slots=True)
+class _ContextUsageSnapshot:
+    """Store provider prompt usage bound to one request context."""
+
+    message_fingerprints: tuple[str, ...]
+    prompt_tokens: int
+    provider: Provider
+    tool_schema_fingerprint: str | None
 
 
 class _ToolExecutionInterrupted(Exception):
@@ -333,6 +345,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         )
 
         self.provider = provider
+        self._context_usage_snapshot: _ContextUsageSnapshot | None = None
         self.fallback_providers: list[Provider] = []
         seen_provider_ids: set[str] = {str(provider.provider_config.get("id", ""))}
         for fallback_provider in fallback_providers or []:
@@ -875,6 +888,50 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         log_context_sanitize_stats(stats)
         return sanitized_contexts
 
+    def _context_usage_fingerprints(
+        self,
+        messages: list[Message],
+        func_tool: ToolSet | None,
+    ) -> tuple[tuple[str, ...], str | None]:
+        """Build immutable fingerprints for a context-usage snapshot.
+
+        Args:
+            messages: Messages that form the provider request context.
+            func_tool: Tools exposed to the provider for that request.
+
+        Returns:
+            Immutable fingerprints for the messages and tool schema.
+        """
+        json_dump_kwargs = {
+            "default": str,
+            "ensure_ascii": False,
+            "separators": (",", ":"),
+            "sort_keys": True,
+        }
+        message_fingerprints = tuple(
+            hashlib.sha256(
+                json.dumps(message.model_dump(), **json_dump_kwargs).encode()
+            ).hexdigest()
+            for message in messages
+        )
+        tool_schema_fingerprint = None
+        if func_tool is not None:
+            tool_schema_fingerprint = hashlib.sha256(
+                json.dumps(
+                    [
+                        {
+                            "active": getattr(tool, "active", True),
+                            "description": tool.description,
+                            "name": tool.name,
+                            "parameters": tool.parameters,
+                        }
+                        for tool in func_tool.tools
+                    ],
+                    **json_dump_kwargs,
+                ).encode()
+            ).hexdigest()
+        return message_fingerprints, tool_schema_fingerprint
+
     def _func_tool_for_provider(self) -> ToolSet | None:
         if not self.req.func_tool:
             return None
@@ -1047,11 +1104,53 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         llm_resp_result = None
 
         # Process request-time context before sending it to the provider.
-        token_usage = self.req.conversation.token_usage if self.req.conversation else 0
+        trusted_token_usage = 0
+        snapshot = self._context_usage_snapshot
+        current_func_tool = self._func_tool_for_provider()
+        if snapshot:
+            message_fingerprints, tool_schema_fingerprint = (
+                self._context_usage_fingerprints(
+                    self.run_context.messages,
+                    current_func_tool,
+                )
+            )
+            if (
+                self.enforce_max_turns == -1
+                and snapshot.provider is self.provider
+                and snapshot.tool_schema_fingerprint == tool_schema_fingerprint
+                and len(self.run_context.messages) >= len(snapshot.message_fingerprints)
+                and snapshot.message_fingerprints
+                == message_fingerprints[: len(snapshot.message_fingerprints)]
+            ):
+                # The previous provider prompt includes overhead such as tool schemas.
+                # Only reuse it while the current request preserves that exact prefix.
+                tail_messages = self.run_context.messages[
+                    len(snapshot.message_fingerprints) :
+                ]
+                trusted_token_usage = snapshot.prompt_tokens + (
+                    self.request_context_manager.token_counter.count_tokens(
+                        tail_messages
+                    )
+                )
         self._simple_print_message_role("[BefCompact]", self.run_context.messages)
         self.run_context.messages = await self.request_context_manager.process(
-            self.run_context.messages, trusted_token_usage=token_usage
+            self.run_context.messages,
+            trusted_token_usage=trusted_token_usage,
         )
+        if snapshot:
+            processed_message_fingerprints, processed_tool_schema_fingerprint = (
+                self._context_usage_fingerprints(
+                    self.run_context.messages,
+                    self._func_tool_for_provider(),
+                )
+            )
+            if (
+                len(self.run_context.messages) < len(snapshot.message_fingerprints)
+                or snapshot.tool_schema_fingerprint != processed_tool_schema_fingerprint
+                or snapshot.message_fingerprints
+                != processed_message_fingerprints[: len(snapshot.message_fingerprints)]
+            ):
+                self._context_usage_snapshot = None
         self._simple_print_message_role("[AftCompact]", self.run_context.messages)
 
         async for llm_response in self._iter_llm_responses_with_fallback():
@@ -1107,6 +1206,22 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 self.stats.current_context_tokens = llm_response.usage.input
                 if self.req.conversation:
                     self.req.conversation.token_usage = llm_response.usage.total
+                if llm_response.usage.input > 0:
+                    # 把本次真实 prompt 的占用绑定到消息指纹上，供下一次
+                    # step 做压缩判断；conversation.token_usage 是含缓存
+                    # 命中和输出 token 的计费累计值，不能反映当前上下文大小
+                    message_fingerprints, tool_schema_fingerprint = (
+                        self._context_usage_fingerprints(
+                            self.run_context.messages,
+                            self._func_tool_for_provider(),
+                        )
+                    )
+                    self._context_usage_snapshot = _ContextUsageSnapshot(
+                        message_fingerprints=message_fingerprints,
+                        prompt_tokens=llm_response.usage.input,
+                        provider=self.provider,
+                        tool_schema_fingerprint=tool_schema_fingerprint,
+                    )
             yield AgentResponse(
                 type="agent_stats",
                 data=AgentResponseData(
@@ -1148,6 +1263,25 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 ),
             )
             return
+
+        # 工具集已被移除（如 max_step 强制收尾步）时，部分模型仍会幻觉输出
+        # 工具调用。必须在 skills_like requery 之前剥离工具调用字段、按普通
+        # 回复收尾：否则 _handle_function_tools 会因 func_tool 为空直接返回，
+        # 一条悬空的 assistant(tool_calls) 消息（无配对 tool 结果）进入上下文
+        # 并被持久化，且运行停在 RUNNING，用户收不到任何最终回复。
+        if llm_resp.tools_call_name and not self.req.func_tool:
+            logger.warning(
+                "LLM 返回了工具调用，但当前没有可用工具"
+                "（可能已达到 max_step 强制收尾）；视为幻觉调用，按普通回复收尾。"
+            )
+            llm_resp.tools_call_name = []
+            llm_resp.tools_call_args = []
+            llm_resp.tools_call_ids = []
+            llm_resp.tools_call_extra_content = {}
+            # 纯工具调用、无任何文本的幻觉剥离后本步会以空回复结束，
+            # 补一条上限提示，保证用户能收到可见回复
+            if not llm_resp.completion_text and not llm_resp.result_chain:
+                llm_resp.completion_text = "（工具调用次数已达上限，未能生成最终回复。）"
 
         if not llm_resp.tools_call_name:
             await self._complete_with_assistant_response(llm_resp)
@@ -1245,6 +1379,28 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     interrupted_tool_call_id=e.interrupted_tool_call_id,
                 )
                 return
+
+            # 协议安全网：每个 tool_call_id 必须有配对的 tool 结果，否则上下文
+            # 会留下悬空的 assistant(tool_calls) 消息而被 Provider 拒绝。逐个 id
+            # 检查而非比较数量：数量相等不代表配对（一个调用可能产出多个结果
+            # 块，另一个调用一个都没有）。
+            existing_result_ids = {
+                block.tool_call_id for block in tool_call_result_blocks
+            }
+            for tool_call_id in llm_resp.tools_call_ids:
+                if tool_call_id not in existing_result_ids:
+                    tool_call_result_blocks.append(
+                        ToolCallMessageSegment(
+                            role="tool",
+                            tool_call_id=tool_call_id,
+                            content=(
+                                "error: tool execution produced no result (tools may "
+                                "have been removed or the call was interrupted); "
+                                "ignore this call and answer based on the information "
+                                "gathered so far."
+                            ),
+                        )
+                    )
 
             # 将结果添加到上下文中
             parts = []

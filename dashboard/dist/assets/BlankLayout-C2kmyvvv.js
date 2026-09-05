@@ -1,1 +1,0 @@
-import{U as a,b as e,w as t,aq as o,f as n,i as s,an as r,o as c}from"./index-tgAstc3J.js";const l=a({__name:"BlankLayout",setup(p){return(u,_)=>(c(),e(o,null,{default:t(()=>[n(s(r))]),_:1}))}});export{l as default};

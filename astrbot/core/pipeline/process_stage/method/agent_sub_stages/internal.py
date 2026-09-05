@@ -1028,6 +1028,46 @@ class InternalAgentSubStage(Stage):
                 msg.content = final_body
         return messages
 
+    @staticmethod
+    def _drop_dangling_tool_call_messages(messages: list[Message]) -> list[Message]:
+        """丢弃带 tool_calls 但 tool 结果不足以配对的 assistant 消息及其残留结果。
+
+        旧版本在 max_step 强制收尾步曾把悬空的 assistant(tool_calls) 消息写进
+        历史（#9912）：协议非法，下一轮发给 Provider 会被拒绝。落库前整组剔除，
+        顺带清理已中毒的存量会话；正常配对或已注入占位结果的消息不受影响。
+        """
+        cleaned: list[Message] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            if message.role == "assistant" and message.tool_calls:
+                end = index + 1
+                while end < len(messages) and messages[end].role == "tool":
+                    end += 1
+                call_ids = set()
+                for call in message.tool_calls:
+                    call_id = call.get("id") if isinstance(call, dict) else call.id
+                    if call_id:
+                        call_ids.add(call_id)
+                result_ids = {
+                    m.tool_call_id
+                    for m in messages[index + 1 : end]
+                    if m.tool_call_id
+                }
+                if not call_ids.issubset(result_ids):
+                    logger.warning(
+                        "丢弃悬空的 assistant(tool_calls) 历史消息：%d 个 tool_call "
+                        "中 %d 个缺少配对的 tool 结果，整组 %d 条消息不落库。",
+                        len(call_ids),
+                        len(call_ids - result_ids),
+                        end - index,
+                    )
+                    index = end
+                    continue
+            cleaned.append(message)
+            index += 1
+        return cleaned
+
     async def _save_to_history(
         self,
         event: AstrMessageEvent,
@@ -1080,6 +1120,7 @@ class InternalAgentSubStage(Stage):
                 if message.role in ["assistant", "user"] and message._no_save:
                     continue
                 messages.append(message)
+            return self._drop_dangling_tool_call_messages(messages)
             return messages
 
         # LLM 失败（无响应 / 非 assistant）时仍尽量保留消息，便于续写（#9358）。
