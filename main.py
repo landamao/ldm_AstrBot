@@ -3,6 +3,12 @@ import atexit
 import signal
 import os, sys, time, random, threading
 
+from astrbot.utils.env_file import bootstrap_env
+
+# 任何模块读取环境变量之前加载 .env（与 main.py 同目录，缺失时自动生成示例）。
+# astrbot.core 在导入期就会读取 LDMBOT_DATA_DIR 等变量，因此必须先于其导入执行。
+bootstrap_env(os.path.dirname(os.path.abspath(__file__)))
+
 # ========== 终端光标兜底恢复 ==========
 # 横幅动画在 daemon 线程里隐藏光标（\033[?25l），程序退出时 daemon 线程被强杀，
 # finally 里的 \033[?25h 可能来不及执行，导致终端光标永久消失。
@@ -381,6 +387,8 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
   -h, --help               显示本帮助信息
 
 环境变量:
+  以下变量也可写入与 main.py 同目录的 .env 文件（缺失时启动会自动生成
+  示例；去掉行首 "# " 启用；系统中已有的环境变量优先于 .env）:
 
   路径与运行模式:
     LDMBOT_DATA_DIR=<路径>              直接指定 data 目录路径

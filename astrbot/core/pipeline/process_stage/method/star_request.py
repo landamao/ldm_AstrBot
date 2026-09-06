@@ -67,6 +67,12 @@ class StarRequestSubStage(Stage):
                     traceback_text,
                 )
 
+                # 运行时读取，WebUI 修改后无需重启即生效。
+                # 继续模式下不发错误文案也不终止：文案一旦发出会置位 _has_send_oper，
+                # ProcessStage 会认为本事件已有回复而跳过 LLM 请求。
+                if self.ctx.astrbot_config.get("plugin_error_continue", False):
+                    continue
+
                 if not event.is_stopped() and event.is_at_or_wake_command:
                     ret = f":(\n\n在调用插件 {md.name} 的处理函数 {handler.handler_name} 时出现异常：{e}"
                     event.set_result(MessageEventResult().message(ret))

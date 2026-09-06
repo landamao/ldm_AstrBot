@@ -386,6 +386,7 @@ DEFAULT_CONFIG = {
     "callback_api_base": "",
     "default_kb_collection": "",  # 默认知识库名称, 已经过时
     "plugin_set": ["*"],  # "*" 表示使用所有可用的插件, 空列表表示不使用任何插件
+    "plugin_error_continue": False,  # 插件处理函数报错时不终止事件, 继续执行后续插件与流程
     "kb_names": [],  # 默认知识库名称列表
     "kb_fusion_top_k": 20,  # 知识库检索融合阶段返回结果数量
     "kb_final_top_k": 5,  # 知识库检索最终返回结果数量
@@ -4568,6 +4569,11 @@ CONFIG_METADATA_3 = {
                         "type": "bool",
                         "hint": "默认启用全部未被禁用的插件。若插件在插件页面被禁用，则此处的选择不会生效。",
                         "_special": "select_plugin_set",
+                    },
+                    "plugin_error_continue": {
+                        "description": "插件报错不中断事件",
+                        "type": "bool",
+                        "hint": "开启后，插件处理函数报错时仅记录日志，继续执行后续插件和事件流程；关闭时报错即终止该事件。",
                     },
                 },
             },

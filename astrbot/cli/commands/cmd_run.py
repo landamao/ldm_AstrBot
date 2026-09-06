@@ -8,6 +8,7 @@ import click
 from filelock import FileLock, Timeout
 
 from ..utils import check_astrbot_root, check_dashboard, get_astrbot_root
+from ...utils.env_file import bootstrap_env
 
 DASHBOARD_RESET_PASSWORD_ENV = "LDMBOT_RESET_DASHBOARD_PASSWORD"
 
@@ -99,6 +100,8 @@ def run(reload: bool, port: str | None, reset_password: bool) -> None:
                 f"{astrbot_root} is not a valid ldm root directory. Use 'astrbot init' to initialize",
             )
 
+        # 与 main.py 启动路径保持一致：加载 .env（缺失时自动生成示例）
+        bootstrap_env(astrbot_root)
         os.environ["LDMBOT_ROOT"] = str(astrbot_root)
         sys.path.insert(0, str(astrbot_root))
 
