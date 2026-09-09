@@ -221,7 +221,7 @@ class ConversationService:
                     "updated_at": conversation.updated_at,
                     "content": content,
                 }
-                jsonl_lines.append(json.dumps(export_record, ensure_ascii=False))
+                jsonl_lines.append(json.dumps(export_record, ensure_ascii=False, indent=2))
                 exported_count += 1
             except Exception as exc:
                 failed_items.append(f"user_id:{user_id}, cid:{cid} - {exc!s}")
