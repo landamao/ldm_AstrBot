@@ -351,10 +351,9 @@ class InternalAgentSubStage(Stage):
             )
             return False
 
-        # 固定英文系统提示，不可配置
+        # 固定英文系统提示，只陈述事实，不引导后续行为
         context_text = (
-            "The user sent a new message and interrupted this response. "
-            "Continue the conversation based on the content already sent above."
+            "The user sent a new message and interrupted this response."
         )
 
         # 不向旧任务写 history_note，避免与新请求重复注入
@@ -913,19 +912,17 @@ class InternalAgentSubStage(Stage):
             )
             return messages
 
-        # 固定英文系统提示，不可配置，让模型更信任这是系统发出的
+        # 固定英文系统提示，只陈述事实，不引导后续行为
         if force_stopped:
             note = (
                 "<system_reminder>"
-                "The user manually stopped this response. "
-                "Continue the conversation based on the content already sent above."
+                "The user manually stopped this response."
                 "</system_reminder>"
             )
         else:
             note = (
                 "<system_reminder>"
-                "The user sent a new message and interrupted this response. "
-                "Continue the conversation based on the content already sent above."
+                "The user sent a new message and interrupted this response."
                 "</system_reminder>"
             )
 

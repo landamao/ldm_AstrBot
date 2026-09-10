@@ -175,7 +175,7 @@ class PluginCommands:
         try:
             await self.context._star_manager.turn_off_plugin(plugin_name)  # type: ignore
             event.set_result(
-                MessageEventResult().message(f"插件 {plugin_name} 已禁用。")
+                MessageEventResult().message(f"插件「{plugin_name}」已禁用。")
             )
         except Exception as e:
             logger.error(f"禁用插件失败: {e}")
@@ -204,7 +204,7 @@ class PluginCommands:
         try:
             await self.context._star_manager.turn_on_plugin(plugin_name)  # type: ignore
             event.set_result(
-                MessageEventResult().message(f"插件 {plugin_name} 已启用。")
+                MessageEventResult().message(f"插件「{plugin_name}」已启用。")
             )
         except Exception as e:
             logger.error(f"启用插件失败: {e}")
@@ -228,8 +228,22 @@ class PluginCommands:
             star_mgr: PluginManager = self.context._star_manager
             try:
                 proxy = self._github_proxy(action="指令安装插件", target=plugin_repo)
-                await star_mgr.install_plugin(plugin_repo, proxy=proxy)  # type: ignore
-                event.set_result(MessageEventResult().message("安装插件成功。"))
+                plugin_info = await star_mgr.install_plugin(plugin_repo, proxy=proxy)  # type: ignore
+                plugin_label = "未知"
+                version = ""
+                if isinstance(plugin_info, dict):
+                    name = str(plugin_info.get("name") or "").strip()
+                    if name:
+                        plugin_label = name
+                        installed = self.context.get_registered_star(name)
+                        if installed:
+                            version = (installed.version or "").strip()
+                version_part = f"，版本 {version}" if version else ""
+                event.set_result(
+                    MessageEventResult().message(
+                        f"安装插件「{plugin_label}」成功{version_part}。"
+                    )
+                )
             except Exception as e:
                 logger.error(f"安装插件失败: {e}")
                 event.set_result(MessageEventResult().message(f"安装插件失败: {e}"))
@@ -258,7 +272,7 @@ class PluginCommands:
                 ),
             )
             return
-        logger.info(f"准备重启插件 {plugin_name}。")
+        logger.info(f"准备重启插件「{plugin_name}」。")
         try:
             success, error_message = await self.context._star_manager.reload(  # type: ignore
                 plugin_name
@@ -269,12 +283,12 @@ class PluginCommands:
             return
         if success:
             event.set_result(
-                MessageEventResult().message(f"插件 {plugin_name} 已重启。")
+                MessageEventResult().message(f"插件「{plugin_name}」已重启。")
             )
         else:
             event.set_result(
                 MessageEventResult().message(
-                    f"重启插件 {plugin_name} 失败: {error_message}"
+                    f"重启插件「{plugin_name}」失败: {error_message}"
                 )
             )
 
@@ -301,15 +315,23 @@ class PluginCommands:
                 ),
             )
             return
-        logger.info(f"准备更新插件 {plugin_name}。")
+        old_version = (plugin.version or "").strip()
+        logger.info(f"准备更新插件「{plugin_name}」（当前版本 {old_version or '未知'}）。")
         try:
             await event.send(
                 MessageEventResult().message(f"正在更新「{plugin_name}」插件…")
             )
             proxy = self._github_proxy(action="指令更新插件", target=plugin_name)
             await self.context._star_manager.update_plugin(plugin_name, proxy=proxy)  # type: ignore
+            new_plugin = self.context.get_registered_star(plugin_name)
+            new_version = (
+                (new_plugin.version or "").strip() if new_plugin else ""
+            )
+            version_part = f"{old_version or '未知'} → {new_version or '未知'}"
             event.set_result(
-                MessageEventResult().message(f"插件 {plugin_name} 更新成功。")
+                MessageEventResult().message(
+                    f"插件「{plugin_name}」更新成功，版本 {version_part}。"
+                )
             )
         except Exception as e:
             logger.error(f"更新插件失败: {e}")

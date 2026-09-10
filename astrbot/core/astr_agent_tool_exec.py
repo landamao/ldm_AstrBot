@@ -571,8 +571,8 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
             context_dump = req._print_friendly_context()
             req.contexts = []
             req.system_prompt += (
-                "\n\nBellow is you and user previous conversation history:\n"
-                f"{context_dump}"
+                "\n\n<system_reminder>Previous conversation history:\n"
+                f"{context_dump}</system_reminder>"
             )
 
         bg = json.dumps(extras["background_task_result"], ensure_ascii=False)
@@ -580,12 +580,9 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
             background_task_result=bg
         )
         req.prompt = (
-            "Proceed according to your system instructions. "
+            "<system_reminder>Responding to a completed background task. "
             "Output using same language as previous conversation. "
-            "If you need to deliver the result to the user immediately, "
-            "you MUST use `send_message_to_user` tool to send the message directly to the user, "
-            "otherwise the user will not see the result. "
-            "After completing your task, summarize and output your actions and results. "
+            "Use `send_message_to_user` to deliver results to the user.</system_reminder>"
         )
         if not req.func_tool:
             req.func_tool = ToolSet()

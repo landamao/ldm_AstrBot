@@ -182,7 +182,7 @@ class PluginService:
         if not success:
             raise PluginServiceError(f"重载失败: {err}", public_message="重载失败")
         await self.sync_skills_after_plugin_change()
-        return None, f"插件 {dir_name} 重载成功。"
+        return None, f"插件「{dir_name}」重载成功。"
 
     async def reload_plugin(self, data: object) -> tuple[None, str]:
         self._ensure_not_demo()
@@ -887,7 +887,7 @@ class PluginService:
                 show_sandbox_path=False,
             )
         except Exception as exc:
-            logger.warning(f"获取插件 Skills 失败 {plugin.name}: {exc!s}")
+            logger.warning(f"获取插件 Skills 失败「{plugin.name}」: {exc!s}")
             return []
 
         components = []
@@ -1724,13 +1724,13 @@ class PluginService:
         # 有加速时再兜底一次：CDN 直链无法套 gh-proxy 前缀
         if proxy and download_url:
             logger.info(
-                "安装插件 %s：已选择 GitHub 加速，跳过市场 CDN 直链",
+                "安装插件「%s」：已选择 GitHub 加速，跳过市场 CDN 直链",
                 repo_url,
             )
             download_url = ""
 
         try:
-            logger.info(f"正在安装插件 {repo_url}")
+            logger.info(f"正在安装插件「{repo_url}」")
             plugin_info = await self.plugin_manager.install_plugin(
                 repo_url,
                 proxy,
@@ -1747,7 +1747,7 @@ class PluginService:
                 download_url=download_url,
             )
             await self.sync_skills_after_plugin_change()
-            logger.info(f"安装插件 {repo_url} 成功。")
+            logger.info(f"安装插件「{repo_url}」成功。")
             return plugin_info or {}, "安装成功。"
         except PluginVersionUnsupportedError as exc:
             raise PluginServiceWarning(
@@ -1809,7 +1809,7 @@ class PluginService:
         ignore_version_check: bool,
     ) -> tuple[dict, str]:
         self._ensure_not_demo()
-        logger.info(f"正在安装用户上传的插件 {upload_file.filename}")
+        logger.info(f"正在安装用户上传的插件「{upload_file.filename}」")
         filename = str(upload_file.filename or "plugin.zip").replace("\\", "/")
         file_path = os.path.join(
             get_astrbot_temp_path(),
@@ -1829,7 +1829,7 @@ class PluginService:
                 download_url="",
             )
             await self.sync_skills_after_plugin_change()
-            logger.info(f"安装插件 {upload_file.filename} 成功")
+            logger.info(f"安装插件「{upload_file.filename}」成功")
             return plugin_info or {}, "安装成功。"
         except PluginVersionUnsupportedError as exc:
             raise PluginServiceWarning(
@@ -1858,7 +1858,7 @@ class PluginService:
         plugin_name = payload["name"]
         delete_config = payload.get("delete_config", False)
         delete_data = payload.get("delete_data", False)
-        logger.info(f"正在卸载插件 {plugin_name}")
+        logger.info(f"正在卸载插件「{plugin_name}」")
         plugin = self.find_plugin_by_name(plugin_name)
         root_dir_name = plugin.root_dir_name if plugin else None
         await self.plugin_manager.uninstall_plugin(
@@ -1880,14 +1880,14 @@ class PluginService:
         if not dir_name:
             raise PluginServiceError("缺少失败插件目录名")
 
-        logger.info(f"正在卸载失败插件 {dir_name}")
+        logger.info(f"正在卸载失败插件「{dir_name}」")
         await self.plugin_manager.uninstall_failed_plugin(
             dir_name,
             delete_config=delete_config,
             delete_data=delete_data,
         )
         await self.sync_skills_after_plugin_change()
-        logger.info(f"卸载失败插件 {dir_name} 成功")
+        logger.info(f"卸载失败插件「{dir_name}」成功")
         return None, "卸载成功"
 
     async def update_failed_plugin(self, data: object) -> tuple[None, str]:
@@ -1967,12 +1967,12 @@ class PluginService:
         # 选了 GitHub 加速且有仓库地址时，跳过 CDN 直链
         if proxy and download_url and repo_url:
             logger.info(
-                "更新失败插件 %s：已选择 GitHub 加速，跳过市场 CDN 直链",
+                "更新失败插件「%s」：已选择 GitHub 加速，跳过市场 CDN 直链",
                 dir_name,
             )
             download_url = ""
 
-        logger.info(f"正在更新失败插件 {dir_name}")
+        logger.info(f"正在更新失败插件「{dir_name}」")
         try:
             await self.plugin_manager.update_failed_plugin(
                 dir_name,
@@ -1981,7 +1981,7 @@ class PluginService:
                 repo_url=repo_url,
             )
         except Exception as exc:
-            logger.error(f"更新失败插件 {dir_name} 失败: {exc}", exc_info=True)
+            logger.error(f"更新失败插件「{dir_name}」失败: {exc}", exc_info=True)
             raise PluginServiceError(
                 str(exc),
                 public_message=str(exc) or "更新失败",
@@ -2003,7 +2003,7 @@ class PluginService:
                 logger.warning("刷新失败插件安装源记录失败 %s: %s", dir_name, exc)
 
         await self.sync_skills_after_plugin_change()
-        logger.info(f"更新失败插件 {dir_name} 成功")
+        logger.info(f"更新失败插件「{dir_name}」成功")
         return None, "更新成功。"
 
     async def update_plugin(self, data: object) -> tuple[None, str]:
@@ -2020,11 +2020,11 @@ class PluginService:
         # 前端传了 GitHub 加速时，改走仓库下载，代理才能生效（市场 CDN 无法套 gh-proxy）
         if proxy and download_url:
             logger.info(
-                "更新插件 %s：已选择 GitHub 加速，跳过市场 CDN 直链",
+                "更新插件「%s」：已选择 GitHub 加速，跳过市场 CDN 直链",
                 plugin_name,
             )
             download_url = ""
-        logger.info(f"正在更新插件 {plugin_name}")
+        logger.info(f"正在更新插件「{plugin_name}」")
         await self.plugin_manager.update_plugin(
             plugin_name, proxy, download_url=download_url, repo_url=str(update_info.get("repo") or "").strip()
         )
@@ -2053,7 +2053,7 @@ class PluginService:
         async def _update_one(name: str):
             async with sem:
                 try:
-                    logger.info(f"批量更新插件 {name}")
+                    logger.info(f"批量更新插件「{name}」")
                     update_info = await self.resolve_market_update_info(name)
                     download_url = str(update_info.get("download_url") or "").strip()
                     # 批量更新若带了 GitHub 加速，同样优先走仓库
@@ -2068,7 +2068,7 @@ class PluginService:
                     return {"name": name, "status": "ok", "message": "更新成功"}
                 except PluginServiceError as exc:
                     logger.error(
-                        f"/api/plugin/update-all: 更新插件 {name} 失败: {exc}",
+                        f"/api/plugin/update-all: 更新插件「{name}」失败: {exc}",
                     )
                     return {
                         "name": name,
@@ -2077,7 +2077,7 @@ class PluginService:
                     }
                 except Exception:
                     logger.error(
-                        f"/api/plugin/update-all: 更新插件 {name} 失败",
+                        f"/api/plugin/update-all: 更新插件「{name}」失败",
                         exc_info=True,
                     )
                     return {
@@ -2095,7 +2095,7 @@ class PluginService:
                 raise result
             if isinstance(result, BaseException):
                 logger.error(
-                    f"/api/plugin/update-all: 更新插件 {name} 任务失败: {result!r}"
+                    f"/api/plugin/update-all: 更新插件「{name}」任务失败: {result!r}"
                 )
                 results.append(
                     {

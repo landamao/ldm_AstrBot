@@ -195,65 +195,45 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
     EMPTY_OUTPUT_RETRY_WAIT_MIN_S = 1
     EMPTY_OUTPUT_RETRY_WAIT_MAX_S = 4
     USER_INTERRUPTION_MESSAGE = (
-        "[SYSTEM: User actively interrupted the response generation. "
-        "Partial output before interruption is preserved.]"
+        "<system_reminder>User actively interrupted the response generation. "
+        "Partial output before interruption is preserved.</system_reminder>"
     )
     FOLLOW_UP_NOTICE_TEMPLATE = (
-        "\n\n[SYSTEM NOTICE] User sent follow-up messages while tool execution was in progress. "
+        "\n\n<system_reminder>User sent follow-up messages while tool execution was in progress. "
         "These follow-up messages have been merged into this single message in chronological order, "
-        "each prefixed with [Message N]. Prioritize these follow-up instructions in your next actions. "
-        "In your very next action, briefly acknowledge to the user that their follow-up message(s) "
-        "were received before continuing.\n"
-        "{follow_up_lines}"
+        "each prefixed with [Message N].\n"
+        "{follow_up_lines}</system_reminder>"
     )
     MAX_STEPS_REACHED_PROMPT = (
-        "Maximum tool call limit reached. "
-        "Stop calling tools, and based on the information you have gathered, "
-        "summarize your task and findings, and reply to the user directly."
+        "<system_reminder>Maximum tool call limit reached.</system_reminder>"
     )
     SKILLS_LIKE_REQUERY_INSTRUCTION_TEMPLATE = (
-        "You have decided to call tool(s): {tool_names}. Now call the tool(s) "
-        "with required arguments using the tool schema, and follow the existing "
-        "tool-use rules."
+        "<system_reminder>Selected tool(s): {tool_names}. "
+        "Full parameter schema is provided below.</system_reminder>"
     )
     SKILLS_LIKE_REQUERY_REPAIR_INSTRUCTION = (
-        "This is the second-stage tool execution step. "
-        "You must do exactly one of the following: "
-        "1. Call one of the selected tools using the provided tool schema. "
-        "2. If calling a tool is no longer possible or appropriate, reply to the user "
-        "with a brief explanation of why. "
-        "Do not return an empty response. "
-        "Do not ignore the selected tools without explanation."
+        "<system_reminder>This is the second-stage tool execution step. "
+        "Selected tools and their full schemas are provided.</system_reminder>"
     )
     REPEATED_TOOL_NOTICE_L1_THRESHOLD = 3
     REPEATED_TOOL_NOTICE_L2_THRESHOLD = 4
     REPEATED_TOOL_NOTICE_L3_THRESHOLD = 5
     MALFORMED_TOOL_NAME_PLACEHOLDER = "__malformed_tool_name__"
     REPEATED_TOOL_NOTICE_L1_TEMPLATE = (
-        "\n\n[SYSTEM NOTICE] By the way, you have executed the same tool "
-        "`{tool_name}` with the same arguments {streak} times consecutively. "
-        "Double-check whether another tool, different arguments, or a summary would "
-        "move the task forward better."
+        "\n\n<system_reminder>Tool `{tool_name}` has been executed with the same "
+        "arguments {streak} times consecutively.</system_reminder>"
     )
     REPEATED_TOOL_NOTICE_L2_TEMPLATE = (
-        "\n\n[SYSTEM NOTICE] Important: you have executed the same tool "
-        "`{tool_name}` with the same arguments {streak} times consecutively. "
-        "Unless this repetition is clearly necessary, stop repeating the same action "
-        "and either switch tools, refine parameters, or summarize what is still "
-        "missing."
+        "\n\n<system_reminder>Tool `{tool_name}` has been executed with the same "
+        "arguments {streak} times consecutively.</system_reminder>"
     )
     REPEATED_TOOL_NOTICE_L3_TEMPLATE = (
-        "\n\n[SYSTEM NOTICE] Important: you have executed the same tool "
-        "`{tool_name}` with the same arguments {streak} times consecutively. "
-        "Repetition is now very high. Continue only if each call is clearly producing "
-        "new information. Otherwise, change strategy, adjust arguments, or explain "
-        "the limitation to the user."
+        "\n\n<system_reminder>Tool `{tool_name}` has been executed with the same "
+        "arguments {streak} times consecutively.</system_reminder>"
     )
     TOOL_RESULT_OVERFLOW_NOTICE_TEMPLATE = (
-        "Truncated tool output preview shown above. "
-        "The tool output was too large to include directly and was written to "
-        "`{overflow_path}`. Use {read_tool_hint} to inspect it. "
-        "Use a narrower window when reading large files."
+        "<system_reminder>Truncated tool output preview shown above. "
+        "Full output was written to `{overflow_path}`.</system_reminder>"
     )
 
     def _get_persona_custom_error_message(self) -> str | None:
@@ -419,11 +399,6 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self.stats.model_name = str(
             self.provider.provider_config.get("model", "")
         )
-
-    def _read_tool_hint(self) -> str:
-        if self.read_tool is not None:
-            return f"`{self.read_tool.name}`"
-        return "the available file-read tool"
 
     def _provider_supports_image_input(self) -> bool:
         """当前主模型是否支持图片输入，判定与收到的图片走同一实现。"""
@@ -627,7 +602,6 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
 
         notice = self.TOOL_RESULT_OVERFLOW_NOTICE_TEMPLATE.format(
             overflow_path=overflow_path,
-            read_tool_hint=self._read_tool_hint(),
         )
         if not preview:
             return notice

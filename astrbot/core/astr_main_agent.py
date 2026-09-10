@@ -154,10 +154,9 @@ WEB_SEARCH_CITATION_TOOL_NAMES = frozenset(
     }
 )
 WEB_SEARCH_CITATION_PROMPT = (
-    "Always cite web search results you rely on. "
-    "Index is a unique identifier for each search result. "
-    "Use the exact citation format <ref>index</ref> (e.g. <ref>abcd.3</ref>) "
-    "after the sentence that uses the information. Do not invent citations."
+    "Web search citation format: after a sentence that uses a search result, "
+    "place <ref>index</ref> where index is that result's unique identifier "
+    "(e.g. <ref>abcd.3</ref>)."
 )
 
 
@@ -303,7 +302,10 @@ async def _apply_kb(
                 return
             req.extra_user_content_parts.append(
                 TextPart(
-                    text=f"[Related Knowledge Base Results]:\n{kb_result}",
+                    text=(
+                        "<system_reminder>Related knowledge base results:\n"
+                        f"{kb_result}</system_reminder>"
+                    ),
                 ).mark_as_temp()
             )
         except Exception as exc:  # noqa: BLE001
@@ -454,25 +456,16 @@ def _apply_local_env_tools(req: ProviderRequest, plugin_context: Context) -> Non
 def _build_local_mode_prompt() -> str:
     system_name = platform.system() or "Unknown"
     if system_name.lower() != "windows":
-        shell_hint = (
-            "The runtime shell is Unix-like. Use POSIX-compatible shell commands."
-        )
+        shell_type = "Unix-like (POSIX)"
     elif resolve_windows_shell() == "pwsh.exe":
-        shell_hint = (
-            "The runtime shell is PowerShell 7 (pwsh.exe). "
-            "Use PowerShell 7-compatible syntax and cmdlets, and do not "
-            "assume a full Unix userland or GNU utilities are available."
-        )
+        shell_type = "PowerShell 7 (pwsh.exe)"
     else:
-        shell_hint = (
-            "The runtime shell is Windows PowerShell 5.1 (powershell.exe). "
-            "Use Windows PowerShell 5.1-compatible syntax and cmdlets; do not use "
-            "PowerShell 7-only syntax or assume Unix commands like cat/ls/grep are available."
-        )
+        shell_type = "Windows PowerShell 5.1 (powershell.exe)"
     return (
-        "You have access to the host local environment and can execute shell commands and Python code. "
-        f"Current operating system: {system_name}. "
-        f"{shell_hint}"
+        "<system_reminder>"
+        "Local host environment available: shell commands and Python code can be executed. "
+        f"Operating system: {system_name}. Shell: {shell_type}."
+        "</system_reminder>"
     )
 
 
@@ -575,9 +568,8 @@ async def _ensure_persona_and_skills(
             req.system_prompt += f"\n{build_skills_prompt(skills)}\n"
             if runtime == "none":
                 req.system_prompt += (
-                    "User has not enabled the Computer Use feature. "
-                    "You cannot use shell or Python to perform skills. "
-                    "If you need to use these capabilities, ask the user to enable Computer Use in the ldmbot WebUI -> Config."
+                    "<system_reminder>Computer Use is not enabled. "
+                    "Shell and Python tools are unavailable for skills.</system_reminder>"
                 )
     tmgr = plugin_context.get_llm_tool_manager()
 
@@ -717,8 +709,8 @@ async def _ensure_img_caption(
                 req.extra_user_content_parts.append(
                     TextPart(
                         text=(
-                            "[Image Attachment skipped (exceeds download "
-                            f"size limit): url {url}]"
+                            "<system_reminder>Image attachment skipped "
+                            f"(exceeds download size limit): url {url}</system_reminder>"
                         )
                     )
                 )
@@ -734,31 +726,56 @@ async def _ensure_img_caption(
         )
         if caption:
             req.extra_user_content_parts.append(
-                TextPart(text=f"<image_caption>{caption}</image_caption>")
+                TextPart(
+                    text=(
+                        "<system_reminder>Image caption:\n"
+                        f"{caption}\n"
+                        "</system_reminder>"
+                    )
+                )
             )
             req.image_urls = []
     except Exception as exc:  # noqa: BLE001
         logger.error("处理图片描述失败: %s", exc)
-        req.extra_user_content_parts.append(TextPart(text="[Image Captioning Failed]"))
+        req.extra_user_content_parts.append(
+            TextPart(
+                text="<system_reminder>Image captioning failed.</system_reminder>"
+            )
+        )
     finally:
         req.image_urls = []
 
 
 def _append_quoted_image_attachment(req: ProviderRequest, image_path: str) -> None:
     req.extra_user_content_parts.append(
-        TextPart(text=f"[Image Attachment in quoted message: path {image_path}]")
+        TextPart(
+            text=(
+                "<system_reminder>Image attachment in quoted message: "
+                f"path {image_path}</system_reminder>"
+            )
+        )
     )
 
 
 def _append_audio_attachment(req: ProviderRequest, audio_path: str) -> None:
     req.extra_user_content_parts.append(
-        TextPart(text=f"[Audio Attachment: path {audio_path}]")
+        TextPart(
+            text=(
+                "<system_reminder>Audio attachment: "
+                f"path {audio_path}</system_reminder>"
+            )
+        )
     )
 
 
 def _append_quoted_audio_attachment(req: ProviderRequest, audio_path: str) -> None:
     req.extra_user_content_parts.append(
-        TextPart(text=f"[Audio Attachment in quoted message: path {audio_path}]")
+        TextPart(
+            text=(
+                "<system_reminder>Audio attachment in quoted message: "
+                f"path {audio_path}</system_reminder>"
+            )
+        )
     )
 
 
@@ -777,9 +794,10 @@ async def _append_video_attachment(
         req.extra_user_content_parts.append(
             TextPart(
                 text=(
-                    "[Video Attachment skipped (exceeds download "
-                    f"size limit): name {os.path.basename(str(video_name))}, "
-                    f"url {video_ref or exc}]"
+                    "<system_reminder>Video attachment skipped "
+                    f"(exceeds download size limit): name "
+                    f"{os.path.basename(str(video_name))}, "
+                    f"url {video_ref or exc}</system_reminder>"
                 )
             )
         )
@@ -795,8 +813,8 @@ async def _append_video_attachment(
             req.extra_user_content_parts.append(
                 TextPart(
                     text=(
-                        "[Video Attachment in quoted message: "
-                        f"name {ref_name or 'video'}, ref {video_ref}]"
+                        "<system_reminder>Video attachment in quoted message: "
+                        f"name {ref_name or 'video'}, ref {video_ref}</system_reminder>"
                     )
                 )
             )
@@ -807,11 +825,14 @@ async def _append_video_attachment(
     video_name = os.path.basename(video_path)
     if quoted:
         text = (
-            f"[Video Attachment in quoted message: "
-            f"name {video_name}, path {video_path}]"
+            "<system_reminder>Video attachment in quoted message: "
+            f"name {video_name}, path {video_path}</system_reminder>"
         )
     else:
-        text = f"[Video Attachment: name {video_name}, path {video_path}]"
+        text = (
+            "<system_reminder>Video attachment: "
+            f"name {video_name}, path {video_path}</system_reminder>"
+        )
 
     req.extra_user_content_parts.append(TextPart(text=text))
 
@@ -935,7 +956,11 @@ async def _process_quote_message(
                         )
 
     quoted_content = "\n".join(content_parts)
-    quoted_text = f"<Quoted Message>\n{quoted_content}\n</Quoted Message>"
+    quoted_text = (
+        "<system_reminder>Quoted message:\n"
+        f"{quoted_content}\n"
+        "</system_reminder>"
+    )
     req.extra_user_content_parts.append(TextPart(text=quoted_text))
 
 
@@ -1699,9 +1724,10 @@ async def build_main_agent(
         req.extra_user_content_parts.append(
             TextPart(
                 text=(
-                    "The user is asking in a side thread about this selected "
-                    "excerpt from the previous assistant answer:\n"
+                    "<system_reminder>The user is asking in a side thread about "
+                    "this selected excerpt from the previous assistant answer:\n"
                     f"<selected_excerpt>{thread_selected_text.strip()}</selected_excerpt>"
+                    "</system_reminder>"
                 )
             )
         )
@@ -1826,12 +1852,10 @@ async def build_main_agent(
                 event.unified_msg_origin,
                 plugin_context,
             )
-            workspace_prompt = f"\nCurrent workspace you can use: `{workspace_root}`\n"
-            tool_prompt += (
-                workspace_prompt
-                + "Unless the user explicitly specifies a different directory, "
-                "perform all file-related operations in this workspace.\n"
+            workspace_prompt = (
+                f"\n<system_reminder>Current workspace: `{workspace_root}`</system_reminder>\n"
             )
+            tool_prompt += workspace_prompt
 
         req.system_prompt += f"\n{tool_prompt}\n"
 

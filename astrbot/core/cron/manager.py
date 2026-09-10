@@ -480,20 +480,18 @@ class CronJobManager:
             context_dump = req._print_friendly_context()
             req.contexts = []
             req.system_prompt += (
-                "\n\nBellow is you and user previous conversation history:\n"
+                "\n\n<system_reminder>Previous conversation history:\n"
                 f"---\n"
                 f"{context_dump}\n"
-                f"---\n"
+                f"---</system_reminder>\n"
             )
         cron_job_str = json.dumps(extras.get("cron_job", {}), ensure_ascii=False)
         req.system_prompt += PROACTIVE_AGENT_CRON_WOKE_SYSTEM_PROMPT.format(
             cron_job=cron_job_str
         )
         req.prompt = (
-            "You are now responding to a scheduled task. "
-            "Proceed according to your system instructions. "
-            "Output using same language as previous conversation. "
-            "After completing your task, summarize and output your actions and results."
+            "<system_reminder>Responding to a scheduled task. "
+            "Output using same language as previous conversation.</system_reminder>"
         )
         if delivery_session_str:
             if not req.func_tool:
