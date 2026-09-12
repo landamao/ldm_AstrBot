@@ -36,7 +36,7 @@ _ENV_EXAMPLE_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("LDMBOT_DASHBOARD_SSL_CERT=<路径>", "SSL 证书文件路径"),
             ("LDMBOT_DASHBOARD_SSL_KEY=<路径>", "SSL 私钥文件路径"),
             ("LDMBOT_DASHBOARD_SSL_CA_CERTS=<路径>", "SSL CA 证书路径"),
-            ("LDMBOT_DASHBOARD_INITIAL_PASSWORD=<密码>", "重置密码使用的新密码（配合下一项使用，不设默认 \"ldm\"）"),
+            ("LDMBOT_DASHBOARD_INITIAL_PASSWORD=<密码>", '重置密码使用的新密码（配合下一项使用，不设默认 "ldm"）'),
             ("LDMBOT_RESET_DASHBOARD_PASSWORD=1", "启动时触发重置 Dashboard 密码（配合上一项使用）"),
             ("LDMBOT_DASHBOARD_SKIP_DEFAULT_PASSWORD_AUTH=1", "跳过默认密码认证（仅限本地）"),
             ("LDMBOT_TEST_MODE=true", "测试模式（跳过部分初始化）"),
@@ -135,7 +135,9 @@ def _render_env_example() -> str:
         for name, desc in entries:
             line = f"# {name}"
             pad = " " * (align_width - _display_width(line) + 2)
-            lines.append(f"{line}{pad}{desc}")
+            # 说明也以 "# " 起头：取消行首注释后它仍是行内注释，
+            # 否则会被 dotenv 一并解析进变量值。
+            lines.append(f"{line}{pad}# {desc}")
         lines.append("")
     return "\n".join(lines).rstrip("\n") + "\n"
 
