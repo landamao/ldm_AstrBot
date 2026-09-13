@@ -58,6 +58,8 @@ class ProviderStat(TimestampMixin, SQLModel, table=True):
     token_input_other: int = Field(default=0, nullable=False)
     token_input_cached: int = Field(default=0, nullable=False)
     token_output: int = Field(default=0, nullable=False)
+    current_context_tokens: int = Field(default=0, nullable=False)
+    """最近一次 LLM 请求发送的 input tokens，用于空闲时显示当前上下文占用。"""
     start_time: float = Field(default=0.0, nullable=False)
     end_time: float = Field(default=0.0, nullable=False)
     time_to_first_token: float = Field(default=0.0, nullable=False)

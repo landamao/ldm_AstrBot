@@ -1,11 +1,22 @@
 import datetime
+import json
 
 from sqlalchemy import case, func, select
-from sqlmodel import col
+from sqlmodel import col, desc
 
 from astrbot import logger
 from astrbot.api import sp, star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
+from astrbot.core.agent.context.compressor import (
+    LLMSummaryCompressor,
+    TruncateByTurnsCompressor,
+)
+from astrbot.core.agent.context.round_utils import split_into_rounds
+from astrbot.core.agent.context.token_counter import EstimateTokenCounter
+from astrbot.core.agent.message import (
+    bind_checkpoint_messages,
+    dump_messages_with_checkpoints,
+)
 from astrbot.core.agent.runners.deerflow.constants import (
     DEERFLOW_PROVIDER_TYPE,
     DEERFLOW_THREAD_ID_KEY,
@@ -26,6 +37,39 @@ THIRD_PARTY_AGENT_RUNNER_KEY = {
     DEERFLOW_PROVIDER_TYPE: DEERFLOW_THREAD_ID_KEY,
 }
 THIRD_PARTY_AGENT_RUNNER_STR = ", ".join(THIRD_PARTY_AGENT_RUNNER_KEY.keys())
+
+
+def _format_tokens(n: int | float | None) -> str:
+    """token 数量格式化：≥1e6 用 M，≥1e3 用 k，其余原样。"""
+    try:
+        value = int(n or 0)
+    except (TypeError, ValueError):
+        value = 0
+    abs_value = abs(value)
+    if abs_value >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    if abs_value >= 1_000:
+        # 避免 999999 显示成 1000.00k
+        if abs_value >= 999_995:
+            return f"{value / 1_000_000:.2f}M"
+        return f"{value / 1_000:.2f}k"
+    return str(value)
+
+
+def _estimate_history_context_tokens(history_json: str) -> int:
+    """按本地估算统计对话历史占用（不含 system prompt / 工具 schema）。"""
+    try:
+        raw = json.loads(history_json or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return 0
+    if not isinstance(raw, list) or not raw:
+        return 0
+    try:
+        messages = bind_checkpoint_messages(raw)
+        return EstimateTokenCounter().count_tokens(messages)
+    except Exception:
+        logger.debug("估算对话历史 token 失败", exc_info=True)
+        return 0
 
 
 class ConversationCommands:
@@ -125,6 +169,203 @@ class ConversationCommands:
         message.set_extra("_clean_ltm_session", True)
 
         message.set_result(MessageEventResult().message(ret))
+
+    async def compact(
+        self,
+        message: AstrMessageEvent,
+        arg1: str | int | None = None,
+        arg2: str | int | None = None,
+    ) -> None:
+        """手动触发当前对话的上下文压缩。
+
+        用法:
+          /compact          仅 LLM 摘要压缩
+          /compact yes      允许在无 LLM 压缩模型时回退为按轮次截断
+          /compact 3        LLM 摘要，并保留最近 3 轮原文
+          /compact yes 3    允许截断回退 + 保留最近 3 轮
+        """
+        allow_truncate = False
+        keep_recent_rounds: int | None = None
+
+        for raw in (arg1, arg2):
+            if raw is None:
+                continue
+            token = str(raw).strip().lower()
+            if token in {"yes", "y", "是"}:
+                allow_truncate = True
+                continue
+            parsed = 转整数或None(token)
+            if parsed is not None and parsed > 0:
+                keep_recent_rounds = parsed
+                continue
+            message.set_result(
+                MessageEventResult().message(
+                    "参数无法识别。用法：/compact [yes] [保留最近N轮]\n"
+                    "例如：/compact、/compact yes、/compact 3、/compact yes 3"
+                ),
+            )
+            return
+
+        umo = message.unified_msg_origin
+        cfg = self.context.get_config(umo=umo)
+        agent_runner_type = cfg["provider_settings"]["agent_runner_type"]
+        if agent_runner_type in THIRD_PARTY_AGENT_RUNNER_KEY:
+            message.set_result(
+                MessageEventResult().message(
+                    f"当前 Agent 类型为 {agent_runner_type}，上下文由第三方托管，不支持手动压缩。"
+                ),
+            )
+            return
+
+        cid = await self.context.conversation_manager.get_curr_conversation_id(umo)
+        if not cid:
+            message.set_result(
+                MessageEventResult().message(
+                    f"当前未处于对话状态，请 {获取第一个唤醒词()}switch 切换或者 {获取第一个唤醒词()}new 创建。",
+                ),
+            )
+            return
+
+        conv = await self.context.conversation_manager.get_conversation(umo, cid)
+        if not conv or not conv.history:
+            message.set_result(
+                MessageEventResult().message("当前对话没有可压缩的历史消息。"),
+            )
+            return
+
+        try:
+            raw_history = json.loads(conv.history or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            message.set_result(
+                MessageEventResult().message("对话历史解析失败，无法压缩。"),
+            )
+            return
+        if not isinstance(raw_history, list) or not raw_history:
+            message.set_result(
+                MessageEventResult().message("当前对话没有可压缩的历史消息。"),
+            )
+            return
+
+        messages = bind_checkpoint_messages(raw_history)
+        if not any(msg.role != "system" for msg in messages):
+            message.set_result(
+                MessageEventResult().message("当前对话没有可压缩的历史消息。"),
+            )
+            return
+
+        active_event_registry.stop_all(umo, exclude=message)
+
+        tokens_before = EstimateTokenCounter().count_tokens(messages)
+        rounds_before = len(split_into_rounds(messages))
+
+        settings = cfg.get("provider_settings") or {}
+        if keep_recent_rounds is None:
+            # 未显式指定保留轮数时，沿用自动压缩的「保留最近对话轮数」配置
+            configured_rounds = int(settings.get("llm_compress_keep_recent_rounds", 5) or 0)
+            if configured_rounds > 0:
+                keep_recent_rounds = configured_rounds
+        provider = None
+        compress_provider_id = settings.get("llm_compress_provider_id") or ""
+        if compress_provider_id:
+            try:
+                provider = self.context.get_provider_by_id(compress_provider_id)
+            except Exception:
+                provider = None
+        if provider is None:
+            try:
+                provider = self.context.get_using_provider(umo=umo)
+            except ValueError:
+                provider = None
+
+        # 手动 /compact 优先走 LLM 摘要；无模型时不自动回退截断
+        if provider is None:
+            hint = (
+                "未找到可用的 LLM 压缩模型，无法执行摘要压缩。\n"
+                "如仍要按轮次截断，请发送：/compact yes"
+                + (f" {keep_recent_rounds}" if keep_recent_rounds else "")
+            )
+            if not allow_truncate:
+                message.set_result(MessageEventResult().message(hint))
+                return
+            truncate_turns = int(settings.get("dequeue_context_length", 1) or 1)
+            if keep_recent_rounds:
+                # 保留最近 N 轮：等价于只丢更早的轮次
+                from astrbot.core.agent.context.truncator import ContextTruncator
+
+                truncator = ContextTruncator()
+                compressed = truncator.truncate_by_turns(
+                    messages,
+                    keep_most_recent_turns=keep_recent_rounds,
+                    drop_turns=max(1, truncate_turns),
+                )
+                method_label = f"按轮次截断（保留最近 {keep_recent_rounds} 轮）"
+            else:
+                compressor = TruncateByTurnsCompressor(
+                    truncate_turns=max(1, truncate_turns)
+                )
+                compressed = await compressor(messages)
+                method_label = "按轮次截断"
+        else:
+            keep_ratio = settings.get("llm_compress_keep_recent_ratio", 0.15)
+            instruction = settings.get("llm_compress_instruction") or None
+            compressor = LLMSummaryCompressor(
+                provider=provider,
+                keep_recent_ratio=float(keep_ratio),
+                instruction_text=instruction,
+                keep_recent_rounds=keep_recent_rounds,
+            )
+            method_label = "LLM 摘要"
+            if keep_recent_rounds:
+                method_label = f"LLM 摘要（保留最近 {keep_recent_rounds} 轮）"
+            try:
+                compressed = await compressor(messages)
+            except Exception as e:
+                logger.error("手动上下文压缩失败: %s", e, exc_info=True)
+                message.set_result(
+                    MessageEventResult().message(f"上下文压缩失败：{e}"),
+                )
+                return
+
+        if not compressed:
+            message.set_result(
+                MessageEventResult().message("上下文压缩失败：结果为空，历史保持不变。"),
+            )
+            return
+
+        if provider is not None and len(compressed) >= len(messages):
+            # LLM 失败时会原样返回消息列表
+            message.set_result(
+                MessageEventResult().message(
+                    "上下文压缩未生效（模型未返回有效摘要），历史保持不变。\n"
+                    "如仍要按轮次截断，请发送：/compact yes"
+                    + (f" {keep_recent_rounds}" if keep_recent_rounds else "")
+                ),
+            )
+            return
+
+        try:
+            dumped = dump_messages_with_checkpoints(compressed)
+            await self.context.conversation_manager.update_conversation(
+                umo,
+                cid,
+                dumped,
+            )
+        except Exception as e:
+            logger.error("保存压缩后的历史失败: %s", e, exc_info=True)
+            message.set_result(
+                MessageEventResult().message(f"压缩完成但保存失败：{e}"),
+            )
+            return
+
+        tokens_after = EstimateTokenCounter().count_tokens(compressed)
+        rounds_after = len(split_into_rounds(compressed))
+        message.set_result(
+            MessageEventResult().message(
+                f"上下文压缩完成（{method_label}）\n"
+                f"轮数: {rounds_before} → {rounds_after}\n"
+                f"估算占用: {_format_tokens(tokens_before)} → {_format_tokens(tokens_after)}"
+            ),
+        )
 
     async def stop(self, message: AstrMessageEvent) -> None:
         """强制停止当前会话正在运行的 Agent（/stop）。
@@ -484,12 +725,24 @@ class ConversationCommands:
 
         # 运行状态
         active_count = active_event_registry.count(umo, exclude=message)
+        runner_active = False
+        context_tokens = 0
+        context_source = ""
         try:
             from astrbot.core.pipeline.process_stage.follow_up import (
+                get_active_runner,
                 has_active_runner,
             )
 
             runner_active = has_active_runner(umo)
+            if runner_active:
+                active_runner = get_active_runner(umo)
+                runner_stats = getattr(active_runner, "stats", None)
+                context_tokens = int(
+                    getattr(runner_stats, "current_context_tokens", 0) or 0
+                )
+                if context_tokens > 0:
+                    context_source = "模型返回"
         except Exception:
             runner_active = False
 
@@ -531,26 +784,73 @@ class ConversationCommands:
             )
             stats = result.one()
 
+            if context_tokens <= 0:
+                last_stat = (
+                    await session.execute(
+                        select(ProviderStat)
+                        .where(
+                            col(ProviderStat.agent_type) == "internal",
+                            col(ProviderStat.conversation_id) == cid,
+                            col(ProviderStat.current_context_tokens) > 0,
+                        )
+                        .order_by(desc(ProviderStat.id))
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if last_stat is not None and last_stat.current_context_tokens > 0:
+                    context_tokens = int(last_stat.current_context_tokens)
+                    context_source = "模型返回"
+
+        conv = await self.context.conversation_manager.get_conversation(umo, cid)
+        if context_tokens <= 0 and conv is not None:
+            context_tokens = _estimate_history_context_tokens(conv.history)
+            if context_tokens > 0:
+                context_source = "历史消息估算"
+
         total_input_other = stats.total_input_other
         total_input_cached = stats.total_input_cached
         total_output = stats.total_output
-        total_tokens = total_input_other + total_input_cached + total_output
+        total_input = total_input_other + total_input_cached
+        total_tokens = total_input + total_output
+
+        history_rounds = 0
+        if conv is not None and conv.history:
+            try:
+                raw_history = json.loads(conv.history or "[]")
+                if isinstance(raw_history, list) and raw_history:
+                    # 一轮 = 从某条 user 起，到下一条 user 前的 assistant/tool
+                    history_rounds = len(split_into_rounds(raw_history))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                history_rounds = 0
+
+        if context_tokens > 0:
+            ctx_line = f"当前上下文: {_format_tokens(context_tokens)}"
+            if context_source:
+                ctx_line += f"（{context_source}）"
+        else:
+            ctx_line = "当前上下文: 未知"
+
+        history_line = f"历史消息轮数: {history_rounds}"
 
         if stats.record_count == 0:
             ret = (
                 f"对话 ID: {cid[:8]}...\n"
                 f"{run_line}\n"
-                f"Token 用量: 暂无统计"
+                f"{ctx_line}\n"
+                f"{history_line}\n"
+                f"累计消耗: 暂无统计"
             )
         else:
             ret = (
                 f"对话 ID: {cid[:8]}...\n"
                 f"{run_line}\n"
-                f"Token 用量:\n"
-                f"  总计:          {total_tokens:,}\n"
-                f"  输入（缓存）: {total_input_cached:,}\n"
-                f"  输入（其他）: {total_input_other:,}\n"
-                f"  输出:         {total_output:,}"
+                f"{ctx_line}\n"
+                f"{history_line}\n"
+                f"累计消耗:\n"
+                f"  总计:     {_format_tokens(total_tokens)}\n"
+                f"  输入:     {_format_tokens(total_input)}\n"
+                f"  输入缓存: {_format_tokens(total_input_cached)}\n"
+                f"  输出:     {_format_tokens(total_output)}"
             )
 
         message.set_result(MessageEventResult().message(ret))

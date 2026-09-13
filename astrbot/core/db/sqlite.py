@@ -71,8 +71,23 @@ class SQLiteDatabase(BaseDatabase):
             await self._ensure_platform_message_history_checkpoint_column(conn)
             await self._ensure_chatui_project_workspace_columns(conn)
             await self._ensure_platform_session_type_column(conn)
+            await self._ensure_provider_stat_context_column(conn)
             await self._ensure_conversation_indexes(conn)
             await conn.commit()
+
+
+    async def _ensure_provider_stat_context_column(self, conn) -> None:
+        """确保 provider_stats 表有 current_context_tokens 列。"""
+        result = await conn.execute(text("PRAGMA table_info(provider_stats)"))
+        columns = {row[1] for row in result.fetchall()}
+
+        if "current_context_tokens" not in columns:
+            await conn.execute(
+                text(
+                    "ALTER TABLE provider_stats "
+                    "ADD COLUMN current_context_tokens INTEGER NOT NULL DEFAULT 0"
+                )
+            )
 
 
     async def _ensure_platform_session_type_column(self, conn) -> None:
@@ -292,6 +307,7 @@ class SQLiteDatabase(BaseDatabase):
         token_input_other = int(token_usage.get("input_other", 0) or 0)
         token_input_cached = int(token_usage.get("input_cached", 0) or 0)
         token_output = int(token_usage.get("output", 0) or 0)
+        current_context_tokens = int(stats.get("current_context_tokens", 0) or 0)
 
         start_time = float(stats.get("start_time", 0.0) or 0.0)
         end_time = float(stats.get("end_time", 0.0) or 0.0)
@@ -310,6 +326,7 @@ class SQLiteDatabase(BaseDatabase):
                     token_input_other=token_input_other,
                     token_input_cached=token_input_cached,
                     token_output=token_output,
+                    current_context_tokens=current_context_tokens,
                     start_time=start_time,
                     end_time=end_time,
                     time_to_first_token=time_to_first_token,

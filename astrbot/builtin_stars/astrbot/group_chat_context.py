@@ -30,7 +30,7 @@ from astrbot.api.provider import Provider, ProviderRequest
 from astrbot.core.agent.message import TextPart
 from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
 from astrbot.core.utils.io import DownloadFileSizeLimitError
-from astrbot.core.utils.media_utils import file_uri_to_path, get_auto_download_max_bytes
+from astrbot.core.utils.media_utils import file_uri_to_path
 
 """
 Group chat context awareness.
@@ -475,7 +475,7 @@ class GroupChatContext:
             return token, "[Image]"
 
         results = await asyncio.gather(*[_one(t) for t in tokens])
-        replace_map = {token: text for token, text in results}
+        replace_map = dict(results)
 
         # 清理已解析 pending（成功或失败都不再保留 URL）
         for token in tokens:

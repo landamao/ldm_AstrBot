@@ -34,12 +34,15 @@ class ContextManager:
             self.compressor = LLMSummaryCompressor(
                 provider=config.llm_compress_provider,
                 keep_recent_ratio=config.llm_compress_keep_recent_ratio,
+                keep_recent_rounds=config.llm_compress_keep_recent_rounds,
                 instruction_text=config.llm_compress_instruction,
+                compression_threshold=config.context_compress_threshold,
                 token_counter=self.token_counter,
             )
         else:
             self.compressor = TruncateByTurnsCompressor(
-                truncate_turns=config.truncate_turns
+                truncate_turns=config.truncate_turns,
+                compression_threshold=config.context_compress_threshold,
             )
 
     async def process(

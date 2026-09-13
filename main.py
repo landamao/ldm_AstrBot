@@ -26,7 +26,6 @@ def _restore_terminal_cursor(*_args: object) -> None:
 
 atexit.register(_restore_terminal_cursor)
 
-
 def _install_cursor_signal_handler() -> None:
     global _ORIG_CURSOR_HANDLER
     for sig in (signal.SIGTERM,):
@@ -39,6 +38,8 @@ def _install_cursor_signal_handler() -> None:
 
 _install_cursor_signal_handler()
 
+if os.getenv("LDMBOT_SET_TITLE"):
+    print("\033]0;ldmbot\007", end="")
 
 # ========== 原始艺术字与颜色定义 ==========
 ldmnb = r"""
@@ -423,8 +424,8 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
 
   启动行为:
     LDMBOT_NO_BANNER=1                跳过启动横幅动画
+    LDMBOT_SET_TITLE=1                自动设置终端标题
     LDMBOT_PAUSE_CONSOLE=1            暂停控制台日志输出（内部使用）
-
   更新器:
     LDMBOT_REPO_OWNER=<所有者>        GitHub 仓库所有者（默认 landamao）
     LDMBOT_REPO_NAME=<仓库名>         GitHub 仓库名（默认 ldm_AstrBot）

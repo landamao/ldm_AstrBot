@@ -236,7 +236,7 @@ class Main(star.Star):
         finally:
             event.should_call_llm(True)
 
-    @filter.command("about", alias={'ldm'})
+    @filter.command("about", alias={"ldm"})
     async def about(self, event: AstrMessageEvent) -> None:
         """查看 ldm 版本与运行环境信息"""
         try:
@@ -308,6 +308,19 @@ class Main(star.Star):
         """清除当前对话上下文"""
         try:
             await self.conversation_c.reset(event)
+        finally:
+            event.should_call_llm(True)
+
+    @filter.command("compact")
+    async def compact(
+        self,
+        event: AstrMessageEvent,
+        arg1: str | int | None = None,
+        arg2: str | int | None = None,
+    ) -> None:
+        """手动压缩当前对话上下文。/compact [yes] [保留最近N轮]"""
+        try:
+            await self.conversation_c.compact(event, arg1, arg2)
         finally:
             event.should_call_llm(True)
 

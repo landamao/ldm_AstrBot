@@ -34,6 +34,7 @@ from astrbot.dashboard.services.file_service import FileService
 from astrbot.dashboard.services.knowledge_base_service import KnowledgeBaseService
 from astrbot.dashboard.services.live_chat_service import LiveChatService
 from astrbot.dashboard.services.log_service import LogService
+from astrbot.dashboard.services.model_usage_service import ModelUsageService
 from astrbot.dashboard.services.open_api_service import OpenApiService
 from astrbot.dashboard.services.persona_service import PersonaService
 from astrbot.dashboard.services.platform_service import PlatformService
@@ -122,6 +123,7 @@ def create_dashboard_asgi_app(
         knowledge_bases=KnowledgeBaseService(core_lifecycle),
         live_chat=LiveChatService(db, core_lifecycle),
         logs=LogService(log_broker, core_lifecycle.astrbot_config),
+        model_usages=ModelUsageService(core_lifecycle),
         bots=BotConfigService(core_lifecycle),
         platforms=PlatformService(core_lifecycle),
         providers=ProviderConfigService(core_lifecycle),

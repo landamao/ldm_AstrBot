@@ -23,10 +23,15 @@ class ContextConfig:
     1. Enforce max turns truncation.
     2. Truncation by turns compression strategy.
     """
+    context_compress_threshold: float = 0.82
+    """Context token usage ratio (against the model window) above which compression/truncation is triggered."""
     llm_compress_instruction: str | None = None
     """Instruction prompt for LLM-based compression."""
     llm_compress_keep_recent_ratio: float = 0.15
     """Percent of current context tokens to keep as exact recent context during LLM-based compression."""
+    llm_compress_keep_recent_rounds: int | None = None
+    """Number of most recent turns to keep as exact context during LLM-based compression.
+    If set and > 0, it takes precedence over llm_compress_keep_recent_ratio."""
     llm_compress_provider: "Provider | None" = None
     """LLM provider used for compression tasks. If None, truncation strategy is used."""
     custom_token_counter: TokenCounter | None = None

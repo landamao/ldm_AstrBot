@@ -130,20 +130,26 @@ class LLMSummaryCompressor:
         instruction_text: str | None = None,
         compression_threshold: float = 0.82,
         token_counter: TokenCounter | None = None,
+        keep_recent_rounds: int | None = None,
     ) -> None:
         """Initialize the LLM summary compressor.
 
         Args:
             provider: The LLM provider instance.
             keep_recent_ratio: Ratio of current context tokens to keep as recent
-                exact context. Clamped to 0-0.3.
+                exact context. Clamped to 0-0.3. Ignored when keep_recent_rounds is set.
             instruction_text: Custom instruction for summary generation.
             compression_threshold: The compression trigger threshold (default: 0.82).
+            keep_recent_rounds: If set (>0), keep exactly this many most recent
+                rounds as exact context and summarize everything older.
         """
         self.provider = provider
         self.keep_recent_ratio = min(max(float(keep_recent_ratio), 0.0), 0.3)
         self.compression_threshold = compression_threshold
         self.token_counter = token_counter or EstimateTokenCounter()
+        self.keep_recent_rounds = (
+            max(0, int(keep_recent_rounds)) if keep_recent_rounds else None
+        )
 
         self.instruction_text = instruction_text or (
             "Based on our full conversation history, produce a concise summary of key takeaways and/or project progress.\n"
@@ -180,14 +186,22 @@ class LLMSummaryCompressor:
     ) -> tuple[list[list[Message]], list[list[Message]]]:
         """Split rounds into summarised history and exact recent context.
 
-        The token budget is computed from the current context token count and
-        `keep_recent_ratio`, then floored by `int(...)`. Mapping that budget to
-        rounds is round-granular: a positive ratio always preserves the latest
-        whole round, even if that round itself exceeds the budget. Earlier
-        rounds are added only while the accumulated recent rounds stay within
-        the budget. No round is split.
+        When ``keep_recent_rounds`` is set, keep exactly that many most recent
+        whole rounds. Otherwise the token budget is computed from the current
+        context token count and ``keep_recent_ratio``, then floored by
+        ``int(...)``. Mapping that budget to rounds is round-granular: a
+        positive ratio always preserves the latest whole round, even if that
+        round itself exceeds the budget. Earlier rounds are added only while
+        the accumulated recent rounds stay within the budget. No round is split.
         """
-        if not rounds or self.keep_recent_ratio <= 0 or total_tokens <= 0:
+        if not rounds:
+            return rounds, []
+
+        if self.keep_recent_rounds is not None and self.keep_recent_rounds > 0:
+            keep = min(self.keep_recent_rounds, len(rounds))
+            return rounds[: len(rounds) - keep], rounds[len(rounds) - keep :]
+
+        if self.keep_recent_ratio <= 0 or total_tokens <= 0:
             return rounds, []
 
         budget = max(1, int(total_tokens * self.keep_recent_ratio))

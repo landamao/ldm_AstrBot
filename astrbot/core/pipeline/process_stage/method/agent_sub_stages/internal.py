@@ -60,7 +60,6 @@ from ...follow_up import (
     unregister_active_runner,
 )
 
-
 # 消息防抖 per-UMO 状态表：首条消息开窗等待静默期，窗口内后续消息被吸收
 # （文本与媒体组件并入赢家请求，被吸收消息不再触发打断、不请求 LLM）
 _DEBOUNCE_STATE: dict[str, dict] = {}
@@ -120,11 +119,17 @@ class InternalAgentSubStage(Stage):
         self.context_limit_reached_strategy: str = settings.get(
             "context_limit_reached_strategy", "truncate_by_turns"
         )
+        self.context_compress_threshold: float = float(
+            settings.get("context_compress_threshold", 0.82)
+        )
         self.llm_compress_instruction: str = settings.get(
             "llm_compress_instruction", ""
         )
         self.llm_compress_keep_recent_ratio: float = settings.get(
             "llm_compress_keep_recent_ratio", 0.15
+        )
+        self.llm_compress_keep_recent_rounds: int = settings.get(
+            "llm_compress_keep_recent_rounds", 5
         )
         self.llm_compress_provider_id: str = settings.get(
             "llm_compress_provider_id", ""
@@ -163,8 +168,10 @@ class InternalAgentSubStage(Stage):
             file_extract_prov=self.file_extract_prov,
             file_extract_msh_api_key=self.file_extract_msh_api_key,
             context_limit_reached_strategy=self.context_limit_reached_strategy,
+            context_compress_threshold=self.context_compress_threshold,
             llm_compress_instruction=self.llm_compress_instruction,
             llm_compress_keep_recent_ratio=self.llm_compress_keep_recent_ratio,
+            llm_compress_keep_recent_rounds=self.llm_compress_keep_recent_rounds,
             llm_compress_provider_id=self.llm_compress_provider_id,
             max_context_length=self.max_context_length,
             dequeue_context_length=self.dequeue_context_length,

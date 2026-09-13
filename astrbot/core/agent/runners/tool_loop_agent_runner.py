@@ -279,9 +279,12 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         # enforce max turns, will discard older turns when exceeded BEFORE compression
         # -1 means no limit
         enforce_max_turns: int = -1,
+        # compression trigger threshold: context tokens / window above which compression kicks in
+        context_compress_threshold: float = 0.82,
         # llm compressor
         llm_compress_instruction: str | None = None,
         llm_compress_keep_recent_ratio: float = 0.15,
+        llm_compress_keep_recent_rounds: int | None = None,
         llm_compress_provider: Provider | None = None,
         # truncate by turns compressor
         truncate_turns: int = 1,
@@ -298,8 +301,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self.req = request
         self.streaming = streaming
         self.enforce_max_turns = enforce_max_turns
+        self.context_compress_threshold = context_compress_threshold
         self.llm_compress_instruction = llm_compress_instruction
         self.llm_compress_keep_recent_ratio = llm_compress_keep_recent_ratio
+        self.llm_compress_keep_recent_rounds = llm_compress_keep_recent_rounds
         self.llm_compress_provider = llm_compress_provider
         self.truncate_turns = truncate_turns
         self.custom_token_counter = custom_token_counter
@@ -314,8 +319,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             # Enforce max turns before token-based guarding.
             enforce_max_turns=self.enforce_max_turns,
             truncate_turns=self.truncate_turns,
+            context_compress_threshold=self.context_compress_threshold,
             llm_compress_instruction=self.llm_compress_instruction,
             llm_compress_keep_recent_ratio=self.llm_compress_keep_recent_ratio,
+            llm_compress_keep_recent_rounds=self.llm_compress_keep_recent_rounds,
             llm_compress_provider=self.llm_compress_provider,
             custom_token_counter=self.custom_token_counter,
             custom_compressor=self.custom_compressor,

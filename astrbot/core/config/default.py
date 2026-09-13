@@ -190,6 +190,7 @@ DEFAULT_CONFIG = {
         "persona_pool": ["*"],
         "prompt_prefix": "{{prompt}}",
         "context_limit_reached_strategy": "llm_compress",  # or truncate_by_turns
+        "context_compress_threshold": 0.82,
         "llm_compress_instruction": (
             "Based on our full conversation history, produce a concise summary of key takeaways and/or project progress.\n"
             "The primary goal of this summary is to enable seamless continuation of the work that follows.\n"
@@ -200,6 +201,7 @@ DEFAULT_CONFIG = {
             "5. Write the summary in the user's language.\n"
         ),
         "llm_compress_keep_recent_ratio": 0.15,
+        "llm_compress_keep_recent_rounds": 5,
         "llm_compress_provider_id": "",
         "max_context_length": -1,  # 默认不限制
         "fallback_max_context_tokens": 128000,  # 上下文窗口兜底值（模型不在内置元数据时）
@@ -4036,6 +4038,15 @@ CONFIG_METADATA_3 = {
                         },
                         "hint": "普通会话历史仅在超过“压缩前最多保留对话轮数”后执行该策略；请求发送前也会在上下文 token 接近模型窗口时使用同一策略保护本次请求。",
                     },
+                    "provider_settings.context_compress_threshold": {
+                        "description": "压缩触发阈值",
+                        "type": "float",
+                        "slider": {"min": 0.5, "max": 1, "step": 0.01},
+                        "hint": "上下文 token 达到模型窗口的该比例时触发压缩或截断；压缩后仍超过该比例会继续对半截断。默认 0.82。",
+                        "condition": {
+                            "provider_settings.agent_runner_type": "local",
+                        },
+                    },
                     "provider_settings.llm_compress_instruction": {
                         "description": "上下文压缩提示词",
                         "type": "text",
@@ -4050,6 +4061,15 @@ CONFIG_METADATA_3 = {
                         "type": "float",
                         "slider": {"min": 0, "max": 0.3, "step": 0.01},
                         "hint": "按当前上下文 token 数保留最近内容，范围 0-0.3。0.15 表示保留 15%；比例大于 0 时至少保留最后一轮。",
+                        "condition": {
+                            "provider_settings.context_limit_reached_strategy": "llm_compress",
+                            "provider_settings.agent_runner_type": "local",
+                        },
+                    },
+                    "provider_settings.llm_compress_keep_recent_rounds": {
+                        "description": "压缩时保留最近对话轮数",
+                        "type": "int",
+                        "hint": "大于 0 时压缩保留最近该轮数的对话原文，更早轮次进摘要，优先于上方比例；0 表示关闭，改按比例保留。",
                         "condition": {
                             "provider_settings.context_limit_reached_strategy": "llm_compress",
                             "provider_settings.agent_runner_type": "local",
