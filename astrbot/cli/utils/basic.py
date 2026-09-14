@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import click
@@ -20,6 +21,26 @@ def check_astrbot_root(path: str | Path) -> bool:
 def get_astrbot_root() -> Path:
     """Get the AstrBot root directory path"""
     return Path.cwd()
+
+
+def resolve_cli_data_path(project_root: Path | None = None) -> Path:
+    """Resolve the data directory for CLI commands.
+
+    1. 从项目根加载 .env（缺失时生成示例）
+    2. 优先 LDMBOT_DATA_DIR，其次 LDMBOT_ROOT/data，最后 <cwd>/data
+    """
+    from astrbot.utils.env_file import bootstrap_env
+
+    root = (project_root or get_astrbot_root()).resolve()
+    bootstrap_env(str(root))
+
+    # 未显式配置时，默认 data = <项目根>/data，与 main.py 行为一致
+    if not os.environ.get("LDMBOT_DATA_DIR") and not os.environ.get("LDMBOT_ROOT"):
+        os.environ["LDMBOT_ROOT"] = str(root)
+
+    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+    return Path(get_astrbot_data_path())
 
 
 async def check_dashboard(astrbot_root: Path) -> None:

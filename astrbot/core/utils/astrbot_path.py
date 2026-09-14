@@ -16,7 +16,9 @@ Root path:
 """
 
 import os
+import sys
 import tempfile
+import types
 
 from astrbot.core.utils.runtime_env import is_packaged_desktop_runtime
 
@@ -123,3 +125,37 @@ def get_astrbot_persona_prompts_path() -> str:
     仅用于查看/备份人格系统提示词，运行时仍以数据库为准。
     """
     return os.path.realpath(os.path.join(get_astrbot_data_path(), "persona_prompts"))
+
+
+def _ensure_namespace_package(name: str, path: str) -> None:
+    """Register ``name`` as a namespace package whose ``__path__`` is ``path``.
+
+    已存在且带 ``__file__`` 的真实包不会被覆盖；已注入且路径一致时直接复用。
+    """
+    existing = sys.modules.get(name)
+    if existing is not None:
+        if getattr(existing, "__file__", None):
+            return
+        existing_path = getattr(existing, "__path__", None)
+        if existing_path is not None and list(existing_path) == [path]:
+            return
+    pkg = types.ModuleType(name)
+    pkg.__path__ = [path]  # type: ignore[attr-defined]
+    sys.modules[name] = pkg
+
+
+def ensure_plugin_module_importable() -> None:
+    """Make logical packages ``data`` / ``data.plugins`` resolve to configured dirs.
+
+    插件模块名历史上固定为 ``data.plugins.<name>...``（DB/shared_preferences
+    中已持久化）。物理目录可能因 LDMBOT_DATA_DIR 指到任意路径（如 data_xxx），
+    此处注入命名空间包，把逻辑包名映射到实际 data / data/plugins 目录。
+    """
+    data_path = get_astrbot_data_path()
+    plugins_path = get_astrbot_plugin_path()
+    try:
+        os.makedirs(plugins_path, exist_ok=True)
+    except OSError:
+        pass
+    _ensure_namespace_package("data", data_path)
+    _ensure_namespace_package("data.plugins", plugins_path)

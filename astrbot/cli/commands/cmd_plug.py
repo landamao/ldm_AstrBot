@@ -12,6 +12,7 @@ from ..utils import (
     get_git_repo,
     install_local_plugin,
     manage_plugin,
+    resolve_cli_data_path,
 )
 
 
@@ -26,7 +27,7 @@ def _get_data_path() -> Path:
         raise click.ClickException(
             f"{base} is not a valid ldm root directory. Use 'astrbot init' to initialize",
         )
-    return (base / "data").resolve()
+    return resolve_cli_data_path(base)
 
 
 def display_plugins(plugins, title=None, color=None) -> None:

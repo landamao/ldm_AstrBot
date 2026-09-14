@@ -2,6 +2,7 @@ from .basic import (
     check_astrbot_root,
     check_dashboard,
     get_astrbot_root,
+    resolve_cli_data_path,
 )
 from .plugin import (
     PluginStatus,
@@ -22,4 +23,5 @@ __all__ = [
     "get_git_repo",
     "install_local_plugin",
     "manage_plugin",
+    "resolve_cli_data_path",
 ]

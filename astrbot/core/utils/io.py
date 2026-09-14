@@ -536,15 +536,19 @@ async def get_dashboard_version():
     return get_dashboard_dist_version(resolved)
 
 
-def extract_dashboard(zip_path: str | Path, extract_path: str | Path = "data") -> None:
+def extract_dashboard(
+    zip_path: str | Path,
+    extract_path: str | Path | None = None,
+) -> None:
     """兼容入口：把包含 dist 的 zip 解压到 data 目录。
 
     若 zip 是完整源码包，会优先抽取其中的 dashboard/dist 或 data/dist。
+    extract_path 为空时使用 get_astrbot_data_path()。
     """
     import tempfile
 
     zip_path = Path(zip_path)
-    extract_root = Path(extract_path).resolve()
+    extract_root = Path(extract_path or get_astrbot_data_path()).resolve()
     ensure_dir(extract_root)
 
     if not zipfile.is_zipfile(zip_path):

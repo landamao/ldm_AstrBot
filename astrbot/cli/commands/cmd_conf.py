@@ -6,7 +6,7 @@ from typing import Any
 
 import click
 
-from ..utils import check_astrbot_root, get_astrbot_root
+from ..utils import check_astrbot_root, get_astrbot_root, resolve_cli_data_path
 
 logger = logging.getLogger("astrbot")
 
@@ -89,7 +89,8 @@ def _load_config() -> dict[str, Any]:
             f"{root} is not a valid ldm root directory. Use 'astrbot init' to initialize",
         )
 
-    config_path = root / "data" / "cmd_config.json"
+    config_path = resolve_cli_data_path(root) / "cmd_config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     if not config_path.exists():
         from astrbot.core.config.default import DEFAULT_CONFIG
 
@@ -106,7 +107,8 @@ def _load_config() -> dict[str, Any]:
 
 def _save_config(config: dict[str, Any]) -> None:
     """Save config file"""
-    config_path = get_astrbot_root() / "data" / "cmd_config.json"
+    config_path = resolve_cli_data_path() / "cmd_config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
 
     config_path.write_text(
         json.dumps(config, ensure_ascii=False, indent=2),

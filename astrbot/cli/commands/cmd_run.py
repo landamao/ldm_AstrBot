@@ -7,8 +7,8 @@ from pathlib import Path
 import click
 from filelock import FileLock, Timeout
 
-from ..utils import check_astrbot_root, check_dashboard, get_astrbot_root
 from ...utils.env_file import bootstrap_env
+from ..utils import check_astrbot_root, check_dashboard, get_astrbot_root
 
 DASHBOARD_RESET_PASSWORD_ENV = "LDMBOT_RESET_DASHBOARD_PASSWORD"
 
@@ -67,8 +67,14 @@ async def run_astrbot(astrbot_root: Path) -> None:
     """Run AstrBot"""
     from astrbot.core import LogBroker, LogManager, db_helper, logger
     from astrbot.core.initial_loader import InitialLoader
+    from astrbot.core.utils.astrbot_path import (
+        ensure_plugin_module_importable,
+        get_astrbot_data_path,
+    )
 
-    await check_dashboard(astrbot_root / "data")
+    await check_dashboard(astrbot_root)
+    ensure_plugin_module_importable()
+    logger.info("Data directory: %s", get_astrbot_data_path())
 
     log_broker = LogBroker()
     LogManager.set_queue_handler(logger, log_broker)
@@ -102,7 +108,8 @@ def run(reload: bool, port: str | None, reset_password: bool) -> None:
 
         # 与 main.py 启动路径保持一致：加载 .env（缺失时自动生成示例）
         bootstrap_env(astrbot_root)
-        os.environ["LDMBOT_ROOT"] = str(astrbot_root)
+        if not os.environ.get("LDMBOT_DATA_DIR") and not os.environ.get("LDMBOT_ROOT"):
+            os.environ["LDMBOT_ROOT"] = str(astrbot_root)
         sys.path.insert(0, str(astrbot_root))
 
         if port:

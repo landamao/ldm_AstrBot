@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING
 from loguru import logger as _raw_loguru_logger
 
 from astrbot.core.config.default import VERSION
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_config_path
+from astrbot.core.utils.astrbot_path import (
+    get_astrbot_config_path,
+    get_astrbot_data_path,
+    get_astrbot_path,
+    get_astrbot_plugin_path,
+)
 
 CACHED_SIZE = 500
 # 启动横幅期间控制台缓冲，防止极端情况下内存膨胀
@@ -65,11 +70,27 @@ class _QueueAnsiColorFilter(logging.Filter):
         return True
 
 
+def _is_under_dir(path: str, directory: str) -> bool:
+    """Whether normalized realpath ``path`` is ``directory`` or under it."""
+    try:
+        real_path = os.path.normcase(os.path.realpath(path))
+        real_dir = os.path.normcase(os.path.realpath(directory))
+    except OSError:
+        return False
+    return real_path == real_dir or real_path.startswith(real_dir + os.sep)
+
+
 def _is_plugin_path(pathname: str | None) -> bool:
     if not pathname:
         return False
-    norm_path = os.path.normpath(pathname)
-    return ("data/plugins" in norm_path) or ("astrbot/builtin_stars/" in norm_path)
+    try:
+        if _is_under_dir(pathname, get_astrbot_plugin_path()):
+            return True
+        builtin_root = os.path.join(get_astrbot_path(), "astrbot", "builtin_stars")
+        return _is_under_dir(pathname, builtin_root)
+    except Exception:
+        norm_path = os.path.normpath(pathname)
+        return ("plugins" in norm_path) or ("builtin_stars" in norm_path)
 
 
 def _get_short_level_name(level_name: str) -> str:

@@ -634,6 +634,7 @@ _apply_startup_env_flags(sys.argv[1:])
 from astrbot.core import LogBroker, LogManager, db_helper, logger  # noqa: E402
 from astrbot.core.initial_loader import InitialLoader  # noqa: E402
 from astrbot.core.utils.astrbot_path import (  # noqa: E402
+    ensure_plugin_module_importable,
     get_astrbot_config_path,
     get_astrbot_data_path,
     get_astrbot_knowledge_base_path,
@@ -671,6 +672,8 @@ def check_env() -> None:
     os.makedirs(get_astrbot_temp_path(), exist_ok=True)
     os.makedirs(get_astrbot_knowledge_base_path(), exist_ok=True)
     os.makedirs(site_packages_path, exist_ok=True)
+    # 逻辑包名 data.plugins → 实际 data 目录（支持 LDMBOT_DATA_DIR 自定义路径）
+    ensure_plugin_module_importable()
 
     # 针对问题 #181 的临时解决方案
     mimetypes.add_type("text/javascript", ".js")

@@ -67,12 +67,24 @@ def _build_frozen_restart_args() -> list[str]:
     """Build the arguments preserved when restarting a frozen application.
 
     Returns:
-        Arguments required to preserve the configured WebUI directory.
+        Arguments required to preserve the configured data and WebUI directories.
     """
-    webui_dir = _collect_flag_values(list(sys.argv[1:]), "--webui-dir")
+    argv = list(sys.argv[1:])
+    args: list[str] = []
+
+    data_dir = _collect_flag_values(argv, "--data-dir")
+    if not data_dir:
+        data_dir = os.environ.get("LDMBOT_DATA_DIR")
+    if data_dir:
+        args.extend(["--data-dir", data_dir])
+
+    webui_dir = _collect_flag_values(argv, "--webui-dir")
     if not webui_dir:
         webui_dir = os.environ.get("LDMBOT_WEBUI_DIR")
-    return ["--webui-dir", webui_dir] if webui_dir else []
+    if webui_dir:
+        args.extend(["--webui-dir", webui_dir])
+
+    return args
 
 
 def _reset_pyinstaller_environment() -> None:

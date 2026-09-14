@@ -34,6 +34,7 @@ from astrbot.core.config.default import VERSION
 from astrbot.core.platform.register import unregister_platform_adapters_by_module
 from astrbot.core.provider.register import llm_tools
 from astrbot.core.utils.astrbot_path import (
+    ensure_plugin_module_importable,
     get_astrbot_config_path,
     get_astrbot_path,
     get_astrbot_plugin_path,
@@ -1086,6 +1087,9 @@ class PluginManager:
         inactivated_plugins = await sp.global_get("inactivated_plugins", [])
         inactivated_llm_tools = await sp.global_get("inactivated_llm_tools", [])
         alter_cmd = await sp.global_get("alter_cmd", {})
+
+        # 确保 data.plugins 逻辑包名映射到当前 data 目录（支持自定义路径）
+        ensure_plugin_module_importable()
 
         plugin_modules = self._get_plugin_modules()
         if plugin_modules is None:

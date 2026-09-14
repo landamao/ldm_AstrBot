@@ -19,18 +19,20 @@ async def check_dashboard(astrbot_root: Path) -> None:
     await _check_dashboard(astrbot_root)
 
 
-def _initialize_config_from_env(astrbot_root: Path) -> None:
+def _initialize_config_from_env(data_path: Path) -> None:
     if DASHBOARD_INITIAL_PASSWORD_ENV not in os.environ:
         return
 
     from astrbot.core.config.astrbot_config import AstrBotConfig
 
-    AstrBotConfig(config_path=str(astrbot_root / "data" / "cmd_config.json"))
+    AstrBotConfig(config_path=str(data_path / "cmd_config.json"))
     click.echo("Initialized data/cmd_config.json with dashboard initial password.")
 
 
 async def initialize_astrbot(astrbot_root: Path) -> None:
     """Execute AstrBot initialization logic"""
+    from ..utils import resolve_cli_data_path
+
     dot_astrbot = astrbot_root / ".astrbot"
 
     if not dot_astrbot.exists():
@@ -42,20 +44,21 @@ async def initialize_astrbot(astrbot_root: Path) -> None:
             dot_astrbot.touch()
             click.echo(f"Created {dot_astrbot}")
 
+    data_path = resolve_cli_data_path(astrbot_root)
     paths = {
-        "data": astrbot_root / "data",
-        "config": astrbot_root / "data" / "config",
-        "plugins": astrbot_root / "data" / "plugins",
-        "temp": astrbot_root / "data" / "temp",
+        "data": data_path,
+        "config": data_path / "config",
+        "plugins": data_path / "plugins",
+        "temp": data_path / "temp",
     }
 
     for name, path in paths.items():
         path.mkdir(parents=True, exist_ok=True)
         click.echo(f"{'Created' if not path.exists() else 'Directory exists'}: {path}")
 
-    _initialize_config_from_env(astrbot_root)
+    _initialize_config_from_env(data_path)
 
-    await check_dashboard(astrbot_root / "data")
+    await check_dashboard(astrbot_root)
 
 
 @click.command()
