@@ -245,6 +245,7 @@ class StarTools:
             raise ValueError("StarTools not initialized")
         cls._context.unregister_llm_tool(name)
 
+
     @classmethod
     def get_data_dir(cls, plugin_name: str | None = None) -> Path:
         """Returns the absolute path to a plugin data directory.

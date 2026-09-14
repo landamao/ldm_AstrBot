@@ -236,7 +236,7 @@ class Main(star.Star):
         finally:
             event.should_call_llm(True)
 
-    @filter.command("about", alias={"ldm"})
+    @filter.command("about", alias={'ldm'})
     async def about(self, event: AstrMessageEvent) -> None:
         """查看 ldm 版本与运行环境信息"""
         try:

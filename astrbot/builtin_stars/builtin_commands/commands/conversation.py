@@ -6,7 +6,7 @@ from sqlmodel import col, desc
 
 from astrbot import logger
 from astrbot.api import sp, star
-from astrbot.api.event import AstrMessageEvent, MessageEventResult
+from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult
 from astrbot.core.agent.context.compressor import (
     LLMSummaryCompressor,
     TruncateByTurnsCompressor,
@@ -194,17 +194,17 @@ class ConversationCommands:
             if token in {"yes", "y", "是"}:
                 allow_truncate = True
                 continue
-            parsed = 转整数或None(token)
-            if parsed is not None and parsed > 0:
+            parsed, err = 转整数或None(token)
+            if err or (parsed is not None and parsed <= 0):
+                message.set_result(
+                    MessageEventResult().message(
+                        "参数无法识别。用法：/compact [yes] [保留最近N轮]\n"
+                        "例如：/compact、/compact yes、/compact 3、/compact yes 3"
+                    ),
+                )
+                return
+            if parsed is not None:
                 keep_recent_rounds = parsed
-                continue
-            message.set_result(
-                MessageEventResult().message(
-                    "参数无法识别。用法：/compact [yes] [保留最近N轮]\n"
-                    "例如：/compact、/compact yes、/compact 3、/compact yes 3"
-                ),
-            )
-            return
 
         umo = message.unified_msg_origin
         cfg = self.context.get_config(umo=umo)
@@ -317,6 +317,10 @@ class ConversationCommands:
             method_label = "LLM 摘要"
             if keep_recent_rounds:
                 method_label = f"LLM 摘要（保留最近 {keep_recent_rounds} 轮）"
+            # LLM 摘要耗时较长，先发出提示，完成后再发结果
+            await message.send(
+                MessageChain().message(f"正在压缩上下文（{method_label}），请稍候…")
+            )
             try:
                 compressed = await compressor(messages)
             except Exception as e:

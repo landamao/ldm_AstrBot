@@ -30,6 +30,71 @@ class PluginCommands:
             f"插件名「{name}」不存在，使用'{获取第一个唤醒词()}plugin ls'查找插件名"
         )
 
+    @staticmethod
+    def _plugin_label(plugin) -> str:
+        """候选列表中的展示格式统一为「显示名（插件名）」，无显示名时用插件名补位。"""
+        name = (plugin.name or "").strip()
+        display = (getattr(plugin, "display_name", None) or "").strip() or name
+        return f"{display}（{name}）"
+
+    def _multi_match_hint(
+        self, command: str, action: str, candidates: list, tail: str = ""
+    ) -> str:
+        """命中多个插件时的候选列表提示。"""
+        lines = ["匹配到多个结果："]
+        for idx, candidate in enumerate(candidates, 1):
+            lines.append(f"{idx}.{self._plugin_label(candidate)}")
+        前缀 = 获取第一个唤醒词()
+        lines.append(
+            f"请确认后使用\n→ {前缀}{command} <括号内的值>\n即可{action}插件{tail}"
+        )
+        return "\n".join(lines)
+
+    def _resolve_plugin(
+        self, plugin_name: str, command: str, action: str, tail: str = ""
+    ) -> tuple:
+        """按插件名或显示名解析插件，返回 (插件元数据, 提示文案)。
+
+        插件名精确命中或显示名精确且唯一命中时返回插件本身（提示为空）；
+        否则对插件名与显示名做包含式模糊匹配，命中时返回 (None, 候选提示)，
+        由调用方直接发送提示，不执行操作。
+        """
+        query = (plugin_name or "").strip()
+        plugins = list(self.context.get_all_stars())
+
+        for plugin in plugins:
+            if (plugin.name or "").strip() == query:
+                return plugin, ""
+        display_hits = [
+            p
+            for p in plugins
+            if ((getattr(p, "display_name", None) or "").strip()) == query
+        ]
+        if len(display_hits) == 1:
+            return display_hits[0], ""
+        if display_hits:
+            return None, self._multi_match_hint(
+                command, action, display_hits, tail
+            )
+
+        folded = query.casefold()
+        fuzzy_hits = [
+            p
+            for p in plugins
+            if folded in (p.name or "").casefold()
+            or folded in (getattr(p, "display_name", None) or "").casefold()
+        ]
+        if len(fuzzy_hits) == 1:
+            target = fuzzy_hits[0]
+            前缀 = 获取第一个唤醒词()
+            return None, (
+                f"你可能要{action}的插件是\n→ {self._plugin_label(target)}，"
+                f"\n使用\n→ {前缀}{command} {(target.name or '').strip()}\n{action}"
+            )
+        if fuzzy_hits:
+            return None, self._multi_match_hint(command, action, fuzzy_hits, tail)
+        return None, self._plugin_not_found_message(query)
+
     def _github_proxy(self, *, action: str, target: str = "") -> str:
         """读取服务端配置的 GitHub 加速地址，并打使用日志。"""
         try:
@@ -78,6 +143,8 @@ class PluginCommands:
                 f"{前缀}plugin ls",
                 f"{前缀}plugin help ldm",
                 f"{前缀}plugin on ldm",
+                "",
+                "提示：<插件名> 也可填插件的显示名（需完全一致），模糊命中时会给出候选列表。",
             ]
         )
 
@@ -165,17 +232,14 @@ class PluginCommands:
                 ),
             )
             return
-        if self.context.get_registered_star(plugin_name) is None:
-            event.set_result(
-                MessageEventResult().message(
-                    self._plugin_not_found_message(plugin_name)
-                ),
-            )
+        plugin, hint = self._resolve_plugin(plugin_name, "plugin off", "禁用")
+        if plugin is None:
+            event.set_result(MessageEventResult().message(hint).use_t2i(False))
             return
         try:
-            await self.context._star_manager.turn_off_plugin(plugin_name)  # type: ignore
+            await self.context._star_manager.turn_off_plugin(plugin.name)  # type: ignore
             event.set_result(
-                MessageEventResult().message(f"插件「{plugin_name}」已禁用。")
+                MessageEventResult().message(f"插件「{plugin.name}」已禁用。")
             )
         except Exception as e:
             logger.error(f"禁用插件失败: {e}")
@@ -194,17 +258,14 @@ class PluginCommands:
                 ),
             )
             return
-        if self.context.get_registered_star(plugin_name) is None:
-            event.set_result(
-                MessageEventResult().message(
-                    self._plugin_not_found_message(plugin_name)
-                ),
-            )
+        plugin, hint = self._resolve_plugin(plugin_name, "plugin on", "启用")
+        if plugin is None:
+            event.set_result(MessageEventResult().message(hint).use_t2i(False))
             return
         try:
-            await self.context._star_manager.turn_on_plugin(plugin_name)  # type: ignore
+            await self.context._star_manager.turn_on_plugin(plugin.name)  # type: ignore
             event.set_result(
-                MessageEventResult().message(f"插件「{plugin_name}」已启用。")
+                MessageEventResult().message(f"插件「{plugin.name}」已启用。")
             )
         except Exception as e:
             logger.error(f"启用插件失败: {e}")
@@ -264,18 +325,15 @@ class PluginCommands:
                 ),
             )
             return
-        plugin = self.context.get_registered_star(plugin_name)
+        plugin, hint = self._resolve_plugin(plugin_name, "plugin restart", "重启")
         if plugin is None:
-            event.set_result(
-                MessageEventResult().message(
-                    self._plugin_not_found_message(plugin_name)
-                ),
-            )
+            event.set_result(MessageEventResult().message(hint).use_t2i(False))
             return
-        logger.info(f"准备重启插件「{plugin_name}」。")
+        target_name = (plugin.name or "").strip()
+        logger.info(f"准备重启插件「{target_name}」。")
         try:
             success, error_message = await self.context._star_manager.reload(  # type: ignore
-                plugin_name
+                target_name
             )
         except Exception as e:
             logger.error(f"重启插件失败: {e}")
@@ -283,12 +341,12 @@ class PluginCommands:
             return
         if success:
             event.set_result(
-                MessageEventResult().message(f"插件「{plugin_name}」已重启。")
+                MessageEventResult().message(f"插件「{target_name}」已重启。")
             )
         else:
             event.set_result(
                 MessageEventResult().message(
-                    f"重启插件「{plugin_name}」失败: {error_message}"
+                    f"重启插件「{target_name}」失败: {error_message}"
                 )
             )
 
@@ -307,30 +365,27 @@ class PluginCommands:
                 ),
             )
             return
-        plugin = self.context.get_registered_star(plugin_name)
+        plugin, hint = self._resolve_plugin(plugin_name, "plugin update", "更新")
         if plugin is None:
-            event.set_result(
-                MessageEventResult().message(
-                    self._plugin_not_found_message(plugin_name)
-                ),
-            )
+            event.set_result(MessageEventResult().message(hint).use_t2i(False))
             return
+        target_name = (plugin.name or "").strip()
         old_version = (plugin.version or "").strip()
-        logger.info(f"准备更新插件「{plugin_name}」（当前版本 {old_version or '未知'}）。")
+        logger.info(f"准备更新插件「{target_name}」（当前版本 {old_version or '未知'}）。")
         try:
             await event.send(
-                MessageEventResult().message(f"正在更新「{plugin_name}」插件…")
+                MessageEventResult().message(f"正在更新「{target_name}」插件…")
             )
-            proxy = self._github_proxy(action="指令更新插件", target=plugin_name)
-            await self.context._star_manager.update_plugin(plugin_name, proxy=proxy)  # type: ignore
-            new_plugin = self.context.get_registered_star(plugin_name)
+            proxy = self._github_proxy(action="指令更新插件", target=target_name)
+            await self.context._star_manager.update_plugin(target_name, proxy=proxy)  # type: ignore
+            new_plugin = self.context.get_registered_star(target_name)
             new_version = (
                 (new_plugin.version or "").strip() if new_plugin else ""
             )
             version_part = f"{old_version or '未知'} → {new_version or '未知'}"
             event.set_result(
                 MessageEventResult().message(
-                    f"插件「{plugin_name}」更新成功，版本 {version_part}。"
+                    f"插件「{target_name}」更新成功，版本 {version_part}。"
                 )
             )
         except Exception as e:
@@ -411,13 +466,11 @@ class PluginCommands:
                 ),
             )
             return
-        plugin = self.context.get_registered_star(plugin_name)
+        plugin, hint = self._resolve_plugin(
+            plugin_name, "plugin help", "查看", tail="帮助"
+        )
         if plugin is None:
-            event.set_result(
-                MessageEventResult().message(
-                    self._plugin_not_found_message(plugin_name)
-                ),
-            )
+            event.set_result(MessageEventResult().message(hint).use_t2i(False))
             return
 
         plugin_dir = self._plugin_dir(plugin)
