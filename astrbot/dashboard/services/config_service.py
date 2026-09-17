@@ -23,6 +23,7 @@ from astrbot.core.config.i18n_utils import ConfigMetadataI18n
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
 from astrbot.core.db import BaseDatabase
 from astrbot.core.platform.register import platform_cls_map, platform_registry
+from astrbot.core.provider.entities import format_provider_test_label
 from astrbot.core.provider.register import provider_registry
 from astrbot.core.star.star import star_registry
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
@@ -1973,13 +1974,14 @@ class ProviderConfigService:
             "status": "unavailable",
             "error": None,
         }
+        test_label = format_provider_test_label(result["id"], result["model"])
         try:
             await target.test()
             result["status"] = "available"
-            logger.info(f"测试提供商「{provider_id}」成功（模型: {result.get('model', '未知')}）")
+            logger.info(f"模型测试成功: {test_label}")
         except Exception as exc:
             result["error"] = str(exc)
-            logger.warning(f"测试提供商「{provider_id}」失败: {exc}")
+            logger.warning(f"模型测试失败: {test_label}: 原因: {exc}")
         return result
 
     async def test_provider_from_dashboard_args(self, args) -> dict:

@@ -51,6 +51,15 @@ def format_provider_display_id(
     return head or default
 
 
+def format_provider_test_label(provider_id: str | None, model: str | None) -> str:
+    """测试日志中明确区分提供商名称、模型实例 ID 和实际模型。"""
+    provider_name = format_provider_display_id(provider_id, default="未知")
+    return (
+        f"提供商: 「{provider_name}」: 模型ID: 「{provider_id or '未知'}」"
+        f": 模型: 「{model or '未知'}」"
+    )
+
+
 @dataclass
 class ProviderMeta:
     """The basic metadata of a provider instance."""

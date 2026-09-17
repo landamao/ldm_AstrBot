@@ -369,6 +369,10 @@ class ProviderManager:
                 from .sources.openai_image_generation_source import (
                     ProviderOpenAIImageGeneration as ProviderOpenAIImageGeneration,
                 )
+            case "volcengine_image_generation":
+                from .sources.volcengine_image_generation_source import (
+                    ProviderVolcengineImageGeneration as ProviderVolcengineImageGeneration,
+                )
             case "openai_responses":
                 from .sources.openai_responses_source import (
                     ProviderOpenAIResponses as ProviderOpenAIResponses,
@@ -546,6 +550,9 @@ class ProviderManager:
             if provider_source:
                 # 合并配置，provider 的配置优先级更高
                 merged_config = {**provider_source, **pc}
+                # 能力族只属于模型实例，不继承提供商源中残留的旧设置。
+                if merged_config.get("type") == "volcengine_image_generation":
+                    merged_config["ark_model_family"] = pc.get("ark_model_family", "auto")
                 # 保持 id 为 provider 的 id，而不是 source 的 id
                 merged_config["id"] = pc["id"]
                 pc = merged_config

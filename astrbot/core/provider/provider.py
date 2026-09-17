@@ -4,6 +4,7 @@ import os
 from collections.abc import AsyncGenerator
 from typing import Literal, TypeAlias, Union
 
+from astrbot import logger
 from astrbot.core.agent.message import ContentPart, Message, is_checkpoint_message
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.provider.entities import (
@@ -12,6 +13,7 @@ from astrbot.core.provider.entities import (
     RerankResult,
     ToolCallsResult,
     format_provider_display_id,
+    format_provider_test_label,
 )
 from astrbot.core.provider.register import provider_cls_map
 from astrbot.core.utils.astrbot_path import get_astrbot_path
@@ -234,10 +236,28 @@ class Provider(AbstractProvider):
         return dicts
 
     async def test(self, timeout: float = 45.0) -> None:
-        await asyncio.wait_for(
+        response = await asyncio.wait_for(
             self.text_chat(prompt="REPLY `PONG` ONLY"),
             timeout=timeout,
         )
+        reply_text = (response.completion_text or "").strip()
+        reasoning_text = (response.reasoning_content or "").strip()
+        test_label = format_provider_test_label(
+            self.provider_config.get("id"), self.get_model()
+        )
+        if reasoning_text:
+            logger.info(
+                "模型测试回复: %s: 正文: %s: 思考: %s",
+                test_label,
+                reply_text or "（空）",
+                reasoning_text,
+            )
+        else:
+            logger.info(
+                "模型测试回复: %s: 回复: %s",
+                test_label,
+                reply_text or "（空）",
+            )
 
 
 class STTProvider(AbstractProvider):

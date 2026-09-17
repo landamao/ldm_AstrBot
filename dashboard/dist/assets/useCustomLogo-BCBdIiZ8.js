@@ -1,1 +1,0 @@
-import{x as s,P as a,cK as r,Q as u,cL as i}from"./index-CbjN9j7e.js";import{_ as t}from"./icon-no-shadow-B3LGfhdP.js";function d(){const e=s(t);function o(){var n;e.value=((n=i())==null?void 0:n.url)||t}return a(()=>{o(),window.addEventListener(r,o)}),u(()=>{window.removeEventListener(r,o)}),{logoUrl:e}}export{d as u};

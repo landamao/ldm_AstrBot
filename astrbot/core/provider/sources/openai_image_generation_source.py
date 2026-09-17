@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import io
+from pathlib import Path
+from uuid import uuid4
 
 import httpx
+from PIL import Image
 
 from astrbot import logger
 from astrbot.api.provider import Provider
-from astrbot.core.provider.entities import GeneratedImage, ProviderType
+from astrbot.core.provider.entities import (
+    GeneratedImage,
+    ProviderType,
+    format_provider_test_label,
+)
+from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.network_utils import create_proxy_client
 
 from ..register import register_provider_adapter
@@ -61,6 +71,10 @@ class ProviderOpenAIImageGeneration(Provider):
         if self.session:
             await self.session.aclose()
             self.session = None
+
+    def get_model(self) -> str:
+        """元数据与生图请求共用当前配置中的模型名。"""
+        return self.provider_config.get("model") or ""
 
     def _build_url(self, path: str) -> str:
         return f"{self.api_base}{path}"
@@ -327,10 +341,36 @@ class ProviderOpenAIImageGeneration(Provider):
     async def text_chat(self, *args, **kwargs):
         raise NotImplementedError("生图模型不支持文本对话，请使用 generate_image。")
 
-    async def test(self, timeout: float = 45.0) -> None:
-        """测试生图提供商连通性：请求模型列表而非真实生图，避免产生费用。"""
-        import asyncio
+    async def test(self, timeout: float | None = None) -> None:
+        """实际生成猫的图片，校验并保存后才视为可用；会产生生图费用。"""
+        images = await asyncio.wait_for(
+            self.generate_image("请生成一只猫。", n=1),
+            timeout=self.timeout if timeout is None else timeout,
+        )
+        if not images:
+            raise RuntimeError("生图测试失败: 未返回任何图片")
 
-        if not self.api_base:
-            raise RuntimeError("未配置 api_base")
-        await asyncio.wait_for(self.get_models(), timeout=timeout)
+        test_label = format_provider_test_label(
+            self.provider_config.get("id"), self.get_model()
+        )
+        for image in images:
+            if image.revised_prompt:
+                logger.info(
+                    "模型测试回复: %s: 回复: %s", test_label, image.revised_prompt
+                )
+            try:
+                image_bytes = base64.b64decode(image.base64_data, validate=True)
+                with Image.open(io.BytesIO(image_bytes)) as picture:
+                    image_format = picture.format
+                    picture.verify()
+                # verify 检查文件结构，load 进一步确认像素数据可以解码。
+                with Image.open(io.BytesIO(image_bytes)) as picture:
+                    picture.load()
+            except Exception as exc:
+                raise RuntimeError(f"生图测试失败: 返回的内容不是有效图片: {exc}") from exc
+
+            directory = Path(get_astrbot_temp_path())
+            directory.mkdir(parents=True, exist_ok=True)
+            image_path = directory / f"provider_test_{uuid4().hex}.{image_format.lower()}"
+            image_path.write_bytes(image_bytes)
+            logger.info("模型测试图片: %s: 图片路径: %s", test_label, image_path.resolve())
