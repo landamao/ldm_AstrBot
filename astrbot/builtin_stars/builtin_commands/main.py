@@ -317,10 +317,11 @@ class Main(star.Star):
         event: AstrMessageEvent,
         arg1: str | int | None = None,
         arg2: str | int | None = None,
+        arg3: str | int | None = None,
     ) -> None:
-        """手动压缩当前对话上下文。/compact [yes] [保留最近N轮]"""
+        """手动压缩当前对话上下文。/compact [yes] [保留最近N轮] [会话ID]"""
         try:
-            await self.conversation_c.compact(event, arg1, arg2)
+            await self.conversation_c.compact(event, arg1, arg2, arg3)
         finally:
             event.should_call_llm(True)
 
@@ -370,10 +371,12 @@ class Main(star.Star):
             event.should_call_llm(True)
 
     @filter.command("status")
-    async def status(self, event: AstrMessageEvent) -> None:
-        """查看当前对话 Agent 状态及 Token 用量"""
+    async def status(
+        self, event: AstrMessageEvent, session_id: str | None = None
+    ) -> None:
+        """查看当前对话 Agent 状态及 Token 用量，可传会话ID跨会话查看"""
         try:
-            await self.conversation_c.status(event)
+            await self.conversation_c.status(event, session_id)
         finally:
             event.should_call_llm(True)
 

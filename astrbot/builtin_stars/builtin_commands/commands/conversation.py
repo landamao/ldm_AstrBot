@@ -24,11 +24,13 @@ from astrbot.core.agent.runners.deerflow.constants import (
 from astrbot.core.db.po import ProviderStat
 from astrbot.core.platform.astr_message_event import MessageSession
 from astrbot.core.platform.message_type import MessageType
+from astrbot.core.provider.entities import TokenUsage
 from astrbot.core.utils.active_event_registry import active_event_registry
 from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 from .utils.param_utils import 转整数, 转整数或None
 from .utils.rst_scene import RstScene
+from .utils.session_target import SessionTargetResolver
 
 THIRD_PARTY_AGENT_RUNNER_KEY = {
     "dify": "dify_conversation_id",
@@ -72,9 +74,53 @@ def _estimate_history_context_tokens(history_json: str) -> int:
         return 0
 
 
-class ConversationCommands:
+class ConversationCommands(SessionTargetResolver):
     def __init__(self, context: star.Context) -> None:
         self.context = context
+
+    async def _resolve_target_session(
+        self, message: AstrMessageEvent, session_id: str | None
+    ) -> str | None:
+        """完整 ID 或 persona 风格简写定位；跨会话保留管理员校验。
+
+        顺序：先解析（未命中=未找到会话），命中且目标≠当前会话时才校验管理员。
+        """
+        target = (session_id or "").strip()
+        if not target or target == message.unified_msg_origin:
+            return message.unified_msg_origin
+        resolved: str
+        if ":" in target:
+            try:
+                session = MessageSession.from_str(target)
+                if not session.platform_id or not session.session_id:
+                    raise ValueError("会话 ID 不能为空")
+            except ValueError:
+                message.set_result(MessageEventResult().message(
+                    "会话 ID 格式错误，可使用群号、QQ号、昵称、群名或完整会话ID。"
+                ))
+                return None
+            resolved = target
+        else:
+            candidates, aliases = await self._resolve_targets(target)
+            if not candidates:
+                logger.warning(f"会话定位: 「{target}」未匹配到任何会话")
+                message.set_result(MessageEventResult().message(
+                    f"未找到会话「{target}」，请输入对方的群号/QQ号/昵称。"
+                ))
+                return None
+            if len(candidates) > 1:
+                lines = [f"会话ID「{target}」匹配到多个会话，请输入更精确的ID："]
+                lines += [f"- {self._display(umo, aliases)}" for umo in candidates]
+                message.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+                return None
+            resolved = candidates[0]
+        if resolved != message.unified_msg_origin and getattr(message, "role", None) != "admin":
+            logger.warning(f"会话定位: 非管理员尝试跨会话操作「{resolved}」")
+            message.set_result(
+                MessageEventResult().message("跨会话操作需要机器人管理员权限。")
+            )
+            return None
+        return resolved
 
     async def _get_current_persona_id(self, session_id):
         curr = await self.context.conversation_manager.get_curr_conversation_id(
@@ -175,38 +221,52 @@ class ConversationCommands:
         message: AstrMessageEvent,
         arg1: str | int | None = None,
         arg2: str | int | None = None,
+        arg3: str | int | None = None,
     ) -> None:
-        """手动触发当前对话的上下文压缩。
+        """手动压缩上下文：/compact [yes] [保留最近N轮] [会话ID]。
 
-        用法:
-          /compact          仅 LLM 摘要压缩
-          /compact yes      允许在无 LLM 压缩模型时回退为按轮次截断
-          /compact 3        LLM 摘要，并保留最近 3 轮原文
-          /compact yes 3    允许截断回退 + 保留最近 3 轮
+        会话 ID 使用完整的「平台ID:消息类型:会话号」，参数顺序不限。
+        不传会话 ID 时压缩当前对话，跨会话仅管理员可用。
         """
         allow_truncate = False
         keep_recent_rounds: int | None = None
-
-        for raw in (arg1, arg2):
-            if raw is None:
-                continue
-            token = str(raw).strip().lower()
-            if token in {"yes", "y", "是"}:
+        session_id: str | None = None
+        tokens = [str(raw).strip() for raw in (arg1, arg2, arg3) if raw is not None]
+        # 显式名称或完整 ID 存在时，其余数字只作轮数。
+        has_named_target = any(
+            token.lower() not in {"yes", "y", "是"}
+            and 转整数或None(token)[1]
+            for token in tokens
+        )
+        for token in tokens:
+            invalid = False
+            if token.lower() in {"yes", "y", "是"}:
+                invalid = allow_truncate
                 allow_truncate = True
-                continue
-            parsed, err = 转整数或None(token)
-            if err or (parsed is not None and parsed <= 0):
-                message.set_result(
-                    MessageEventResult().message(
-                        "参数无法识别。用法：/compact [yes] [保留最近N轮]\n"
-                        "例如：/compact、/compact yes、/compact 3、/compact yes 3"
-                    ),
-                )
+            else:
+                parsed, err = 转整数或None(token)
+                is_target = bool(err)
+                # 数字精确命中已知会话才当目标；否则保持原有保留轮数用法。
+                if parsed is not None and parsed > 0 and not has_named_target:
+                    candidates, _ = await self._resolve_targets(token)
+                    is_target = bool(candidates)
+                if is_target:
+                    invalid = session_id is not None
+                    session_id = token
+                elif parsed is None or parsed <= 0 or keep_recent_rounds is not None:
+                    invalid = True
+                else:
+                    keep_recent_rounds = parsed
+            if invalid:
+                message.set_result(MessageEventResult().message(
+                    "使用方法：/compact [yes] [保留最近N轮] [会话]\n"
+                    "参数无法识别或重复。会话支持群号、QQ号、昵称、群名、线程ID或完整会话ID。"
+                ))
                 return
-            if parsed is not None:
-                keep_recent_rounds = parsed
 
-        umo = message.unified_msg_origin
+        umo = await self._resolve_target_session(message, session_id)
+        if umo is None:
+            return
         cfg = self.context.get_config(umo=umo)
         agent_runner_type = cfg["provider_settings"]["agent_runner_type"]
         if agent_runner_type in THIRD_PARTY_AGENT_RUNNER_KEY:
@@ -221,7 +281,9 @@ class ConversationCommands:
         if not cid:
             message.set_result(
                 MessageEventResult().message(
-                    f"当前未处于对话状态，请 {获取第一个唤醒词()}switch 切换或者 {获取第一个唤醒词()}new 创建。",
+                    f"会话「{umo}」没有当前对话，请先在目标会话创建或切换对话。"
+                    if session_id
+                    else f"当前未处于对话状态，请 {获取第一个唤醒词()}switch 切换或者 {获取第一个唤醒词()}new 创建。"
                 ),
             )
             return
@@ -257,6 +319,29 @@ class ConversationCommands:
 
         tokens_before = EstimateTokenCounter().count_tokens(messages)
         rounds_before = len(split_into_rounds(messages))
+        before_source = "估算"
+
+        # 模型返回的真实占用优先（provider_stats 最近一次请求），缺失时才本地估算
+        try:
+            db = self.context.get_db()
+            async with db.get_db() as db_session:
+                last_stat = (
+                    await db_session.execute(
+                        select(ProviderStat)
+                        .where(
+                            col(ProviderStat.agent_type) == "internal",
+                            col(ProviderStat.conversation_id) == cid,
+                            col(ProviderStat.current_context_tokens) > 0,
+                        )
+                        .order_by(desc(ProviderStat.id))
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+            if last_stat is not None and last_stat.current_context_tokens > 0:
+                tokens_before = int(last_stat.current_context_tokens)
+                before_source = "模型返回"
+        except Exception:
+            logger.debug("读取压缩前上下文占用失败，改用本地估算", exc_info=True)
 
         settings = cfg.get("provider_settings") or {}
         if keep_recent_rounds is None:
@@ -278,11 +363,13 @@ class ConversationCommands:
                 provider = None
 
         # 手动 /compact 优先走 LLM 摘要；无模型时不自动回退截断
+        summary_usage: TokenUsage | None = None
         if provider is None:
             hint = (
                 "未找到可用的 LLM 压缩模型，无法执行摘要压缩。\n"
                 "如仍要按轮次截断，请发送：/compact yes"
                 + (f" {keep_recent_rounds}" if keep_recent_rounds else "")
+                + (f" {umo}" if session_id else "")
             )
             if not allow_truncate:
                 message.set_result(MessageEventResult().message(hint))
@@ -329,6 +416,7 @@ class ConversationCommands:
                     MessageEventResult().message(f"上下文压缩失败：{e}"),
                 )
                 return
+            summary_usage = getattr(compressor, "last_usage", None)
 
         if not compressed:
             message.set_result(
@@ -343,6 +431,7 @@ class ConversationCommands:
                     "上下文压缩未生效（模型未返回有效摘要），历史保持不变。\n"
                     "如仍要按轮次截断，请发送：/compact yes"
                     + (f" {keep_recent_rounds}" if keep_recent_rounds else "")
+                    + (f" {umo}" if session_id else "")
                 ),
             )
             return
@@ -363,14 +452,18 @@ class ConversationCommands:
 
         tokens_after = EstimateTokenCounter().count_tokens(compressed)
         rounds_after = len(split_into_rounds(compressed))
-        message.set_result(
-            MessageEventResult().message(
-                f"上下文压缩完成（{method_label}）\n"
-                f"轮数: {rounds_before} → {rounds_after}\n"
-                f"估算占用: {_format_tokens(tokens_before)} → {_format_tokens(tokens_after)}"
-            ),
-        )
-
+        lines = [
+            f"上下文压缩完成（{method_label}）",
+            f"会话 ID: {umo}",
+            f"轮数: {rounds_before} → {rounds_after}",
+        ]
+        if provider is not None:
+            lines.append(f"压缩前占用: {_format_tokens(tokens_before)}（{before_source}）")
+        if provider is not None and summary_usage and summary_usage.output > 0:
+            lines.append(f"摘要输出: {_format_tokens(summary_usage.output)}（模型返回）")
+        else:
+            lines.append(f"压缩后占用: {_format_tokens(tokens_after)}（估算）")
+        message.set_result(MessageEventResult().message("\n".join(lines)))
     async def stop(self, message: AstrMessageEvent) -> None:
         """强制停止当前会话正在运行的 Agent（/stop）。
 
@@ -723,9 +816,19 @@ class ConversationCommands:
         message.set_extra("_clean_ltm_session", True)
         message.set_result(MessageEventResult().message(ret))
 
-    async def status(self, message: AstrMessageEvent) -> None:
-        """查看当前对话状态及 Token 用量统计"""
-        umo = message.unified_msg_origin
+    async def status(
+        self,
+        message: AstrMessageEvent,
+        session_id: str | None = None,
+    ) -> None:
+        """查看当前对话状态及 Token 用量统计。
+
+        会话 ID 使用完整的「平台ID:消息类型:会话号」，不传查看当前会话；
+        跨会话仅机器人管理员可用。
+        """
+        umo = await self._resolve_target_session(message, session_id)
+        if umo is None:
+            return
 
         # 运行状态
         active_count = active_event_registry.count(umo, exclude=message)
@@ -760,7 +863,9 @@ class ConversationCommands:
         if not cid:
             message.set_result(
                 MessageEventResult().message(
-                    f"{run_line}\n当前没有进行中的对话，使用 {获取第一个唤醒词()}new 创建。"
+                    f"会话 ID: {umo}\n{run_line}\n目标会话没有当前对话。"
+                    if session_id
+                    else f"{run_line}\n当前没有进行中的对话，使用 {获取第一个唤醒词()}new 创建。"
                 ),
             )
             return
@@ -838,6 +943,7 @@ class ConversationCommands:
 
         if stats.record_count == 0:
             ret = (
+                f"会话 ID: {umo}\n"
                 f"对话 ID: {cid[:8]}...\n"
                 f"{run_line}\n"
                 f"{ctx_line}\n"
@@ -846,6 +952,7 @@ class ConversationCommands:
             )
         else:
             ret = (
+                f"会话 ID: {umo}\n"
                 f"对话 ID: {cid[:8]}...\n"
                 f"{run_line}\n"
                 f"{ctx_line}\n"

@@ -38,7 +38,12 @@ else:
 from astrbot.core import astrbot_config, file_token_service, logger
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.io import download_file
-from astrbot.core.utils.media_utils import MediaResolver, file_uri_to_path, is_file_uri
+from astrbot.core.utils.media_utils import (
+    MediaResolver,
+    file_uri_to_path,
+    get_auto_download_max_bytes,
+    is_file_uri,
+)
 
 
 class ComponentType(str, Enum):

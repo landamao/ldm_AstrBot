@@ -1,5 +1,6 @@
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from ...provider.entities import TokenUsage
 from ...provider.modalities import (
     log_context_sanitize_stats,
     sanitize_contexts_by_modalities,
@@ -150,6 +151,8 @@ class LLMSummaryCompressor:
         self.keep_recent_rounds = (
             max(0, int(keep_recent_rounds)) if keep_recent_rounds else None
         )
+        # 最近一次压缩请求的模型返回用量；None 表示本次压缩没有真实模型数据
+        self.last_usage: TokenUsage | None = None
 
         self.instruction_text = instruction_text or (
             "Based on our full conversation history, produce a concise summary of key takeaways and/or project progress.\n"
@@ -293,7 +296,9 @@ class LLMSummaryCompressor:
             summary_content = (response.completion_text or "").strip()
         except Exception as e:
             logger.error(f"Failed to generate summary: {e}")
+            self.last_usage = None
             return messages
+        self.last_usage = getattr(response, "usage", None) or None
 
         if not summary_content:
             logger.warning("LLM context compression returned an empty summary.")

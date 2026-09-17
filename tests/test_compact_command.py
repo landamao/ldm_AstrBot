@@ -78,8 +78,8 @@ def test_compact_非数字参数返回用法提示():
     event = FakeEvent()
     cmds = ConversationCommands(_context())
     _run(cmds.compact(event, "abc"))
-    assert "参数无法识别" in _result_text(event)
-    assert "/compact" in _result_text(event)
+    assert "未找到会话" in _result_text(event)
+    assert "/compact" not in _result_text(event)
 
 
 def test_compact_非正数轮数返回用法提示():
@@ -95,7 +95,7 @@ def test_compact_无法解析且不是yes的混合参数报错():
     event = FakeEvent()
     cmds = ConversationCommands(_context())
     _run(cmds.compact(event, "yes", "abc"))
-    assert "参数无法识别" in _result_text(event)
+    assert "未找到会话" in _result_text(event)
 
 
 def test_compact_无历史对话提示():
@@ -159,3 +159,21 @@ def test_compact_未指定轮数沿用配置默认():
         _run(cmds.compact(event))
 
     assert captured["keep_recent_rounds"] == 5
+
+
+def test_compact_管理员跨会话只压缩目标():
+    event = FakeEvent()
+    event.role = "admin"
+    target = "other:GroupMessage:12345"
+    context = _context()
+    with patch(
+        "astrbot.builtin_stars.builtin_commands.commands.conversation.active_event_registry.stop_all"
+    ) as stop:
+        _run(ConversationCommands(context).compact(event, "yes", "1", target))
+    assert "上下文压缩完成" in _result_text(event)
+    context.get_config.assert_called_once_with(umo=target)
+    context.get_using_provider.assert_called_once_with(umo=target)
+    context.conversation_manager.get_curr_conversation_id.assert_awaited_once_with(target)
+    assert context.conversation_manager.update_conversation.await_args.args[:2] == (target, "cid-1")
+    stop.assert_called_once_with(target, exclude=event)
+    assert event.unified_msg_origin == "test:FriendMessage:204676209"
