@@ -16,10 +16,11 @@ from hypercorn.asyncio import serve
 from hypercorn.config import Config as HyperConfig
 from hypercorn.logging import AccessLogAtoms
 from hypercorn.logging import Logger as HypercornLogger
-from astrbot.core.config.default import VERSION
+
 from astrbot.core import logger
-from astrbot.core.dashboard_assets import resolve_dashboard_dist
+from astrbot.core.config.default import VERSION
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
+from astrbot.core.dashboard_assets import resolve_dashboard_dist
 from astrbot.core.db import BaseDatabase
 from astrbot.core.utils.io import get_local_ip_addresses
 from astrbot.dashboard.asgi_runtime import (
@@ -27,15 +28,98 @@ from astrbot.dashboard.asgi_runtime import (
     FastAPIAppAdapter,
 )
 from astrbot.dashboard.responses import error
+from astrbot.dashboard.services.backup_service import CHUNK_SIZE
+from astrbot.dashboard.services.chat_service import MAX_UPLOAD_FILE_SIZE_BYTES
+from astrbot.dashboard.services.config_service import MAX_FILE_BYTES
 
 from .api.app import create_dashboard_asgi_app
 from .api.auth import _auth_scheme_and_credentials
 from .plugin_page_auth import PluginPageAuth
 from .services.auth_service import DASHBOARD_JWT_COOKIE_NAME
 
+try:  # 与 starlette.requests 保持同一套 media type 判定，堵住前导空格绕过
+    from python_multipart.multipart import parse_options_header
+except ImportError:  # pragma: no cover
+    try:
+        from multipart.multipart import parse_options_header
+    except ImportError:
+        parse_options_header = None
+
 if os.name == "nt":
     # Windows 的 mimetypes 会把 .svg 映射成非标准的 image/svg,这里强制覆盖为标准类型
     mimetypes.add_type("image/svg+xml", ".svg", strict=True)
+
+# multipart 的框架开销（boundary、part 头）叠加在文件载荷之上，整文件上传路由
+# 需要在文件大小上限之外留出余量，否则恰好压线的文件会被误判 413。
+_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+
+# 按路由前缀覆盖默认请求体上限的表。更具体的前缀必须放在前面；
+# 未列出的路由回退到默认值；不带 Content-Length 的请求放行，
+# 由各端点保存时的 max_bytes 检查兜底。
+_BODY_LIMIT_OVERRIDES: tuple[tuple[str, int], ...] = (
+    ("/api/v1/backups/upload/chunk", CHUNK_SIZE * 2),
+    ("/api/backup/upload/chunk", CHUNK_SIZE * 2),
+    ("/api/v1/files", MAX_UPLOAD_FILE_SIZE_BYTES + _MULTIPART_OVERHEAD_BYTES),
+    (
+        "/api/chat/post_file",
+        MAX_UPLOAD_FILE_SIZE_BYTES + _MULTIPART_OVERHEAD_BYTES,
+    ),
+    ("/api/v1/plugins/config-files", MAX_FILE_BYTES + _MULTIPART_OVERHEAD_BYTES),
+    (
+        "/api/v1/knowledge-bases/",
+        MAX_UPLOAD_FILE_SIZE_BYTES + _MULTIPART_OVERHEAD_BYTES,
+    ),
+)
+
+
+# 有请求体语义的方法；411 补丁只作用于这些方法——
+# 无body方法（GET 等）不会触发表单解析及其磁盘暂存。
+_BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+
+def _check_body_limit(
+    path: str,
+    content_length: int | None,
+    content_type: str,
+    *,
+    method: str = "POST",
+    default_limit: int,
+) -> tuple[int, str] | None:
+    """判断一个 /api 请求体是否应在解析前被拒绝。
+
+    Returns:
+        拒绝时返回 (status_code, message)；放行返回 None。
+
+    Note:
+        411 规则是针对带 body 语义方法上 multipart 上传的补丁：这类请求
+        的表单解析会在任何按文件大小检查执行之前把大 body 暂存到磁盘，
+        因此必须先声明 Content-Length 才能提前限定。其他不带
+        Content-Length 的 body 仍只能靠保存时检查兜底；要彻底封死需要
+        在字节到达时计数，超出本次改动范围。
+    """
+    if not path.startswith("/api"):
+        return None
+    if content_length is None:
+        if method not in _BODY_METHODS:
+            return None
+        # 用表单解析器同一套规则识别 media type：parse_options_header
+        # 会去掉首尾空白，startswith() 会漏掉的前导空格 Content-Type
+        # 在这里仍能拦住。
+        media_type = (
+            parse_options_header(content_type)[0] if parse_options_header else b""
+        )
+        if media_type == b"multipart/form-data":
+            return 411, "上传请求必须携带 Content-Length 头"
+        return None
+    limit = default_limit
+    for prefix, route_limit in _BODY_LIMIT_OVERRIDES:
+        if path.startswith(prefix):
+            limit = route_limit
+            break
+    if content_length > limit:
+        return 413, f"请求体超过大小上限（{limit} 字节）"
+    return None
+
 
 _RATE_LIMITED_ENDPOINTS: frozenset = frozenset(
     {
@@ -228,6 +312,27 @@ class AstrBotDashboard:
             auth_response = await self.auth_middleware(request_)
             if auth_response is not None:
                 return auth_response
+            return await call_next(request_)
+
+        @self.asgi_app.middleware("http")
+        async def dashboard_body_limit_middleware(request_, call_next):
+            # 注册在鉴权中间件之后，因此运行在最外层，
+            # 可以在任何解析发生前拒绝超限请求体。
+            raw_length = request_.headers.get("content-length")
+            try:
+                content_length = int(raw_length) if raw_length else None
+            except ValueError:
+                content_length = None
+            rejection = _check_body_limit(
+                request_.url.path,
+                content_length,
+                request_.headers.get("content-type", ""),
+                method=request_.method,
+                default_limit=self.app.config["MAX_CONTENT_LENGTH"],
+            )
+            if rejection is not None:
+                status_code, message = rejection
+                return JSONResponse(error(message), status_code=status_code)
             return await call_next(request_)
 
         self.shutdown_event = shutdown_event

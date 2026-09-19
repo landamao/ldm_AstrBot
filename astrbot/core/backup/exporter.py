@@ -7,6 +7,7 @@
 import hashlib
 import json
 import os
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,23 @@ if TYPE_CHECKING:
     from astrbot.core.knowledge_base.kb_mgr import KnowledgeBaseManager
 
 CMD_CONFIG_FILE_PATH = os.path.join(get_astrbot_data_path(), "cmd_config.json")
+
+
+def resolve_export_zip_path(output_dir: str, timestamp: str, suffix: str) -> str:
+    """解析导出 zip 路径；同秒多次导出时追加序号，避免后写者把前一个截断成残废文件。
+
+    此前文件名只精确到秒，导出卡顿期间连点导出会生成同名文件互相覆盖，
+    在磁盘上留下只有几十字节的半截 zip（2026-09-15 腾讯云服务器事故）。
+    """
+    base = os.path.join(output_dir, f"ldmbot_backup_{timestamp}{suffix}.zip")
+    if not os.path.exists(base):
+        return base
+    stem = os.path.splitext(base)[0]
+    for n in range(1, 100):
+        candidate = f"{stem}_{n}.zip"
+        if not os.path.exists(candidate):
+            return candidate
+    return f"{stem}_{uuid.uuid4().hex[:8]}.zip"
 
 
 class AstrBotExporter:
@@ -94,8 +112,7 @@ class AstrBotExporter:
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         suffix = f"_{filename_suffix}" if filename_suffix else ""
-        zip_filename = f"ldmbot_backup_{timestamp}{suffix}.zip"
-        zip_path = os.path.join(output_dir, zip_filename)
+        zip_path = resolve_export_zip_path(output_dir, timestamp, suffix)
 
         logger.info(f"开始导出备份到 {zip_path}")
 

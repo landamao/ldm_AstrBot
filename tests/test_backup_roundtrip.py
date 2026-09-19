@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
 from astrbot.core.backup.exporter import AstrBotExporter
 from astrbot.core.backup.importer import AstrBotImporter
@@ -271,3 +271,89 @@ async def test_directory_import_is_atomic(tmp_path, data_env, db):
     assert (data_env / "plugins" / "fake_plugin" / "main.py").exists()
     # 暂存目录已被清理,不会残留在 data 下
     assert not (data_env / ".plugins.importing").exists()
+
+
+# ---------------------------------------------------------------------------
+# 2026-09 冻结事故回归:同秒同名覆盖 / 并发导出 / 死连接日志刷屏限频
+# (导出期间阻塞事件循环是有意设计:备份独占数据、不受干扰,不做"解阻塞")
+# ---------------------------------------------------------------------------
+
+
+def test_export_zip_path_collision(tmp_path):
+    """同秒多次导出不得互相覆盖:已存在时追加序号而不是截断重写。"""
+    from astrbot.core.backup.exporter import resolve_export_zip_path
+
+    first = resolve_export_zip_path(str(tmp_path), "20260915_001835", "")
+    assert first.endswith("ldmbot_backup_20260915_001835.zip")
+    Path(first).write_bytes(b"x")
+
+    second = resolve_export_zip_path(str(tmp_path), "20260915_001835", "")
+    assert second.endswith("ldmbot_backup_20260915_001835_1.zip")
+    Path(second).write_bytes(b"x")
+    assert resolve_export_zip_path(str(tmp_path), "20260915_001835", "").endswith(
+        "ldmbot_backup_20260915_001835_2.zip"
+    )
+    # 不同秒不受影响
+    fresh = resolve_export_zip_path(str(tmp_path), "20260915_001836", "")
+    assert fresh.endswith("ldmbot_backup_20260915_001836.zip")
+
+
+def test_asyncio_conn_lost_spam_filter():
+    """死连接刷屏告警 10 秒内只放行一条,其余消息不受影响。"""
+    import logging as _logging
+
+    from astrbot.core.log import _AsyncioConnLostSpamFilter
+
+    spam_filter = _AsyncioConnLostSpamFilter()
+
+    def _record(msg: str) -> _logging.LogRecord:
+        return _logging.LogRecord(
+            name="asyncio",
+            level=_logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg=msg,
+            args=(),
+            exc_info=None,
+        )
+
+    spam = "socket.send() raised exception."
+    assert spam_filter.filter(_record(spam)) is True  # 第一条放行
+    assert spam_filter.filter(_record(spam)) is False  # 窗口内丢弃
+    assert spam_filter.filter(_record("Other asyncio message")) is True  # 其他消息放行
+
+    # 时间前进超过窗口后重新放行
+    spam_filter._last_allowed -= 11.0
+    assert spam_filter.filter(_record(spam)) is True
+
+
+@pytest.mark.asyncio
+async def test_export_rejects_concurrent_task(tmp_path, data_env, db, monkeypatch):
+    """已有导出任务进行中时,再次导出必须被拒绝而不是排队覆盖。"""
+    from types import SimpleNamespace
+
+    from astrbot.dashboard.services.backup_service import (
+        BackupService,
+        BackupServiceError,
+    )
+
+    service = BackupService(db, SimpleNamespace(astrbot_config={}))
+    service.backup_dir = str(tmp_path / "backups")
+
+    service._init_task("t0", "export", "processing")
+    with pytest.raises(BackupServiceError, match="正在进行中"):
+        service.export_backup({})
+
+    # 任务结束后防护解除
+    service._set_task_result("t0", "completed")
+
+    # 无进行中任务时可正常创建(拦截 create_task,避免后台真跑导出)
+    created: dict = {}
+    monkeypatch.setattr(
+        "astrbot.dashboard.services.backup_service.asyncio.create_task",
+        lambda coro, **kwargs: created.setdefault("coro", coro),
+    )
+    result = service.export_backup({})
+    assert result["task_id"]
+    if "coro" in created:
+        created["coro"].close()  # 未执行的协程显式关闭,避免告警

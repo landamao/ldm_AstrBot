@@ -1,10 +1,20 @@
 # 更新日志（CHANGELOG）
 
 本文档记录 ldmbot（AstrBot 魔改版）的重要变更。  
-格式大致遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，正文保持中文。
+格式大致遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 。
 
 > 本文件只作版本索引：每个版本的更新内容在 [changelogs/](changelogs/) 目录下的单版本文件里，点击下方链接直接跳转；每项变更的完整根因与回归记录在「详细变更日志/vX.Y.Z/」目录（4.27.15 起）。
 
+- [v4.27.34](changelogs/v4.27.34.md)
+- [v4.27.33](changelogs/v4.27.33.md)
+- [v4.27.32](changelogs/v4.27.32.md)
+- [v4.27.31](changelogs/v4.27.31.md)
+- [v4.27.30](changelogs/v4.27.30.md)
+- [v4.27.29](changelogs/v4.27.29.md)
+- [v4.27.28](changelogs/v4.27.28.md)
+- [v4.27.27](changelogs/v4.27.27.md)
+- [v4.27.26](changelogs/v4.27.26.md)
+- [v4.27.25](changelogs/v4.27.25.md)
 - [v4.27.24](changelogs/v4.27.24.md)
 - [v4.27.23](changelogs/v4.27.23.md)
 - [v4.27.22](changelogs/v4.27.22.md)

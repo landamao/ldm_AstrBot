@@ -199,6 +199,34 @@ class LogQueueHandler(logging.Handler):
         )
 
 
+class _AsyncioConnLostSpamFilter(logging.Filter):
+    """限频丢弃 asyncio 对死连接的重复写失败告警。
+
+    对端断开后，向已关闭 transport 的每一次 write 都会产生一条
+    "socket.send() raised exception."。当流式响应（备份下载、日志 SSE 等）
+    被持续泵入死连接时，该告警每秒可达数百条，足以打爆 journald 与日志
+    文件并拖垮内存（2026-09 备份导出冻结事故的放大器）。
+    同一消息 10 秒内只放行第一条，其余在 logging 层直接丢弃，
+    不再进入 loguru / 控制台 / 文件日志。
+    """
+
+    _MESSAGE_MARK = "socket.send() raised exception"
+    _WINDOW_SECONDS = 10.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_allowed = 0.0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self._MESSAGE_MARK not in record.getMessage():
+            return True
+        now = time.monotonic()
+        if now - self._last_allowed < self._WINDOW_SECONDS:
+            return False
+        self._last_allowed = now
+        return True
+
+
 class LogManager:
     _LOGGER_HANDLER_FLAG = "_astrbot_loguru_handler"
     _ENRICH_FILTER_FLAG = "_astrbot_enrich_filter"
@@ -327,6 +355,14 @@ class LogManager:
         root_logger.setLevel(logging.DEBUG)
         for name, level in cls._NOISY_LOGGER_LEVELS.items():
             logging.getLogger(name).setLevel(level)
+
+        # 死连接泵送期间 asyncio 的 conn_lost 告警会刷爆日志系统，源头限频
+        asyncio_logger = logging.getLogger("asyncio")
+        if not any(
+            isinstance(item, _AsyncioConnLostSpamFilter)
+            for item in asyncio_logger.filters
+        ):
+            asyncio_logger.addFilter(_AsyncioConnLostSpamFilter())
 
     @classmethod
     def _ensure_logger_enricher_filter(cls, logger: logging.Logger) -> None:
