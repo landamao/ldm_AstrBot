@@ -1,10 +1,27 @@
+# ===== 敏感与运行时数据（严禁提交）=====
+.env
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# ===== dashboard：只提交构建产物 dist，源码与依赖全部忽略 =====
+dashboard/*
+!dashboard/dist/
+
+# ===== Python =====
 __pycache__/
 *.py[cod]
 *.pyo
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
+
+# ===== Node =====
 node_modules/
+
+# ===== 编辑器与系统杂项 =====
 *.log
 .DS_Store
-.ruff_cache/
 .idea/
