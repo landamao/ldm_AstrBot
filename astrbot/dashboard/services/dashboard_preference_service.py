@@ -15,14 +15,9 @@ WALLPAPER_KEY = "dashboard_wallpaper"
 LOGO_KEY = "dashboard_logo"
 LOGIN_WALLPAPER_KEY = "dashboard_login_wallpaper"
 
-# 壁纸透明度范围（10-100，100=完全不透明）
-WALLPAPER_OPACITY_MIN = 10
-WALLPAPER_OPACITY_MAX = 100
-# 壁纸透明度默认值（50=半透明，2026-08 用户要求默认 50%）
-WALLPAPER_OPACITY_DEFAULT = 50
-# 板块透明度范围（0-90，0=完全不透明）
+# 板块透明度范围（0-100，0=完全不透明；壁纸始终完全显示，无壁纸透明度）
 PANEL_OPACITY_MIN = 0
-PANEL_OPACITY_MAX = 90
+PANEL_OPACITY_MAX = 100
 # 板块透明度默认值（50=半透明，2026-08 用户要求默认 50%）
 PANEL_OPACITY_DEFAULT = 50
 # 窗口模糊度范围（0-60px，0=无模糊，用于弹窗/临时侧边栏 backdrop-filter）
@@ -242,12 +237,12 @@ class DashboardPreferenceService:
     def normalize_wallpaper(cls, value: object) -> dict[str, object] | None:
         """规范化壁纸设置；None 表示使用默认（无壁纸、不透明板块）。
 
-        新结构：{landscape, portrait, mode, opacity, panelOpacity}
+        新结构：{landscape, portrait, mode, panelOpacity}
         - landscape/portrait: {"url": 地址} 或 None（缺省=该方向不用壁纸）
         - mode: separate（横竖各用各的）/ portrait_use_landscape（竖屏复用横屏）
           / landscape_use_portrait（横屏复用竖屏）
-        - opacity: 壁纸透明度 10-100（100=完全不透明，共用）
-        - panelOpacity: 界面板块透明度 0-90（0=完全不透明，共用）
+        - panelOpacity: 界面板块透明度 0-100（0=完全不透明，共用；壁纸始终
+          完全显示，旧结构的 opacity 字段读取时直接丢弃）
         - enabled: 是否启用壁纸（默认 true；false=隐藏壁纸但保留设置）
 
         兼容旧结构 {url, opacity, panelOpacity}：旧 url 自动迁移为竖屏壁纸
@@ -262,12 +257,6 @@ class DashboardPreferenceService:
         enabled = value.get("enabled", True)
         if not isinstance(enabled, bool):
             enabled = True
-        opacity = _clamp_number(
-            value.get("opacity", value.get("wallpaperOpacity")),
-            WALLPAPER_OPACITY_DEFAULT,
-            WALLPAPER_OPACITY_MIN,
-            WALLPAPER_OPACITY_MAX,
-        )
         panel_opacity = _clamp_number(
             value.get("panelOpacity", value.get("panel_opacity")),
             PANEL_OPACITY_DEFAULT,
@@ -306,7 +295,6 @@ class DashboardPreferenceService:
             enabled
             and landscape is None
             and portrait is None
-            and opacity == WALLPAPER_OPACITY_DEFAULT
             and panel_opacity == PANEL_OPACITY_DEFAULT
             and window_blur == WINDOW_BLUR_DEFAULT
         ):
@@ -322,8 +310,6 @@ class DashboardPreferenceService:
             result["portrait"] = portrait
         if mode != WALLPAPER_MODE_SEPARATE:
             result["mode"] = mode
-        if opacity != WALLPAPER_OPACITY_DEFAULT:
-            result["opacity"] = opacity
         if panel_opacity != PANEL_OPACITY_DEFAULT:
             result["panelOpacity"] = panel_opacity
         if window_blur != WINDOW_BLUR_DEFAULT:

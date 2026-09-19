@@ -59,7 +59,7 @@ def _context(history: str | None = HISTORY, provider=None) -> MagicMock:
         mgr.get_conversation = AsyncMock(return_value=None)
     else:
         mgr.get_conversation = AsyncMock(
-            return_value=SimpleNamespace(history=history)
+            return_value=SimpleNamespace(history=history, updated_at=0)
         )
     mgr.update_conversation = AsyncMock()
     if provider is not None:

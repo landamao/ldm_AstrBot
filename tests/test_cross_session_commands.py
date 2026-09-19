@@ -1,13 +1,18 @@
 """status、compact 跨会话参数、权限与目标隔离回归。"""
+import re
 from contextlib import asynccontextmanager
 from itertools import permutations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from test_compact_command import (
-    ConversationCommands, FakeEvent, _context, _result_text, _run,
+    HISTORY,
+    ConversationCommands,
+    FakeEvent,
+    _context,
+    _result_text,
+    _run,
 )
 
 MODULE = "astrbot.builtin_stars.builtin_commands.commands.conversation"
@@ -99,3 +104,40 @@ def test_目标没有当前对话不回退本会话(command):
     context.conversation_manager.get_curr_conversation_id.assert_awaited_once_with(TARGET)
     context.conversation_manager.get_conversation.assert_not_awaited()
     context.conversation_manager.update_conversation.assert_not_awaited()
+
+
+def _status_context(conv) -> MagicMock:
+    """构造能走完 status 全流程的 context：一次统计查询 + 一次最近记录查询。"""
+    context = _context()
+    context.conversation_manager.get_conversation = AsyncMock(return_value=conv)
+    stats = SimpleNamespace(record_count=0, total_input_other=0, total_input_cached=0, total_output=0)
+    query = AsyncMock(side_effect=[
+        SimpleNamespace(one=lambda: stats),
+        SimpleNamespace(scalar_one_or_none=lambda: None),
+    ])
+
+    @asynccontextmanager
+    async def get_db():
+        yield SimpleNamespace(execute=query)
+
+    context.get_db.return_value.get_db = get_db
+    return context
+
+
+def test_status_最后活跃时间取自对话更新时间():
+    event = FakeEvent()
+    event.role = "admin"
+    conv = SimpleNamespace(history=HISTORY, updated_at=1758249000)
+    with patch(f"{MODULE}.active_event_registry.count", return_value=0):
+        _run(ConversationCommands(_status_context(conv)).status(event, None))
+    # 时间显示随本地时区变化，只断言行存在与格式
+    assert re.search(r"最后活跃时间: \d{2}-\d{2} \d{2}:\d{2}", _result_text(event))
+
+
+def test_status_无更新时间显示未知():
+    event = FakeEvent()
+    event.role = "admin"
+    conv = SimpleNamespace(history=HISTORY, updated_at=0)
+    with patch(f"{MODULE}.active_event_registry.count", return_value=0):
+        _run(ConversationCommands(_status_context(conv)).status(event, None))
+    assert "最后活跃时间: 未知" in _result_text(event)

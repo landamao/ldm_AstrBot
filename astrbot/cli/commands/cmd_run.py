@@ -106,7 +106,7 @@ def run(reload: bool, port: str | None, reset_password: bool) -> None:
                 f"{astrbot_root} is not a valid ldm root directory. Use 'astrbot init' to initialize",
             )
 
-        # 与 main.py 启动路径保持一致：加载 .env（缺失时自动生成示例）
+        # 与 main.py 启动路径保持一致：加载 .env（示例模板缺失时自动生成 .env.example）
         bootstrap_env(astrbot_root)
         if not os.environ.get("LDMBOT_DATA_DIR") and not os.environ.get("LDMBOT_ROOT"):
             os.environ["LDMBOT_ROOT"] = str(astrbot_root)

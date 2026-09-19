@@ -1,11 +1,16 @@
 """env 示例模板回归：取消行首注释后，行尾说明不得被解析进变量值。"""
 
+import os
 import re
 from io import StringIO
 
 from dotenv import dotenv_values
 
-from astrbot.utils.env_file import _ENV_EXAMPLE_SECTIONS, _render_env_example
+from astrbot.utils.env_file import (
+    _ENV_EXAMPLE_SECTIONS,
+    _render_env_example,
+    bootstrap_env,
+)
 
 _VARIABLE_LINE = re.compile(r"^# [A-Za-z_][A-Za-z0-9_]*=")
 
@@ -51,3 +56,30 @@ def test_filled_value_with_inline_comment():
 
     values = dotenv_values(stream=StringIO(enabled))
     assert values["LDMBOT_DASHBOARD_PORT"] == "6186"
+
+
+def test_bootstrap_env_writes_example_not_env(tmp_path):
+    """自动生成的示例落盘到 .env.example，绝不触碰真实 .env。"""
+    bootstrap_env(str(tmp_path))
+    assert (tmp_path / ".env.example").exists()
+    assert not (tmp_path / ".env").exists()
+
+
+def test_bootstrap_env_never_overwrites_existing_example(tmp_path):
+    bootstrap_env(str(tmp_path))
+    (tmp_path / ".env.example").write_text("# custom\n", encoding="utf-8")
+
+    bootstrap_env(str(tmp_path))
+
+    assert (tmp_path / ".env.example").read_text(encoding="utf-8") == "# custom\n"
+
+
+def test_bootstrap_env_still_loads_existing_env(tmp_path, monkeypatch):
+    """真实 .env 的加载不受示例模板迁移影响。"""
+    key = "LDMBOT_TEST_ENV_BOOTSTRAP"
+    monkeypatch.delenv(key, raising=False)
+    (tmp_path / ".env").write_text(f"{key}=from-dotenv\n", encoding="utf-8")
+
+    bootstrap_env(str(tmp_path))
+
+    assert os.environ[key] == "from-dotenv"

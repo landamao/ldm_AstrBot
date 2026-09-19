@@ -1,4 +1,4 @@
-"""启动期 .env 文件支持：读取环境变量，缺失时自动写入示例。
+"""启动期 .env 文件支持：读取环境变量，示例模板缺失时自动生成 .env.example。
 
 与 main.py 同目录（项目根）的 .env 必须在启动最早期加载，早于任何
 模块读取环境变量（astrbot.core 在导入期就会读取 LDMBOT_DATA_DIR /
@@ -119,14 +119,15 @@ def _render_env_example() -> str:
     """渲染 .env 示例模板，同一分节内说明文字按显示宽度对齐。"""
     lines = [
         "# ============================================================",
-        "# LDMBot 环境变量配置（示例）",
+        "# LDMBot 环境变量配置（示例模板）",
         "#",
         "# 使用说明:",
-        "#   1. 本文件与 main.py 同目录，启动时自动读取",
-        '#   2. 去掉行首的 "# " 即可启用对应变量',
-        "#   3. 修改后重启 LDMBot 生效",
-        "#   4. 系统中已存在的同名环境变量优先于本文件",
-        "#   5. 路径建议写成正斜杠形式（如 D:/ldmbot/data）",
+        "#   1. 本文件是示例模板（.env.example），不会被自动读取",
+        "#   2. 复制一份并重命名为 .env（与 main.py 同目录）后，启动时自动读取",
+        '#   3. 去掉行首的 "# " 即可启用对应变量',
+        "#   4. 修改后重启 LDMBot 生效",
+        "#   5. 系统中已存在的同名环境变量优先于 .env 文件",
+        "#   6. 路径建议写成正斜杠形式（如 D:/ldmbot/data）",
         "# ============================================================",
         "",
     ]
@@ -143,15 +144,15 @@ def _render_env_example() -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def _ensure_env_example(env_path: Path) -> bool:
-    """不存在 .env 时写入示例模板，返回是否实际创建。"""
-    if env_path.exists():
+def _ensure_env_example(example_path: Path) -> bool:
+    """不存在 .env.example 时写入示例模板，返回是否实际创建。"""
+    if example_path.exists():
         return False
     try:
-        env_path.write_text(_render_env_example(), encoding="utf-8")
+        example_path.write_text(_render_env_example(), encoding="utf-8")
         return True
     except OSError as exc:
-        print(f"警告: 无法写入 .env 示例文件: {exc}")
+        print(f"警告: 无法写入 .env.example 示例文件: {exc}")
         return False
 
 
@@ -166,9 +167,13 @@ def _load_env_file(env_path: Path) -> None:
 
 
 def bootstrap_env(project_root: str | Path) -> None:
-    """加载与 main.py 同目录的 .env；文件缺失时自动生成一份示例。"""
-    env_path = Path(project_root) / ".env"
-    created = _ensure_env_example(env_path)
-    _load_env_file(env_path)
+    """加载与 main.py 同目录的 .env；示例模板缺失时自动生成 .env.example。"""
+    root = Path(project_root)
+    example_path = root / ".env.example"
+    created = _ensure_env_example(example_path)
+    _load_env_file(root / ".env")
     if created:
-        print(f"已生成环境变量示例文件: {env_path}（取消注释后重启生效）")
+        print(
+            f"已生成环境变量示例文件: {example_path}"
+            "（复制为 .env 并取消注释后重启生效）"
+        )

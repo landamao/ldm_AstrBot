@@ -26,7 +26,7 @@ def get_astrbot_root() -> Path:
 def resolve_cli_data_path(project_root: Path | None = None) -> Path:
     """Resolve the data directory for CLI commands.
 
-    1. 从项目根加载 .env（缺失时生成示例）
+    1. 从项目根加载 .env（示例模板缺失时生成 .env.example）
     2. 优先 LDMBOT_DATA_DIR，其次 LDMBOT_ROOT/data，最后 <cwd>/data
     """
     from astrbot.utils.env_file import bootstrap_env

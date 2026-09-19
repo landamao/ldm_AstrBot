@@ -5,7 +5,7 @@ import os, sys, time, random, threading
 
 from astrbot.utils.env_file import bootstrap_env
 
-# 任何模块读取环境变量之前加载 .env（与 main.py 同目录，缺失时自动生成示例）。
+# 任何模块读取环境变量之前加载 .env（示例模板缺失时自动生成 .env.example）。
 # astrbot.core 在导入期就会读取 LDMBOT_DATA_DIR 等变量，因此必须先于其导入执行。
 bootstrap_env(os.path.dirname(os.path.abspath(__file__)))
 

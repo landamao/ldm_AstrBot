@@ -916,6 +916,14 @@ class ConversationCommands(SessionTargetResolver):
             if context_tokens > 0:
                 context_source = "历史消息估算"
 
+        if conv is not None and conv.updated_at > 0:
+            updated_str = datetime.datetime.fromtimestamp(conv.updated_at).strftime(
+                "%m-%d %H:%M"
+            )
+            active_line = f"最后活跃时间: {updated_str}"
+        else:
+            active_line = "最后活跃时间: 未知"
+
         total_input_other = stats.total_input_other
         total_input_cached = stats.total_input_cached
         total_output = stats.total_output
@@ -945,6 +953,7 @@ class ConversationCommands(SessionTargetResolver):
             ret = (
                 f"会话 ID: {umo}\n"
                 f"对话 ID: {cid[:8]}...\n"
+                f"{active_line}\n"
                 f"{run_line}\n"
                 f"{ctx_line}\n"
                 f"{history_line}\n"
@@ -954,6 +963,7 @@ class ConversationCommands(SessionTargetResolver):
             ret = (
                 f"会话 ID: {umo}\n"
                 f"对话 ID: {cid[:8]}...\n"
+                f"{active_line}\n"
                 f"{run_line}\n"
                 f"{ctx_line}\n"
                 f"{history_line}\n"
