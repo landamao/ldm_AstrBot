@@ -93,6 +93,8 @@ class ToolImageCache:
         # Decode and save the image
         try:
             image_bytes = base64.b64decode(base64_data)
+            # TempDirCleaner may remove this dir at runtime after wiping its files.
+            os.makedirs(self._cache_dir, exist_ok=True)
             with open(file_path, "wb") as f:
                 f.write(image_bytes)
             logger.debug(f"Saved tool image to: {file_path}")
