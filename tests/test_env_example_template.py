@@ -65,13 +65,16 @@ def test_bootstrap_env_writes_example_not_env(tmp_path):
     assert not (tmp_path / ".env").exists()
 
 
-def test_bootstrap_env_never_overwrites_existing_example(tmp_path):
+def test_bootstrap_env_rewrites_existing_example(tmp_path):
+    """每次启动都重写 .env.example，保证模板始终为最新版本。"""
     bootstrap_env(str(tmp_path))
     (tmp_path / ".env.example").write_text("# custom\n", encoding="utf-8")
 
     bootstrap_env(str(tmp_path))
 
-    assert (tmp_path / ".env.example").read_text(encoding="utf-8") == "# custom\n"
+    assert (
+        tmp_path / ".env.example"
+    ).read_text(encoding="utf-8") == _render_env_example()
 
 
 def test_bootstrap_env_still_loads_existing_env(tmp_path, monkeypatch):

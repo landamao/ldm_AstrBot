@@ -18,6 +18,7 @@ from hypercorn.logging import AccessLogAtoms
 from hypercorn.logging import Logger as HypercornLogger
 
 from astrbot.core import logger
+from astrbot.core.config.astrbot_config import warn_deprecated_reset_env_vars
 from astrbot.core.config.default import VERSION
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
 from astrbot.core.dashboard_assets import resolve_dashboard_dist
@@ -766,6 +767,9 @@ class AstrBotDashboard:
             )
 
         logger.info(display)
+
+        # WebUI 就绪后补打一次废弃环境变量警告：配置加载期那条容易被启动日志刷掉
+        warn_deprecated_reset_env_vars("dashboard_ready")
 
         # 配置 Hypercorn
         config = HyperConfig()

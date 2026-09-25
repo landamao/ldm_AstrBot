@@ -10,8 +10,6 @@ from filelock import FileLock, Timeout
 from ...utils.env_file import bootstrap_env
 from ..utils import check_astrbot_root, check_dashboard, get_astrbot_root
 
-DASHBOARD_RESET_PASSWORD_ENV = "LDMBOT_RESET_DASHBOARD_PASSWORD"
-
 
 def _prompt_and_set_reset_password() -> None:
     """交互式输入新密码并直接写入配置文件，完成后退出提示重启。
@@ -21,6 +19,7 @@ def _prompt_and_set_reset_password() -> None:
     两种情况都写完配置后退出，不继续启动。
     """
     import json
+    import secrets
 
     password = "ldm"
     if sys.stdin and sys.stdin.isatty():
@@ -33,6 +32,7 @@ def _prompt_and_set_reset_password() -> None:
 
     from astrbot.core.utils.astrbot_path import get_astrbot_data_path
     from astrbot.core.utils.auth_password import (
+        generate_dashboard_password,
         hash_dashboard_password,
         hash_md5_dashboard_password,
     )
@@ -44,7 +44,7 @@ def _prompt_and_set_reset_password() -> None:
         click.echo("配置文件不存在，请先正常启动一次生成配置。")
         sys.exit(1)
 
-    with open(config_path, "r", encoding="utf-8-sig") as f:
+    with open(config_path, encoding="utf-8-sig") as f:
         conf = json.load(f)
 
     if "dashboard" not in conf or not isinstance(conf["dashboard"], dict):
@@ -53,12 +53,18 @@ def _prompt_and_set_reset_password() -> None:
     conf["dashboard"]["pbkdf2_password"] = hash_dashboard_password(password)
     conf["dashboard"]["password"] = hash_md5_dashboard_password(password)
     conf["dashboard"]["password_storage_upgraded"] = True
-    conf["dashboard"]["password_change_required"] = True
+    # 自定义密码时必须显式写 False：否则启动时检测到该标志会再次重置回默认密码
+    conf["dashboard"]["password_change_required"] = (
+        password == generate_dashboard_password()
+    )
+    # 与 WebUI 改密一致：轮换 jwt_secret 作废全部已发放的会话令牌
+    conf["dashboard"]["jwt_secret"] = secrets.token_hex(32)
 
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(conf, f, indent=4, ensure_ascii=False)
 
     click.echo(f"管理面板密码已重置为: {password}")
+    click.echo("已轮换会话密钥，已登录的 WebUI 会话将全部失效。")
     click.echo("请重新启动 ldm 生效。")
     sys.exit(0)
 
@@ -89,6 +95,7 @@ async def run_astrbot(astrbot_root: Path) -> None:
 @click.option("--port", "-p", help="ldm Dashboard port", required=False, type=str)
 @click.option(
     "--reset-password",
+    "--reset-passwd",
     "--重置密码",
     "reset_password",
     is_flag=True,

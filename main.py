@@ -1,7 +1,7 @@
 print("正在加载...")
 import atexit
 import signal
-import os, sys, time, random, threading
+import os, sys, time, random, secrets, threading
 
 from astrbot.utils.env_file import bootstrap_env
 
@@ -222,7 +222,7 @@ def _should_show_startup_banner(argv: list[str] | None = None) -> bool:
     argv = sys.argv[1:] if argv is None else argv
     if "-h" in argv or "--help" in argv:
         return False
-    if "--reset-password" in argv or "--重置密码" in argv:
+    if "--reset-password" in argv or "--reset-passwd" in argv or "--重置密码" in argv:
         return False
     if "--rollback" in argv or "--回滚" in argv:
         return False
@@ -383,8 +383,7 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
   --webui-dir <路径>       指定 WebUI 静态文件目录路径（默认 data/dist）
   --restore-backup [路径]      交互式恢复数据备份；不填路径时从备份目录选择
   --rollback, --回滚 [版本号]  回滚到旧版本备份；不填版本号时进入交互式选择
-  --reset-password, --重置密码  重置管理面板密码（交互式输入新密码，留空用默认 "ldm"）
-                           改完直接退出，需重新启动
+  --reset-password,  --重置密码  交互式重置管理面板密码
   -h, --help               显示本帮助信息
 
 环境变量:
@@ -407,8 +406,6 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
     LDMBOT_DASHBOARD_SSL_CERT=<路径>  SSL 证书文件
     LDMBOT_DASHBOARD_SSL_KEY=<路径>   SSL 私钥文件
     LDMBOT_DASHBOARD_SSL_CA_CERTS=<路径>  SSL CA 证书
-    LDMBOT_DASHBOARD_INITIAL_PASSWORD=<密码>  重置密码时使用的密码（配合 RESET 使用，不设默认 "ldm"）
-    LDMBOT_RESET_DASHBOARD_PASSWORD=1  触发重置 Dashboard 密码（配合 INITIAL_PASSWORD 使用）
     LDMBOT_DASHBOARD_SKIP_DEFAULT_PASSWORD_AUTH=1  跳过默认密码认证（仅本地）
     LDMBOT_TEST_MODE=true             测试模式（跳过部分初始化）
 
@@ -478,6 +475,7 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
     )
     _parser.add_argument(
         "--reset-password",
+        "--reset-passwd",
         "--重置密码",
         action="store_true",
         help="重置管理面板密码（交互式输入，留空用默认 ldm），改完退出需重启",
@@ -511,7 +509,7 @@ def _apply_startup_env_flags(argv: list[str]) -> None:
         return
 
     startup_parser = argparse.ArgumentParser(add_help=False)
-    startup_parser.add_argument("--reset-password", "--重置密码", action="store_true", dest="reset_password")
+    startup_parser.add_argument("--reset-password", "--reset-passwd", "--重置密码", action="store_true", dest="reset_password")
     startup_parser.add_argument("--data-dir", type=str, default=None)
     startup_parser.add_argument("--webui-dir", type=str, default=None)
     startup_parser.add_argument("--rollback", "--回滚", nargs="?", const="", default=None)
@@ -598,6 +596,7 @@ def _prompt_and_set_reset_password() -> None:
     # 直接写入配置文件
     from astrbot.core.utils.astrbot_path import get_astrbot_data_path
     from astrbot.core.utils.auth_password import (
+        generate_dashboard_password,
         hash_dashboard_password,
         hash_md5_dashboard_password,
     )
@@ -610,7 +609,7 @@ def _prompt_and_set_reset_password() -> None:
         print("配置文件不存在，请先正常启动一次生成配置。")
         sys.exit(1)
 
-    with open(config_path, "r", encoding="utf-8-sig") as f:
+    with open(config_path, encoding="utf-8-sig") as f:
         conf = json.load(f)
 
     if "dashboard" not in conf or not isinstance(conf["dashboard"], dict):
@@ -619,12 +618,18 @@ def _prompt_and_set_reset_password() -> None:
     conf["dashboard"]["pbkdf2_password"] = hash_dashboard_password(password)
     conf["dashboard"]["password"] = hash_md5_dashboard_password(password)
     conf["dashboard"]["password_storage_upgraded"] = True
-    conf["dashboard"]["password_change_required"] = True
+    # 自定义密码时必须显式写 False：否则启动时检测到该标志会再次重置回默认密码
+    conf["dashboard"]["password_change_required"] = (
+        password == generate_dashboard_password()
+    )
+    # 与 WebUI 改密一致：轮换 jwt_secret 作废全部已发放的会话令牌
+    conf["dashboard"]["jwt_secret"] = secrets.token_hex(32)
 
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(conf, f, indent=4, ensure_ascii=False)
 
     print(f"管理面板密码已重置为: {password}")
+    print("已轮换会话密钥，已登录的 WebUI 会话将全部失效。")
     print("请重新启动 ldm 生效。")
     sys.exit(0)
 
@@ -807,6 +812,7 @@ if __name__ == "__main__":
     )
     _parser.add_argument(
         "--reset-password",
+        "--reset-passwd",
         "--重置密码",
         action="store_true",
         help="重置管理面板密码（交互式输入，留空用默认 ldm），改完退出需重启",

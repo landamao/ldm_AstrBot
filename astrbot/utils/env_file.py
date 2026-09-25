@@ -1,4 +1,4 @@
-"""启动期 .env 文件支持：读取环境变量，示例模板缺失时自动生成 .env.example。
+"""启动期 .env 文件支持：读取环境变量，每次启动重写 .env.example 保证为最新模板。
 
 与 main.py 同目录（项目根）的 .env 必须在启动最早期加载，早于任何
 模块读取环境变量（astrbot.core 在导入期就会读取 LDMBOT_DATA_DIR /
@@ -36,8 +36,6 @@ _ENV_EXAMPLE_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             ("LDMBOT_DASHBOARD_SSL_CERT=<路径>", "SSL 证书文件路径"),
             ("LDMBOT_DASHBOARD_SSL_KEY=<路径>", "SSL 私钥文件路径"),
             ("LDMBOT_DASHBOARD_SSL_CA_CERTS=<路径>", "SSL CA 证书路径"),
-            ("LDMBOT_DASHBOARD_INITIAL_PASSWORD=<密码>", '重置密码使用的新密码（配合下一项使用，不设默认 "ldm"）'),
-            ("LDMBOT_RESET_DASHBOARD_PASSWORD=1", "启动时触发重置 Dashboard 密码（配合上一项使用）"),
             ("LDMBOT_DASHBOARD_SKIP_DEFAULT_PASSWORD_AUTH=1", "跳过默认密码认证（仅限本地）"),
             ("LDMBOT_TEST_MODE=true", "测试模式（跳过部分初始化）"),
         ],
@@ -144,16 +142,14 @@ def _render_env_example() -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def _ensure_env_example(example_path: Path) -> bool:
-    """不存在 .env.example 时写入示例模板，返回是否实际创建。"""
-    if example_path.exists():
-        return False
+def _write_env_example(example_path: Path) -> bool:
+    """每次启动重写示例模板，保证与最新版本一致；返回是否为首次创建。"""
+    existed = example_path.exists()
     try:
         example_path.write_text(_render_env_example(), encoding="utf-8")
-        return True
     except OSError as exc:
         print(f"警告: 无法写入 .env.example 示例文件: {exc}")
-        return False
+    return not existed
 
 
 def _load_env_file(env_path: Path) -> None:
@@ -167,10 +163,10 @@ def _load_env_file(env_path: Path) -> None:
 
 
 def bootstrap_env(project_root: str | Path) -> None:
-    """加载与 main.py 同目录的 .env；示例模板缺失时自动生成 .env.example。"""
+    """加载与 main.py 同目录的 .env；每次启动重写 .env.example 保证为最新模板。"""
     root = Path(project_root)
     example_path = root / ".env.example"
-    created = _ensure_env_example(example_path)
+    created = _write_env_example(example_path)
     _load_env_file(root / ".env")
     if created:
         print(

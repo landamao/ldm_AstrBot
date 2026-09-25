@@ -1,9 +1,10 @@
-import enum
 import asyncio
 import copy
+import enum
 import json
 import logging
 import os
+import sys
 import tempfile
 import threading
 
@@ -12,15 +13,47 @@ from astrbot.core.utils.auth_password import (
     generate_dashboard_password,
     hash_dashboard_password,
     hash_md5_dashboard_password,
-    validate_dashboard_password,
 )
 
 from .default import DEFAULT_CONFIG, DEFAULT_VALUE_MAP
 
 ASTRBOT_CONFIG_PATH = os.path.join(get_astrbot_data_path(), "cmd_config.json")
-DASHBOARD_INITIAL_PASSWORD_ENV = "LDMBOT_DASHBOARD_INITIAL_PASSWORD"
-DASHBOARD_RESET_PASSWORD_ENV = "LDMBOT_RESET_DASHBOARD_PASSWORD"
 logger = logging.getLogger("astrbot")
+
+# 「环境变量重置 Dashboard 密码」机制已移除（原 LDMBOT_RESET_DASHBOARD_PASSWORD /
+# LDMBOT_DASHBOARD_INITIAL_PASSWORD）；残留变量不再生效，仅在启动时提示一次。
+_DEPRECATED_RESET_ENV_VARS = (
+    "LDMBOT_RESET_DASHBOARD_PASSWORD",
+    "LDMBOT_DASHBOARD_INITIAL_PASSWORD",
+)
+_reset_env_warned_stages: set[str] = set()
+
+
+def warn_deprecated_reset_env_vars(stage: str) -> None:
+    """残留的密码重置环境变量打警告日志，同一 stage 只提示一次。
+
+    分两个阶段各提示一次：配置加载期一次、WebUI 就绪后一次——
+    前者容易被启动过程的大量日志刷屏淹没。
+    """
+    if stage in _reset_env_warned_stages:
+        return
+    found = [
+        name
+        for name in _DEPRECATED_RESET_ENV_VARS
+        if os.environ.get(name, "").strip()
+    ]
+    if not found:
+        return
+    _reset_env_warned_stages.add(stage)
+    # 拼装方式与 about_info._startup_command 一致：解释器 + 脚本 + 参数。
+    # 结果受 venv 激活方式、cwd、脚本类型影响，未必可直接照抄执行，仅作示例提示。
+    startup = " ".join(p for p in (sys.executable, *(sys.argv or [])) if p).strip()
+    logger.warning(
+        "检测到已废弃的环境变量 %s：为避免混乱，已禁止通过环境变量修改密码，"
+        "请通过启动参数修改，例如：%s --reset-password",
+        "、".join(found),
+        startup,
+    )
 
 
 class RateLimitStrategy(enum.Enum):
@@ -88,11 +121,8 @@ class AstrBotConfig(dict):
         has_new = self.check_config_integrity(default_config, conf)
         if self._rename_legacy_log_paths(conf):
             has_new = True
-        reset_dashboard_password = self._consume_reset_dashboard_password_flag()
-        if reset_dashboard_password and "dashboard" in conf:
-            self._reset_generated_dashboard_password(conf)
-            has_new = True
-        elif (
+        warn_deprecated_reset_env_vars("config_load")
+        if (
             "dashboard" in conf
             and isinstance(conf["dashboard"], dict)
             and not conf["dashboard"].get("pbkdf2_password")
@@ -113,7 +143,7 @@ class AstrBotConfig(dict):
             self.save_config()
 
     def _reset_generated_dashboard_password(self, conf: dict) -> None:
-        generated_password = self._resolve_initial_dashboard_password()
+        generated_password = generate_dashboard_password()
         conf["dashboard"]["pbkdf2_password"] = hash_dashboard_password(
             generated_password
         )
@@ -130,19 +160,6 @@ class AstrBotConfig(dict):
             "_generated_dashboard_password_change_required",
             True,
         )
-
-    @staticmethod
-    def _consume_reset_dashboard_password_flag() -> bool:
-        raw_value = os.environ.pop(DASHBOARD_RESET_PASSWORD_ENV, "")
-        return raw_value.strip().lower() in {"1", "true", "yes", "on"}
-
-    @staticmethod
-    def _resolve_initial_dashboard_password() -> str:
-        env_password = os.environ.get(DASHBOARD_INITIAL_PASSWORD_ENV)
-        if env_password is None:
-            return generate_dashboard_password()
-        validate_dashboard_password(env_password)
-        return env_password
 
     def _config_schema_to_default_config(self, schema: dict) -> dict:
         """将 Schema 转换成 Config"""

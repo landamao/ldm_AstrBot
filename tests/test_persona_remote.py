@@ -372,6 +372,145 @@ async def test_远程reset_无对话提示无需重置():
     assert "无需重置" in _result_text(event)
 
 
+# ==== get ====
+
+
+def _stub_persona_mgr(context: MagicMock, resolve_result: tuple) -> None:
+    pm = context.persona_manager
+    pm.resolve_selected_persona = AsyncMock(return_value=resolve_result)
+    pm.get_default_persona_v3 = AsyncMock(return_value={"name": "default"})
+
+
+@pytest.mark.asyncio
+async def test_远程get_有规则显示规则来源():
+    cmds, context = _cmds()
+    _stub_known_umos(cmds, [UMO_A])
+    _stub_aliases(context, [ALIAS_111])
+    sp_patch, _ = _stub_sp({UMO_A: {"persona_id": "规则人格"}})
+    cm = _stub_conv(context, curr_cid="cid-1")
+    cm.get_conversation = AsyncMock(
+        return_value=SimpleNamespace(persona_id="对话人格", title="日常"),
+    )
+    _stub_persona_mgr(context, ("规则人格", {"name": "规则人格"}, "规则人格", False))
+    context.get_config = MagicMock(return_value={"provider_settings": {}})
+    event = _event("/persona get 111111")
+    with sp_patch:
+        await cmds.persona(event)
+    text = _result_text(event)
+    assert "会话: aiocqhttp:GroupMessage:111111（测试群）" in text
+    assert "当前对话: 日常(cid-)" in text
+    assert "自定义规则人格: 规则人格" in text
+    assert "对话人格: 对话人格" in text
+    assert "最终生效: 规则人格（来源: 自定义规则）" in text
+    # 只读查看：不得创建/修改对话
+    cm.new_conversation.assert_not_called()
+    cm.update_conversation_persona_id.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_远程get_无规则有对话显示对话来源():
+    cmds, context = _cmds()
+    _stub_known_umos(cmds, [UMO_A])
+    _stub_aliases(context, [ALIAS_111])
+    sp_patch, _ = _stub_sp({})
+    cm = _stub_conv(context, curr_cid="cid-1")
+    cm.get_conversation = AsyncMock(
+        return_value=SimpleNamespace(persona_id="小助手", title=""),
+    )
+    _stub_persona_mgr(context, ("小助手", {"name": "小助手"}, None, False))
+    context.get_config = MagicMock(return_value={"provider_settings": {}})
+    event = _event("/persona get 111111")
+    with sp_patch:
+        await cmds.persona(event)
+    text = _result_text(event)
+    assert "自定义规则人格: 无" in text
+    assert "对话人格: 小助手" in text
+    assert "最终生效: 小助手（来源: 对话设置）" in text
+
+
+@pytest.mark.asyncio
+async def test_本会话get_无对话显示默认人格来源():
+    cmds, context = _cmds()
+    sp_patch, _ = _stub_sp({})
+    _stub_conv(context, curr_cid=None)
+    _stub_persona_mgr(context, ("default", {"name": "default"}, None, False))
+    context.get_config = MagicMock(return_value={"provider_settings": {}})
+    event = _event("/persona get")
+    with sp_patch:
+        await cmds.persona(event)
+    text = _result_text(event)
+    assert "会话: 当前会话" in text
+    assert "当前对话: 无" in text
+    assert "对话人格: 未设置" in text
+    assert "默认人格情景: default" in text
+    assert "最终生效: default（来源: 默认人格）" in text
+
+
+@pytest.mark.asyncio
+async def test_get_对话人格None显示无():
+    cmds, context = _cmds()
+    sp_patch, _ = _stub_sp({})
+    cm = _stub_conv(context, curr_cid="cid-1")
+    cm.get_conversation = AsyncMock(
+        return_value=SimpleNamespace(persona_id="[%None]", title="日常"),
+    )
+    _stub_persona_mgr(context, ("[%None]", None, None, False))
+    context.get_config = MagicMock(return_value={"provider_settings": {}})
+    event = _event("/persona get")
+    with sp_patch:
+        await cmds.persona(event)
+    text = _result_text(event)
+    assert "对话人格: 无" in text
+    assert "最终生效: 无" in text
+    assert "人格不存在" not in text
+
+
+@pytest.mark.asyncio
+async def test_get_webchat特殊默认人格不暴露内部名():
+    cmds, context = _cmds()
+    sp_patch, _ = _stub_sp({})
+    _stub_conv(context, curr_cid=None)
+    _stub_persona_mgr(context, ("_chatui_default_", None, None, True))
+    context.get_config = MagicMock(return_value={"provider_settings": {}})
+    event = _event("/persona get", umo=UMO_WEBCHAT)
+    with sp_patch:
+        await cmds.persona(event)
+    text = _result_text(event)
+    assert "最终生效: ChatUI 默认人格（来源: WebChat 专用默认人格）" in text
+    assert "_chatui_default_" not in text
+
+
+@pytest.mark.asyncio
+async def test_get_人格已不存在给出警告():
+    cmds, context = _cmds()
+    sp_patch, _ = _stub_sp({})
+    cm = _stub_conv(context, curr_cid="cid-1")
+    cm.get_conversation = AsyncMock(
+        return_value=SimpleNamespace(persona_id="已删除", title="日常"),
+    )
+    _stub_persona_mgr(context, ("已删除", None, None, False))
+    context.get_config = MagicMock(return_value={"provider_settings": {}})
+    event = _event("/persona get")
+    with sp_patch:
+        await cmds.persona(event)
+    assert "最终生效: 已删除 ⚠️ 人格不存在" in _result_text(event)
+
+
+@pytest.mark.asyncio
+async def test_远程get_会话ID未命中拒绝执行():
+    cmds, context = _cmds()
+    _stub_known_umos(cmds, [UMO_A])
+    _stub_aliases(context, [ALIAS_111])
+    sp_patch, _ = _stub_sp({})
+    _stub_conv(context, curr_cid=None)
+    _stub_persona_mgr(context, ("default", {"name": "default"}, None, False))
+    context.get_config = MagicMock(return_value={"provider_settings": {}})
+    event = _event("/persona get 999999")
+    with sp_patch:
+        await cmds.persona(event)
+    assert "未找到会话" in _result_text(event)
+
+
 # ==== 入口分支保护 ====
 
 
@@ -391,6 +530,7 @@ async def test_入口_无参数显示帮助():
         await cmds.persona(event)
     text = _result_text(event)
     assert "persona 人格 [会话ID]" in text
+    assert "persona get [会话ID]" in text
     assert "persona reset" in text
 
 

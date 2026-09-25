@@ -1278,7 +1278,7 @@ wheels = [
 
 [[package]]
 name = "ldmbot"
-version = "4.27.36"
+version = "4.27.37"
 source = { editable = "." }
 dependencies = [
     { name = "aiocqhttp" },

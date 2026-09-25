@@ -282,6 +282,90 @@ class PersonaCommands(SessionTargetResolver):
         )
         message.set_result(MessageEventResult().message(msg))
 
+    # ==== 查看目标会话的人格配置 ====
+
+    async def _get_persona_on(
+        self,
+        message: AstrMessageEvent,
+        target_umo: str,
+        display: str,
+    ) -> None:
+        pm = self.context.persona_manager
+        session_service_config = (
+            await sp.get_async("umo", target_umo, "session_service_config", {}) or {}
+        )
+        force_persona_id = session_service_config.get("persona_id") or None
+
+        cm = self.context.conversation_manager
+        conv_title = "无"
+        conv_persona_id: str | None = None
+        cid = await cm.get_curr_conversation_id(target_umo)
+        if cid:
+            # 只读查看，不创建对话
+            conv = await cm.get_conversation(target_umo, cid)
+            if conv is not None:
+                conv_persona_id = conv.persona_id
+                conv_title = (conv.title or "新对话") + f"({cid[:4]})"
+
+        (
+            persona_id,
+            persona,
+            _,
+            use_webchat_default,
+        ) = await pm.resolve_selected_persona(
+            umo=target_umo,
+            conversation_persona_id=conv_persona_id,
+            # 远程查询时平台取目标 umo 的平台段，而非发消息的平台
+            platform_name=target_umo.split(":", 1)[0],
+            provider_settings=self.context.get_config(umo=target_umo).get(
+                "provider_settings",
+                {},
+            ),
+        )
+        default_persona = await pm.get_default_persona_v3(umo=target_umo)
+
+        if conv_persona_id == "[%None]":
+            conv_persona_text = "无"
+        elif conv_persona_id:
+            conv_persona_text = conv_persona_id
+        else:
+            conv_persona_text = "未设置"
+
+        if force_persona_id:
+            source = "自定义规则"
+        elif conv_persona_id:
+            source = "对话设置"
+        elif use_webchat_default:
+            source = "WebChat 专用默认人格"
+        else:
+            source = "默认人格"
+
+        if use_webchat_default:
+            # webchat 专用默认人格是虚拟名，不暴露内部 id
+            effective = "ChatUI 默认人格"
+        elif persona_id in (None, "[%None]"):
+            effective = "无"
+        else:
+            effective = persona_id
+            if persona is None:
+                effective += " ⚠️ 人格不存在"
+
+        force_text = force_persona_id or "无"
+        default_name = default_persona["name"]
+        message.set_result(
+            MessageEventResult()
+            .message(
+                f"[Persona] 会话人格\n\n"
+                f"- 会话: {display}\n"
+                f"- 当前对话: {conv_title}\n"
+                f"- 自定义规则人格: {force_text}\n"
+                f"- 对话人格: {conv_persona_text}\n"
+                f"- 默认人格情景: {default_name}\n"
+                f"- 最终生效: {effective}（来源: {source}）",
+            )
+            .use_t2i(False),
+        )
+
     # ==== 指令入口 ====
 
     async def _show_info(self, message: AstrMessageEvent, umo: str) -> None:
@@ -346,6 +430,7 @@ class PersonaCommands(SessionTargetResolver):
 - 设置人格情景: `{前缀}persona 人格 [会话ID]`
 - 人格情景列表: `{前缀}persona list`
 - 人格情景详细信息: `{前缀}persona view 人格`
+- 查看会话人格: `{前缀}persona get [会话ID]`
 - 取消人格: `{前缀}persona unset [会话ID]`
 - 重置对话上下文: `{前缀}persona reset [会话ID]`
 
@@ -417,6 +502,14 @@ class PersonaCommands(SessionTargetResolver):
             else:
                 msg = f"人格「{ps}」不存在。使用 {获取第一个唤醒词()}persona list 查看所有人格。"
             message.set_result(MessageEventResult().message(msg))
+        elif l[1] == "get":
+            raw = "".join(l[2:]).strip()
+            if not raw:
+                await self._get_persona_on(message, umo, "当前会话")
+                return
+            target, display = await self._pick_target(message, raw)
+            if target:
+                await self._get_persona_on(message, target, display)
         elif l[1] == "unset":
             raw = "".join(l[2:]).strip()
             if not raw:
