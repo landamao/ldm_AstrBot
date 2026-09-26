@@ -96,6 +96,7 @@ from astrbot.core.tools.message_tools import (
     GetGroupMessageHistoryTool,
     SendMessageToUserTool,
 )
+from astrbot.core.tools.transcription_tools import TranscribeMediaTool
 from astrbot.core.tools.web_search_tools import (
     BaiduWebSearchTool,
     BochaWebSearchTool,
@@ -1318,6 +1319,27 @@ def _apply_image_caption_tool(
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(ImageCaptionTool))
 
 
+def _apply_media_transcription_tool(
+    event: AstrMessageEvent,
+    req: ProviderRequest,
+    plugin_context: Context,
+) -> None:
+    """开启语音转文本并配置默认模型时，注入音视频转写工具。"""
+    cfg = plugin_context.get_config(umo=event.unified_msg_origin)
+    stt_settings = cfg.get("provider_stt_settings", {})
+    if not isinstance(stt_settings, dict):
+        return
+    if not stt_settings.get("enable", False):
+        return
+    if not str(stt_settings.get("provider_id") or "").strip():
+        return
+
+    if req.func_tool is None:
+        req.func_tool = ToolSet()
+    tool_mgr = plugin_context.get_llm_tool_manager()
+    req.func_tool.add_tool(tool_mgr.get_builtin_tool(TranscribeMediaTool))
+
+
 def _apply_image_generation_tools(
     event: AstrMessageEvent,
     req: ProviderRequest,
@@ -1763,6 +1785,7 @@ async def build_main_agent(
     await _apply_web_search_tools(event, req, plugin_context)
     _apply_image_caption_tool(event, req, plugin_context)
     _apply_image_generation_tools(event, req, plugin_context)
+    _apply_media_transcription_tool(event, req, plugin_context)
 
     if config.llm_safety_mode:
         _apply_llm_safety_mode(config, req)

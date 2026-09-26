@@ -36,9 +36,7 @@ class AboutCommand:
             f"  插件目录: {ldm['plugin_dir']}\n"
             f"  插件数据目录: {ldm['plugin_data_dir']}\n"
             f"  备份目录: {ldm['backup_dir']}\n"
-            f"  版本回滚目录: {ldm['rollback_dir']}\n"
-            f"项目地址: {info['project_url']}\n"
-            f"作者GitHub: {info['author_url']}"
+            f"  版本回滚目录: {ldm['rollback_dir']}"
         )
 
         event.set_result(MessageEventResult().message(ret).use_t2i(False))

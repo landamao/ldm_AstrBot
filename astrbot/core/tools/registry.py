@@ -15,6 +15,7 @@ _BUILTIN_TOOL_MODULES = (
     "astrbot.core.tools.image_tools",
     "astrbot.core.tools.knowledge_base_tools",
     "astrbot.core.tools.message_tools",
+    "astrbot.core.tools.transcription_tools",
     "astrbot.core.tools.web_search_tools",
 )
 
@@ -224,6 +225,30 @@ _register_builtin_tool_config_rule(
                 message=(
                     "需开启 provider_settings.enable_image_generation_tool"
                     "（启用生图工具）后才会注入此工具"
+                ),
+            ),
+        )
+    ),
+)
+
+_register_builtin_tool_config_rule(
+    ("ldmbot_transcribe_media",),
+    BuiltinToolConfigRule(
+        conditions=(
+            BuiltinToolConfigCondition(
+                key="provider_stt_settings.enable",
+                operator="truthy",
+                message=(
+                    "需开启 provider_stt_settings.enable"
+                    "（启用语音转文本）后才会注入此工具"
+                ),
+            ),
+            BuiltinToolConfigCondition(
+                key="provider_stt_settings.provider_id",
+                operator="truthy",
+                message=(
+                    "需配置 provider_stt_settings.provider_id"
+                    "（默认语音转文本模型）后才会注入此工具"
                 ),
             ),
         )

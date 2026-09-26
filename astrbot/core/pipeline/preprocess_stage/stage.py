@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from astrbot.core import logger
-from astrbot.core.message.components import Image, Plain, Record, Reply
+from astrbot.core.message.components import Image, Plain, Record, Reply, Video
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.io import DownloadFileSizeLimitError
@@ -31,6 +31,29 @@ class PreProcessStage(Stage):
 
         self.stt_settings: dict = self.config.get("provider_stt_settings", {})
         self.platform_settings: dict = self.config.get("platform_settings", {})
+
+    def _stt_tool_available(self) -> bool:
+        """音视频转写工具（ldmbot_transcribe_media）是否已按配置注入。"""
+        return bool(
+            self.stt_settings.get("enable", False)
+            and self.stt_settings.get("provider_id")
+        )
+
+    @staticmethod
+    def _wrap_stt_text(result: str, is_reply: bool = False) -> str:
+        """给语音转文本结果加标签，让模型与历史记录知道该文本来自语音。"""
+        tag = "引用语音转文字" if is_reply else "语音转文字"
+        return f"[{tag}: {result}]"
+
+    @staticmethod
+    def _append_media_placeholder(event: AstrMessageEvent, placeholder: str) -> None:
+        """把媒体占位标签追加到消息文本，供模型引用本地文件调用工具。"""
+        if event.message_str:
+            event.message_str += f" {placeholder}"
+            event.message_obj.message_str += f" {placeholder}"
+        else:
+            event.message_str = placeholder
+            event.message_obj.message_str = placeholder
 
     @staticmethod
     def _track_temp_media(event: AstrMessageEvent, media_path: str) -> None:
@@ -159,6 +182,24 @@ class PreProcessStage(Stage):
                         describe_media_ref(media_ref),
                         e,
                     )
+            elif isinstance(component, Video):
+                # 视频不走自动转写：仅当转写工具已按配置启用时本地化，
+                # 并追加占位标签供 LLM 调用 ldmbot_transcribe_media 时引用。
+                if not self._stt_tool_available():
+                    continue
+                try:
+                    video_path = await component.convert_to_file_path()
+                except DownloadFileSizeLimitError as e:
+                    logger.warning(f"视频超过下载上限，已跳过转写准备: {e}")
+                    continue
+                except Exception as e:
+                    logger.warning(f"Video processing failed: {e}")
+                    continue
+                self._track_temp_media(event, video_path)
+                component.file = video_path
+                component.path = video_path
+                message_chain[idx] = component
+                self._append_media_placeholder(event, f"[视频: {video_path}]")
 
         # Also normalize media components inside Reply chains.
         for component in event.get_messages():
@@ -232,7 +273,7 @@ class PreProcessStage(Stage):
                         if result:
                             suffix = "(引用消息)" if is_reply else ""
                             logger.info(f"语音转文本{suffix}结果: " + result)
-                            return Plain(result)
+                            return Plain(self._wrap_stt_text(result, is_reply))
                         break
                     except FileNotFoundError:
                         # napcat workaround: file may not be ready immediately
