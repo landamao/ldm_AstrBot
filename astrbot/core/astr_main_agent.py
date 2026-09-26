@@ -1813,6 +1813,11 @@ async def build_main_agent(
         if fallback_providers:
             logger.info("主模型失败回退已关闭（WebChat 开关），本次请求仅使用主模型。")
         fallback_providers = []
+    # 全局「开启主模型失败回退」开关：关闭时主模型失败直接抛错，不尝试回退模型
+    if not config.provider_settings.get("enable_main_model_fallback", True):
+        if fallback_providers:
+            logger.info("主模型失败回退已关闭，本次请求仅使用主模型，失败将直接抛出错误。")
+        fallback_providers = []
     selected_provider = _select_image_chat_provider(provider, req, fallback_providers)
     if selected_provider is not provider:
         provider = selected_provider
@@ -1889,6 +1894,12 @@ async def build_main_agent(
         tool_schema_mode=config.tool_schema_mode,
         fallback_providers=fallback_providers,
         request_max_retries=config.provider_settings.get("request_max_retries", 5),
+        empty_content_retry_enabled=config.provider_settings.get(
+            "enable_empty_content_retry", True
+        ),
+        empty_content_retry_mode=config.provider_settings.get(
+            "empty_content_retry_mode", "retry_current"
+        ),
         tool_result_overflow_dir=(
             get_astrbot_system_tmp_path()
             if req.func_tool and req.func_tool.get_tool("ldmbot_file_read")

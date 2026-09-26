@@ -145,7 +145,7 @@ class DeerFlowAgentRunner(BaseAgentRunner[TContext]):
         )
 
     async def _finish_with_error(self, err_msg: str) -> AgentResponse:
-        err_text = f"DeerFlow request failed: {err_msg}"
+        err_text = f"DeerFlow 请求失败：{err_msg}"
         err_chain = MessageChain().message(err_text)
         self.final_llm_resp = LLMResponse(
             role="err",

@@ -21,8 +21,7 @@ from mcp.types import (
 )
 from tenacity import (
     AsyncRetrying,
-    retry_if_exception_type,
-    stop_after_attempt,
+    retry_if_exception,
     wait_exponential,
 )
 
@@ -30,8 +29,12 @@ from astrbot import logger
 from astrbot.core.agent.message import ImageURLPart, TextPart, ThinkPart
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.agent.tool_image_cache import tool_image_cache
-from astrbot.core.exceptions import EmptyModelOutputError
-from astrbot.core.message.components import Json
+from astrbot.core.exceptions import (
+    AstrBotError,
+    EmptyModelOutputError,
+    ReasoningOnlyOutputError,
+)
+from astrbot.core.message.components import Json, Plain
 from astrbot.core.message.message_event_result import (
     MessageChain,
 )
@@ -129,6 +132,17 @@ class _ToolExecutionInterrupted(Exception):
         self.interrupted_tool_call_id = interrupted_tool_call_id
 
 
+def _format_llm_error_detail(exc: BaseException) -> str:
+    """构造用户可见的 LLM 错误详情。
+
+    框架自带异常的文案已中文化，直接展示；第三方 SDK 异常保留
+    异常类名 + 原始信息，便于排查。
+    """
+    if isinstance(exc, AstrBotError):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
+
+
 def extract_exception_code(exc: BaseException | None) -> str | None:
     """从异常中提取可展示的错误码（HTTP 状态码 / 业务 code）。
 
@@ -194,6 +208,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
     EMPTY_OUTPUT_RETRY_ATTEMPTS = 3
     EMPTY_OUTPUT_RETRY_WAIT_MIN_S = 1
     EMPTY_OUTPUT_RETRY_WAIT_MAX_S = 4
+    # 「模型无正文时重新请求」的最大尝试次数（含首次请求）
+    EMPTY_CONTENT_RETRY_ATTEMPTS = 5
     USER_INTERRUPTION_MESSAGE = (
         "<system_reminder>User actively interrupted the response generation. "
         "Partial output before interruption is preserved.</system_reminder>"
@@ -294,6 +310,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         tool_schema_mode: str | None = "full",
         fallback_providers: list[Provider] | None = None,
         request_max_retries: int | None = None,
+        empty_content_retry_enabled: bool = False,
+        empty_content_retry_mode: str = "retry_current",
         tool_result_overflow_dir: str | None = None,
         read_tool: FunctionTool | None = None,
         **kwargs: T.Any,
@@ -310,6 +328,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self.custom_token_counter = custom_token_counter
         self.custom_compressor = custom_compressor
         self.request_max_retries = request_max_retries
+        # 「模型无正文时重新请求」：仅有思考内容、无正文也无工具调用时的处理方式
+        # retry_current=重试当前模型；fallback=请求回退模型
+        self.empty_content_retry_enabled = empty_content_retry_enabled
+        self.empty_content_retry_mode = empty_content_retry_mode
         self.tool_result_overflow_dir = tool_result_overflow_dir
         self.read_tool = read_tool
         self._tool_result_token_counter = EstimateTokenCounter()
@@ -723,6 +745,38 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 with suppress(asyncio.CancelledError):
                     await abort_task
 
+    def _is_reasoning_only_output(self, resp: LLMResponse) -> bool:
+        """判断响应是否为「仅有思考内容、无正文也无工具调用」。"""
+        if resp.tools_call_name:
+            return False
+        if (resp.completion_text or "").strip():
+            return False
+        if not (resp.reasoning_content or "").strip():
+            return False
+        chain = resp.result_chain
+        if chain is None:
+            return True
+        # 链中含图片等非文本组件的多模态响应不算「无正文」
+        return not any(not isinstance(comp, Plain) for comp in chain.chain)
+
+    def _should_retry_output_error(self, exc: BaseException) -> bool:
+        """空输出重试谓词：完全空输出按原策略重试；仅有思考输出按配置决定。"""
+        if isinstance(exc, ReasoningOnlyOutputError):
+            return (
+                self.empty_content_retry_enabled
+                and self.empty_content_retry_mode == "retry_current"
+            )
+        return isinstance(exc, EmptyModelOutputError)
+
+    def _stop_output_retry(self, retry_state) -> bool:
+        """按异常类型区分最大尝试次数：仅思考输出与完全空输出。"""
+        attempt_number = retry_state.attempt_number
+        outcome = retry_state.outcome
+        exc = outcome.exception() if outcome is not None else None
+        if isinstance(exc, ReasoningOnlyOutputError):
+            return attempt_number >= self.EMPTY_CONTENT_RETRY_ATTEMPTS
+        return attempt_number >= self.EMPTY_OUTPUT_RETRY_ATTEMPTS
+
     async def _iter_llm_responses_with_fallback(
         self,
     ) -> T.AsyncGenerator[LLMResponse, None]:
@@ -737,9 +791,9 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             is_last_candidate = idx == total_candidates - 1
             if idx > 0:
                 logger.warning(
-                    "Switched from %s to fallback chat provider: %s",
-                    self.provider.provider_config.get("id", "<unknown>"),
+                    "主模型请求失败，已切换到回退对话模型：%s（原模型：%s）",
                     candidate_id,
+                    self.provider.provider_config.get("id", "<unknown>"),
                 )
             self.provider = candidate
             self.stats.provider_id = str(
@@ -750,8 +804,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             )
             try:
                 retrying = AsyncRetrying(
-                    retry=retry_if_exception_type(EmptyModelOutputError),
-                    stop=stop_after_attempt(self.EMPTY_OUTPUT_RETRY_ATTEMPTS),
+                    retry=retry_if_exception(self._should_retry_output_error),
+                    stop=self._stop_output_retry,
                     wait=wait_exponential(
                         multiplier=1,
                         min=self.EMPTY_OUTPUT_RETRY_WAIT_MIN_S,
@@ -779,10 +833,20 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                                 ):
                                     last_err_response = resp
                                     logger.warning(
-                                        "Chat Model %s returns error response, trying fallback to next provider.",
+                                        "对话模型 %s 返回错误响应，尝试切换到下一个回退模型。",
                                         candidate_id,
                                     )
                                     break
+
+                                # 「模型无正文时重新请求」：仅有思考内容、无正文也无工具
+                                # 调用时抛错，由重试谓词决定重试当前模型还是走回退链
+                                if (
+                                    self.empty_content_retry_enabled
+                                    and self._is_reasoning_only_output(resp)
+                                ):
+                                    raise ReasoningOnlyOutputError(
+                                        "模型仅返回思考内容，未生成正文或工具调用"
+                                    )
 
                                 self._sanitize_malformed_tool_calls(resp)
                                 yield resp
@@ -794,15 +858,29 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
 
                             if has_stream_output:
                                 return
+                        except ReasoningOnlyOutputError:
+                            if self.empty_content_retry_mode == "retry_current":
+                                logger.warning(
+                                    "对话模型 %s 第 %s/%s 次仅返回思考内容、无正文输出，继续重试当前模型。",
+                                    candidate_id,
+                                    attempt.retry_state.attempt_number,
+                                    self.EMPTY_CONTENT_RETRY_ATTEMPTS,
+                                )
+                            else:
+                                logger.warning(
+                                    "对话模型 %s 仅返回思考内容、无正文输出，判定为失败，尝试请求回退模型。",
+                                    candidate_id,
+                                )
+                            raise
                         except EmptyModelOutputError:
                             if has_stream_output:
                                 logger.warning(
-                                    "Chat Model %s returned empty output after streaming started; skipping empty-output retry.",
+                                    "对话模型 %s 在流式输出开始后返回空输出，跳过空输出重试。",
                                     candidate_id,
                                 )
                             else:
                                 logger.warning(
-                                    "Chat Model %s returned empty output on attempt %s/%s.",
+                                    "对话模型 %s 第 %s/%s 次尝试返回空输出。",
                                     candidate_id,
                                     attempt.retry_state.attempt_number,
                                     self.EMPTY_OUTPUT_RETRY_ATTEMPTS,
@@ -811,7 +889,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             except Exception as exc:  # noqa: BLE001
                 last_exception = exc
                 logger.warning(
-                    "Chat Model %s request error: %s",
+                    "对话模型 %s 请求出错：%s",
                     candidate_id,
                     exc,
                     exc_info=True,
@@ -833,24 +911,22 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             yield last_err_response
             return
         if last_exception:
+            detail = _format_llm_error_detail(last_exception)
             self.last_llm_error = {
                 "model": self.provider.provider_config.get("model", "")
                 if self.provider
                 else "",
                 "code": extract_exception_code(last_exception),
-                "detail": f"{type(last_exception).__name__}: {last_exception}",
+                "detail": detail,
             }
             yield LLMResponse(
                 role="err",
-                completion_text=(
-                    "All chat models failed: "
-                    f"{type(last_exception).__name__}: {last_exception}"
-                ),
+                completion_text=f"所有对话模型均请求失败：{detail}",
             )
             return
         yield LLMResponse(
             role="err",
-            completion_text="All available chat models are unavailable.",
+            completion_text="所有可用的对话模型均请求失败。",
         )
 
     def _sanitize_contexts_for_provider(

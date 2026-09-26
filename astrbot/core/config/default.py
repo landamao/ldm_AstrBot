@@ -165,6 +165,12 @@ DEFAULT_CONFIG = {
         "enable": True,
         "default_provider_id": "",
         "fallback_chat_models": [],
+        # 主模型失败回退：关闭后主模型失败直接抛错，不尝试回退模型
+        "enable_main_model_fallback": True,
+        # 模型无正文时重新请求：仅有思考内容、无正文也无工具调用时重试
+        "enable_empty_content_retry": True,
+        # 无正文重试方式：fallback=请求回退模型 / retry_current=重试当前模型
+        "empty_content_retry_mode": "retry_current",
         "request_max_retries": 2,
         "default_image_caption_provider_id": "",
         "always_use_image_caption_provider": False,
@@ -3605,6 +3611,27 @@ CONFIG_METADATA_3 = {
                         "type": "string",
                         "_special": "select_chat_model_chain",
                         "hint": "列表第一项为主对话模型，其余为回退模型（主模型失败时按顺序切换）。可拖拽排序，拖到顶部即设为主模型。留空时使用第一个模型。",
+                    },
+                    "provider_settings.enable_main_model_fallback": {
+                        "description": "开启主模型失败回退",
+                        "type": "bool",
+                        "hint": "开启后，模型请求失败将依次请求回退模型。关闭后，主模型失败就抛出错误。",
+                    },
+                    "provider_settings.enable_empty_content_retry": {
+                        "description": "模型无正文时重新请求",
+                        "type": "bool",
+                        "hint": "当请求llm，llm的响应只有思考字段，却无正文，也没有工具调用，是否继续重试llm，开启后，一直重试直到有正文回复（最多重试 5 次）。",
+                    },
+                    "provider_settings.empty_content_retry_mode": {
+                        "description": "重试方式",
+                        "type": "string",
+                        "options": ["fallback", "retry_current"],
+                        "labels": ["请求回退模型", "重试当前模型"],
+                        "default": "retry_current",
+                        "hint": "请求回退模型：当前模型无正文输出即判定为失败，继续请求配置里的回退模型列表（若有且已开启）。重试当前模型：有思考输出，说明当前模型可正常工作，继续重试当前模型直到吐出正文或工具调用，失败则回退（若已开启回退）。",
+                        "condition": {
+                            "provider_settings.enable_empty_content_retry": True,
+                        },
                     },
                     "provider_settings.fallback_chat_models": {
                         "description": "回退对话模型列表",

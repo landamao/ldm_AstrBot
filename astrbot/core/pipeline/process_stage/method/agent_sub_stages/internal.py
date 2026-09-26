@@ -793,7 +793,7 @@ class InternalAgentSubStage(Stage):
                 event
             )
             error_text = custom_error_message or (
-                f"Error occurred while processing agent request: {e}"
+                f"AI 执行请求时出现错误: {e}"
             )
             await self._send_llm_error_message(
                 event,

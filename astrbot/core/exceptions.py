@@ -13,6 +13,13 @@ class EmptyModelOutputError(AstrBotError):
     """Raised when the model response contains no usable assistant output."""
 
 
+class ReasoningOnlyOutputError(EmptyModelOutputError):
+    """模型响应只有思考内容、无正文也无工具调用时抛出。
+
+    是否重试由「模型无正文时重新请求」及「重试方式」配置决定。
+    """
+
+
 class KnowledgeBaseUploadError(AstrBotError):
     """Raised when knowledge base upload fails with a user-facing message."""
 
