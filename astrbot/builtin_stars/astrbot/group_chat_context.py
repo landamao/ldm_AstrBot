@@ -38,11 +38,17 @@ Group chat context awareness.
 
 GROUP_HISTORY_HEADER = (
     "<system_reminder>"
-    "You are in a group chat. "
-    "Belows are group chat context after your last reply:\n"
-    "--- BEGIN CONTEXT---\n"
+    "You are currently in a group chat.\n"
+    "--- BEGIN CONTEXT ---\n"
 )
-GROUP_HISTORY_FOOTER = "\n--- END CONTEXT ---\n</system_reminder>"
+GROUP_HISTORY_FOOTER = (
+    "\n--- END CONTEXT ---\n"
+    "Above is the group chat history before the current user message, "
+    "arranged in chronological order. "
+    "Below is the content of the current user message that immediately "
+    "follows the chat history and needs to be processed.\n"
+    "</system_reminder>"
+)
 DEFAULT_GROUP_MESSAGE_MAX_CNT = 300
 # 黑白名单通配符，与插件 Tools.py 解析黑白名单一致
 _ACCESS_WILDCARDS = ("*", "all")
@@ -606,7 +612,7 @@ class GroupChatContext:
                 event,
             )
 
-        req.extra_user_content_parts.append(
+        req.leading_user_content_parts.append(
             TextPart(text=_format_group_history_block(records_to_inject))
         )
 

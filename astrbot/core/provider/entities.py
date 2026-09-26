@@ -125,6 +125,8 @@ class ProviderRequest:
     """音频 URL 列表，也支持本地路径"""
     extra_user_content_parts: list[ContentPart] = field(default_factory=list)
     """额外的用户消息内容部分列表，用于在用户消息后添加额外的内容块（如系统提醒、指令等）。支持 dict 或 ContentPart 对象"""
+    leading_user_content_parts: list[ContentPart] = field(default_factory=list)
+    """前置内容块列表，在用户原始发言之前插入（如群聊上下文等参考资料）。"""
     func_tool: ToolSet | None = None
     """可用的函数工具"""
     contexts: list[dict] = field(default_factory=list)
@@ -216,6 +218,11 @@ class ProviderRequest:
         # 构建内容块列表
         content_blocks = []
 
+        # 0. 前置内容块（参考资料，如群聊上下文：时间序上先于用户发言）
+        if self.leading_user_content_parts:
+            for part in self.leading_user_content_parts:
+                content_blocks.append(part.model_dump_for_context())
+
         # 1. 用户原始发言（OpenAI 建议：用户发言在前）
         if self.prompt and self.prompt.strip():
             content_blocks.append({"type": "text", "text": self.prompt})
@@ -278,6 +285,7 @@ class ProviderRequest:
             len(content_blocks) == 1
             and content_blocks[0]["type"] == "text"
             and not self.extra_user_content_parts
+            and not self.leading_user_content_parts
             and not self.image_urls
             and not self.audio_urls
         ):

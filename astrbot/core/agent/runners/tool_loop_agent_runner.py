@@ -410,6 +410,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             or request.image_urls
             or request.audio_urls
             or request.extra_user_content_parts
+            or request.leading_user_content_parts
         ):
             m = await self._assemble_request_context_for_provider(request)
             messages.append(Message.model_validate(m))
