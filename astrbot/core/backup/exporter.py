@@ -1,0 +1,542 @@
+"""AstrBot 数据导出器
+
+负责将所有数据导出为 ZIP 备份文件。
+导出格式为 JSON，这是数据库无关的方案，支持未来向 MySQL/PostgreSQL 迁移。
+"""
+
+import hashlib
+import json
+import os
+import uuid
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import select
+
+from astrbot.core import logger
+from astrbot.core.config.default import VERSION
+from astrbot.core.db import BaseDatabase
+from astrbot.core.utils.astrbot_path import (
+    get_astrbot_backups_path,
+    get_astrbot_data_path,
+)
+
+# 从共享常量模块导入
+from .constants import (
+    BACKUP_CONFIG_FILES,
+    BACKUP_MANIFEST_VERSION,
+    KB_METADATA_MODELS,
+    MAIN_DB_MODELS,
+    get_backup_directories,
+)
+
+if TYPE_CHECKING:
+    from astrbot.core.knowledge_base.kb_mgr import KnowledgeBaseManager
+
+CMD_CONFIG_FILE_PATH = os.path.join(get_astrbot_data_path(), "cmd_config.json")
+
+
+def resolve_export_zip_path(output_dir: str, timestamp: str, suffix: str) -> str:
+    """解析导出 zip 路径；同秒多次导出时追加序号，避免后写者把前一个截断成残废文件。
+
+    此前文件名只精确到秒，导出卡顿期间连点导出会生成同名文件互相覆盖，
+    在磁盘上留下只有几十字节的半截 zip（2026-09-15 腾讯云服务器事故）。
+    """
+    base = os.path.join(output_dir, f"ldmbot_backup_{timestamp}{suffix}.zip")
+    if not os.path.exists(base):
+        return base
+    stem = os.path.splitext(base)[0]
+    for n in range(1, 100):
+        candidate = f"{stem}_{n}.zip"
+        if not os.path.exists(candidate):
+            return candidate
+    return f"{stem}_{uuid.uuid4().hex[:8]}.zip"
+
+
+class AstrBotExporter:
+    """AstrBot 数据导出器
+
+    导出内容：
+    - 主数据库所有表（data/data_v4.db）
+    - 知识库元数据（data/knowledge_base/kb.db）
+    - 每个知识库的向量文档数据
+    - 配置文件（data/cmd_config.json、data/mcp_server.json、data/skills.json）
+    - 附件文件
+    - 知识库多媒体文件
+    - 插件目录（data/plugins）
+    - 插件数据目录（data/plugin_data）
+    - 配置目录（data/config）
+    - T2I 模板目录（data/t2i_templates）
+    - WebChat 数据目录（data/webchat）
+
+    数据库和知识库导出失败会直接让整个备份失败；
+    单个文件（附件、目录内文件、KB 媒体文件）导出失败会记录到
+    manifest 的 export_errors 字段，不会静默吞掉。
+    """
+
+    def __init__(
+        self,
+        main_db: BaseDatabase,
+        kb_manager: "KnowledgeBaseManager | None" = None,
+        config_path: str = CMD_CONFIG_FILE_PATH,
+    ) -> None:
+        self.main_db = main_db
+        self.kb_manager = kb_manager
+        self.config_path = config_path
+        self._checksums: dict[str, str] = {}
+        self._export_errors: list[str] = []
+        self._exported_config_files: list[str] = []
+
+    async def export_all(
+        self,
+        output_dir: str | None = None,
+        progress_callback: Any | None = None,
+        filename_suffix: str = "",
+    ) -> str:
+        """导出所有数据到 ZIP 文件
+
+        Args:
+            output_dir: 输出目录
+            progress_callback: 进度回调函数，接收参数 (stage, current, total, message)
+
+        Returns:
+            str: 生成的 ZIP 文件路径
+        """
+        if output_dir is None:
+            output_dir = get_astrbot_backups_path()
+
+        # 确保输出目录存在
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = f"_{filename_suffix}" if filename_suffix else ""
+        zip_path = resolve_export_zip_path(output_dir, timestamp, suffix)
+
+        logger.info(f"开始导出备份到 {zip_path}")
+
+        try:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                # 1. 导出主数据库
+                if progress_callback:
+                    await progress_callback("main_db", 0, 100, "正在导出主数据库...")
+                main_data = await self._export_main_database()
+                main_db_json = json.dumps(
+                    main_data, ensure_ascii=False, indent=2, default=str
+                )
+                zf.writestr("databases/main_db.json", main_db_json)
+                self._add_checksum("databases/main_db.json", main_db_json)
+                if progress_callback:
+                    await progress_callback("main_db", 100, 100, "主数据库导出完成")
+
+                # 2. 导出知识库数据
+                kb_meta_data: dict[str, Any] = {
+                    "knowledge_bases": [],
+                    "kb_documents": [],
+                    "kb_media": [],
+                }
+                if self.kb_manager:
+                    if progress_callback:
+                        await progress_callback(
+                            "kb_metadata", 0, 100, "正在导出知识库元数据..."
+                        )
+                    kb_meta_data = await self._export_kb_metadata()
+                    kb_meta_json = json.dumps(
+                        kb_meta_data, ensure_ascii=False, indent=2, default=str
+                    )
+                    zf.writestr("databases/kb_metadata.json", kb_meta_json)
+                    self._add_checksum("databases/kb_metadata.json", kb_meta_json)
+                    if progress_callback:
+                        await progress_callback(
+                            "kb_metadata", 100, 100, "知识库元数据导出完成"
+                        )
+
+                    # 导出每个知识库的文档数据
+                    kb_insts = self.kb_manager.kb_insts
+                    total_kbs = len(kb_insts)
+                    for idx, (kb_id, kb_helper) in enumerate(kb_insts.items()):
+                        if progress_callback:
+                            await progress_callback(
+                                "kb_documents",
+                                idx,
+                                total_kbs,
+                                f"正在导出知识库 {kb_helper.kb.kb_name} 的文档数据...",
+                            )
+                        doc_data = await self._export_kb_documents(kb_helper)
+                        doc_json = json.dumps(
+                            doc_data, ensure_ascii=False, indent=2, default=str
+                        )
+                        doc_path = f"databases/kb_{kb_id}/documents.json"
+                        zf.writestr(doc_path, doc_json)
+                        self._add_checksum(doc_path, doc_json)
+
+                        # 导出 FAISS 索引文件
+                        await self._export_faiss_index(zf, kb_helper, kb_id)
+
+                        # 导出知识库多媒体文件
+                        await self._export_kb_media_files(zf, kb_helper, kb_id)
+
+                    if progress_callback:
+                        await progress_callback(
+                            "kb_documents", total_kbs, total_kbs, "知识库文档导出完成"
+                        )
+
+                # 3. 导出配置文件
+                if progress_callback:
+                    await progress_callback("config", 0, 100, "正在导出配置文件...")
+                self._exported_config_files = self._export_config_files(zf)
+                if progress_callback:
+                    await progress_callback("config", 100, 100, "配置文件导出完成")
+
+                # 4. 导出附件文件
+                if progress_callback:
+                    await progress_callback("attachments", 0, 100, "正在导出附件...")
+                await self._export_attachments(zf, main_data.get("attachments", []))
+                if progress_callback:
+                    await progress_callback("attachments", 100, 100, "附件导出完成")
+
+                # 5. 导出插件和其他目录
+                if progress_callback:
+                    await progress_callback(
+                        "directories", 0, 100, "正在导出插件和数据目录..."
+                    )
+                dir_stats = await self._export_directories(zf)
+                if progress_callback:
+                    await progress_callback("directories", 100, 100, "目录导出完成")
+
+                # 6. 生成 manifest
+                if progress_callback:
+                    await progress_callback("manifest", 0, 100, "正在生成清单...")
+                manifest = self._generate_manifest(main_data, kb_meta_data, dir_stats)
+                manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2)
+                zf.writestr("manifest.json", manifest_json)
+                if progress_callback:
+                    await progress_callback("manifest", 100, 100, "清单生成完成")
+
+            logger.info(f"备份导出完成: {zip_path}")
+            return zip_path
+
+        except Exception as e:
+            logger.error(f"备份导出失败: {e}")
+            # 清理失败的文件
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+            raise
+
+    async def _export_main_database(self) -> dict[str, list[dict]]:
+        """导出主数据库所有表"""
+        export_data: dict[str, list[dict]] = {}
+
+        async with self.main_db.get_db() as session:
+            for table_name, model_class in MAIN_DB_MODELS.items():
+                try:
+                    result = await session.execute(select(model_class))
+                    records = result.scalars().all()
+                    export_data[table_name] = [
+                        self._model_to_dict(record) for record in records
+                    ]
+                    logger.debug(
+                        f"导出表 {table_name}: {len(export_data[table_name])} 条记录"
+                    )
+                except Exception as e:
+                    # 数据库是备份的核心，任何一张表导出失败都让整个备份失败，
+                    # 避免生成"看起来成功"却缺数据的备份
+                    raise RuntimeError(f"导出主数据库表 {table_name} 失败: {e}") from e
+
+        return export_data
+
+    async def _export_kb_metadata(self) -> dict[str, list[dict]]:
+        """导出知识库元数据库"""
+        if not self.kb_manager:
+            return {"knowledge_bases": [], "kb_documents": [], "kb_media": []}
+
+        export_data: dict[str, list[dict]] = {}
+
+        async with self.kb_manager.kb_db.get_db() as session:
+            for table_name, model_class in KB_METADATA_MODELS.items():
+                try:
+                    result = await session.execute(select(model_class))
+                    records = result.scalars().all()
+                    export_data[table_name] = [
+                        self._model_to_dict(record) for record in records
+                    ]
+                    logger.debug(
+                        f"导出知识库表 {table_name}: {len(export_data[table_name])} 条记录"
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        f"导出知识库表 {table_name} 失败: {e}"
+                    ) from e
+
+        return export_data
+
+    async def _export_kb_documents(self, kb_helper: Any) -> dict[str, Any]:
+        """导出知识库的文档块数据"""
+        from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
+
+        vec_db: FaissVecDB = kb_helper.vec_db
+        if not vec_db or not vec_db.document_storage:
+            raise RuntimeError(
+                f"知识库 {kb_helper.kb.kb_name} 的向量存储不可用，无法导出文档数据"
+            )
+
+        # 获取所有文档
+        docs = await vec_db.document_storage.get_documents(
+            metadata_filters={},
+            offset=0,
+            limit=None,  # 获取全部
+        )
+
+        return {"documents": docs}
+
+    async def _export_faiss_index(
+        self,
+        zf: zipfile.ZipFile,
+        kb_helper: Any,
+        kb_id: str,
+    ) -> None:
+        """导出 FAISS 索引文件"""
+        index_path = kb_helper.kb_dir / "index.faiss"
+        if index_path.exists():
+            archive_path = f"databases/kb_{kb_id}/index.faiss"
+            try:
+                zf.write(str(index_path), archive_path)
+                logger.debug(f"导出 FAISS 索引: {archive_path}")
+            except Exception as e:
+                raise RuntimeError(f"导出 FAISS 索引 {index_path} 失败: {e}") from e
+
+    async def _export_kb_media_files(
+        self, zf: zipfile.ZipFile, kb_helper: Any, kb_id: str
+    ) -> None:
+        """导出知识库的多媒体文件"""
+        media_dir = kb_helper.kb_medias_dir
+        if not media_dir.exists():
+            return
+
+        for root, _, files in os.walk(media_dir):
+            for file in files:
+                file_path = Path(root) / file
+                # 计算相对路径
+                rel_path = file_path.relative_to(kb_helper.kb_dir)
+                archive_path = f"files/kb_media/{kb_id}/{rel_path}"
+                try:
+                    zf.write(str(file_path), archive_path)
+                except Exception as e:
+                    # 单个媒体文件失败不中断备份，但必须记录，不能静默
+                    self._export_errors.append(
+                        f"导出知识库 {kb_id} 媒体文件 {file_path} 失败: {e}"
+                    )
+                    logger.warning(self._export_errors[-1])
+
+    async def _export_directories(
+        self, zf: zipfile.ZipFile
+    ) -> dict[str, dict[str, int]]:
+        """导出插件和其他数据目录
+
+        Returns:
+            dict: 每个目录的统计信息 {dir_name: {"files": count, "size": bytes}}
+        """
+        stats: dict[str, dict[str, int]] = {}
+        backup_directories = get_backup_directories()
+
+        for dir_name, dir_path in backup_directories.items():
+            full_path = Path(dir_path)
+            if not full_path.exists():
+                logger.debug(f"目录不存在，跳过: {full_path}")
+                continue
+
+            file_count = 0
+            total_size = 0
+
+            try:
+                for root, dirs, files in os.walk(full_path):
+                    # 跳过 __pycache__ 目录
+                    dirs[:] = [d for d in dirs if d != "__pycache__"]
+
+                    for file in files:
+                        # 跳过 .pyc 文件
+                        if file.endswith(".pyc"):
+                            continue
+
+                        file_path = Path(root) / file
+                        try:
+                            # 计算相对路径
+                            rel_path = file_path.relative_to(full_path)
+                            archive_path = f"directories/{dir_name}/{rel_path}"
+                            zf.write(str(file_path), archive_path)
+                            file_count += 1
+                            total_size += file_path.stat().st_size
+                        except Exception as e:
+                            # 单个文件失败不中断备份，但记录到清单，不能静默
+                            self._export_errors.append(
+                                f"导出目录 {dir_name} 文件 {file_path} 失败: {e}"
+                            )
+                            logger.warning(self._export_errors[-1])
+
+                stats[dir_name] = {"files": file_count, "size": total_size}
+                logger.debug(
+                    f"导出目录 {dir_name}: {file_count} 个文件, {total_size} 字节"
+                )
+            except Exception as e:
+                logger.warning(f"导出目录 {dir_path} 失败: {e}")
+                stats[dir_name] = {"files": 0, "size": 0}
+
+        return stats
+
+    async def _export_attachments(
+        self, zf: zipfile.ZipFile, attachments: list[dict]
+    ) -> None:
+        """导出附件文件"""
+        for attachment in attachments:
+            attachment_id = attachment.get("attachment_id", "")
+            file_path = attachment.get("path", "")
+            try:
+                if not file_path or not os.path.exists(file_path):
+                    # 数据库有记录但文件已丢失，明确记录而非静默跳过
+                    self._export_errors.append(
+                        f"附件文件缺失（数据库有记录但文件不存在）: {file_path}"
+                    )
+                    logger.warning(self._export_errors[-1])
+                    continue
+                # 使用 attachment_id 作为文件名
+                ext = os.path.splitext(file_path)[1]
+                archive_path = f"files/attachments/{attachment_id}{ext}"
+                zf.write(file_path, archive_path)
+            except Exception as e:
+                self._export_errors.append(f"导出附件 {file_path} 失败: {e}")
+                logger.warning(self._export_errors[-1])
+
+    def _export_config_files(self, zf: zipfile.ZipFile) -> list[str]:
+        """导出 data 根目录下的配置文件（cmd_config.json、mcp_server.json、skills.json）
+
+        Returns:
+            list: 已成功写入备份的配置文件名列表
+        """
+        exported: list[str] = []
+        data_dir = os.path.dirname(self.config_path)
+        for name in BACKUP_CONFIG_FILES:
+            if name == "cmd_config.json":
+                file_path = self.config_path
+            else:
+                file_path = os.path.join(data_dir, name)
+            if not os.path.exists(file_path):
+                continue
+            try:
+                with open(file_path, encoding="utf-8") as f:
+                    content = f.read()
+            except Exception as e:
+                raise RuntimeError(f"读取配置文件 {file_path} 失败: {e}") from e
+            zf.writestr(f"config/{name}", content)
+            self._add_checksum(f"config/{name}", content)
+            exported.append(name)
+        return exported
+
+    def _model_to_dict(self, record: Any) -> dict:
+        """将 SQLModel 实例转换为字典
+
+        这是数据库无关的序列化方式，支持未来迁移到其他数据库。
+        """
+        # 使用 SQLModel 内置的 model_dump 方法（如果可用）
+        if hasattr(record, "model_dump"):
+            data = record.model_dump(mode="python")
+            # 处理 datetime 类型
+            for key, value in data.items():
+                if isinstance(value, datetime):
+                    data[key] = value.isoformat()
+            return data
+
+        # 回退到手动提取
+        data = {}
+        # 使用 inspect 获取表信息
+        from sqlalchemy import inspect as sa_inspect
+
+        mapper = sa_inspect(record.__class__)
+        for column in mapper.columns:
+            value = getattr(record, column.name)
+            # 处理 datetime 类型 - 统一转为 ISO 格式字符串
+            if isinstance(value, datetime):
+                value = value.isoformat()
+            data[column.name] = value
+        return data
+
+    def _add_checksum(self, path: str, content: str | bytes) -> None:
+        """计算并添加文件校验和"""
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        checksum = hashlib.sha256(content).hexdigest()
+        self._checksums[path] = f"sha256:{checksum}"
+
+    def _generate_manifest(
+        self,
+        main_data: dict[str, list[dict]],
+        kb_meta_data: dict[str, list[dict]],
+        dir_stats: dict[str, dict[str, int]] | None = None,
+    ) -> dict:
+        """生成备份清单"""
+        if dir_stats is None:
+            dir_stats = {}
+        # 收集知识库 ID
+        kb_document_tables = {}
+        if self.kb_manager:
+            for kb_id in self.kb_manager.kb_insts.keys():
+                kb_document_tables[kb_id] = "documents"
+
+        # 收集附件文件列表
+        attachment_files = []
+        for attachment in main_data.get("attachments", []):
+            attachment_id = attachment.get("attachment_id", "")
+            path = attachment.get("path", "")
+            if attachment_id and path:
+                ext = os.path.splitext(path)[1]
+                attachment_files.append(f"{attachment_id}{ext}")
+
+        # 收集知识库媒体文件
+        kb_media_files: dict[str, list[str]] = {}
+        if self.kb_manager:
+            for kb_id, kb_helper in self.kb_manager.kb_insts.items():
+                media_files: list[str] = []
+                media_dir = kb_helper.kb_medias_dir
+                if media_dir.exists():
+                    for root, _, files in os.walk(media_dir):
+                        for file in files:
+                            media_files.append(file)
+                if media_files:
+                    kb_media_files[kb_id] = media_files
+
+        manifest = {
+            "version": BACKUP_MANIFEST_VERSION,
+            "astrbot_version": VERSION,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "origin": "exported",  # 标记备份来源：exported=本实例导出, uploaded=用户上传
+            "schema_version": {
+                "main_db": "v4",
+                "kb_db": "v1",
+            },
+            "has_knowledge_bases": bool(kb_meta_data.get("knowledge_bases")),
+            "has_config": bool(self._exported_config_files),
+            "tables": {
+                "main_db": list(main_data.keys()),
+                "kb_metadata": list(kb_meta_data.keys()),
+                "kb_documents": kb_document_tables,
+            },
+            "files": {
+                "attachments": attachment_files,
+                "kb_media": kb_media_files,
+                "config": list(self._exported_config_files),
+            },
+            "directories": list(dir_stats.keys()),
+            "checksums": self._checksums,
+            "export_errors": list(self._export_errors),
+            "statistics": {
+                "main_db": {
+                    table: len(records) for table, records in main_data.items()
+                },
+                "kb_metadata": {
+                    table: len(records) for table, records in kb_meta_data.items()
+                },
+                "directories": dir_stats,
+            },
+        }
+
+        return manifest

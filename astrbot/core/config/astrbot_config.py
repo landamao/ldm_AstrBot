@@ -1,0 +1,357 @@
+import asyncio
+import copy
+import enum
+import json
+import logging
+import os
+import sys
+import tempfile
+import threading
+
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.core.utils.auth_password import (
+    generate_dashboard_password,
+    hash_dashboard_password,
+    hash_md5_dashboard_password,
+)
+
+from .default import DEFAULT_CONFIG, DEFAULT_VALUE_MAP
+
+ASTRBOT_CONFIG_PATH = os.path.join(get_astrbot_data_path(), "cmd_config.json")
+logger = logging.getLogger("astrbot")
+
+# 「环境变量重置 Dashboard 密码」机制已移除（原 LDMBOT_RESET_DASHBOARD_PASSWORD /
+# LDMBOT_DASHBOARD_INITIAL_PASSWORD）；残留变量不再生效，仅在启动时提示一次。
+_DEPRECATED_RESET_ENV_VARS = (
+    "LDMBOT_RESET_DASHBOARD_PASSWORD",
+    "LDMBOT_DASHBOARD_INITIAL_PASSWORD",
+)
+_reset_env_warned_stages: set[str] = set()
+
+
+def warn_deprecated_reset_env_vars(stage: str) -> None:
+    """残留的密码重置环境变量打警告日志，同一 stage 只提示一次。
+
+    分两个阶段各提示一次：配置加载期一次、WebUI 就绪后一次——
+    前者容易被启动过程的大量日志刷屏淹没。
+    """
+    if stage in _reset_env_warned_stages:
+        return
+    found = [
+        name
+        for name in _DEPRECATED_RESET_ENV_VARS
+        if os.environ.get(name, "").strip()
+    ]
+    if not found:
+        return
+    _reset_env_warned_stages.add(stage)
+    # 拼装方式与 about_info._startup_command 一致：解释器 + 脚本 + 参数。
+    # 结果受 venv 激活方式、cwd、脚本类型影响，未必可直接照抄执行，仅作示例提示。
+    startup = " ".join(p for p in (sys.executable, *(sys.argv or [])) if p).strip()
+    logger.warning(
+        "检测到已废弃的环境变量 %s：为避免混乱，已禁止通过环境变量修改密码，"
+        "请通过启动参数修改，例如：%s --reset-password",
+        "、".join(found),
+        startup,
+    )
+
+
+class RateLimitStrategy(enum.Enum):
+    STALL = "stall"
+    DISCARD = "discard"
+
+
+class AstrBotConfig(dict):
+    """从配置文件中加载的配置，支持直接通过点号操作符访问根配置项。
+
+    - 初始化时会将传入的 default_config 与配置文件进行比对，如果配置文件中缺少配置项则会自动插入默认值并进行一次写入操作。会递归检查配置项。
+    - 如果配置文件路径对应的文件不存在，则会自动创建并写入默认配置。
+    - 如果传入了 schema，将会通过 schema 解析出 default_config，此时传入的 default_config 会被忽略。
+    """
+
+    config_path: str
+    default_config: dict
+    schema: dict | None
+
+    def __init__(
+        self,
+        config_path: str = ASTRBOT_CONFIG_PATH,
+        default_config: dict = DEFAULT_CONFIG,
+        schema: dict | None = None,
+    ) -> None:
+        super().__init__()
+
+        # 调用父类的 __setattr__ 方法，防止保存配置时将此属性写入配置文件
+        object.__setattr__(self, "config_path", config_path)
+        object.__setattr__(self, "default_config", default_config)
+        object.__setattr__(self, "schema", schema)
+        object.__setattr__(self, "_save_state_lock", threading.Lock())
+        object.__setattr__(self, "_save_commit_lock", threading.Lock())
+        object.__setattr__(self, "_save_revision", 0)
+        object.__setattr__(self, "_save_committed_revision", 0)
+
+        # 空 schema（{}）在布尔判断里是假值，但合法：表示零个配置项，不是回落到全局默认。
+        if schema is not None:
+            default_config = self._config_schema_to_default_config(schema)
+
+        if not self.check_exist():
+            """不存在时载入默认配置"""
+            self.update(default_config)
+            self.save_config(indent=4)
+            object.__setattr__(self, "first_deploy", True)  # 标记第一次部署
+
+        with open(config_path, encoding="utf-8-sig") as f:
+            conf_str = f.read()
+            # Handle UTF-8 BOM if present
+            if conf_str.startswith("\ufeff"):
+                conf_str = conf_str[1:]
+            conf = json.loads(conf_str)
+        dashboard_conf = conf.get("dashboard")
+        stored_dashboard_password_change_required = bool(
+            isinstance(dashboard_conf, dict)
+            and dashboard_conf.get("password_change_required", False)
+        )
+        if stored_dashboard_password_change_required:
+            object.__setattr__(
+                self,
+                "_dashboard_password_change_required_from_config",
+                True,
+            )
+        # 检查配置完整性，并插入
+        has_new = self.check_config_integrity(default_config, conf)
+        if self._rename_legacy_log_paths(conf):
+            has_new = True
+        warn_deprecated_reset_env_vars("config_load")
+        if (
+            "dashboard" in conf
+            and isinstance(conf["dashboard"], dict)
+            and not conf["dashboard"].get("pbkdf2_password")
+            and not conf["dashboard"].get("password")
+        ):
+            self._reset_generated_dashboard_password(conf)
+            has_new = True
+        elif (
+            "dashboard" in conf
+            and isinstance(conf["dashboard"], dict)
+            and stored_dashboard_password_change_required
+            and conf["dashboard"].get("pbkdf2_password")
+        ):
+            self._reset_generated_dashboard_password(conf)
+            has_new = True
+        self.update(conf)
+        if has_new:
+            self.save_config()
+
+    def _reset_generated_dashboard_password(self, conf: dict) -> None:
+        generated_password = generate_dashboard_password()
+        conf["dashboard"]["pbkdf2_password"] = hash_dashboard_password(
+            generated_password
+        )
+        conf["dashboard"]["password"] = hash_md5_dashboard_password(generated_password)
+        conf["dashboard"]["password_storage_upgraded"] = True
+        conf["dashboard"]["password_change_required"] = True
+        object.__setattr__(
+            self,
+            "_generated_dashboard_password",
+            generated_password,
+        )
+        object.__setattr__(
+            self,
+            "_generated_dashboard_password_change_required",
+            True,
+        )
+
+    def _config_schema_to_default_config(self, schema: dict) -> dict:
+        """将 Schema 转换成 Config"""
+        conf = {}
+
+        def _parse_schema(schema: dict, conf: dict) -> None:
+            for k, v in schema.items():
+                if v["type"] not in DEFAULT_VALUE_MAP:
+                    raise TypeError(
+                        f"不受支持的配置类型 {v['type']}。支持的类型有：{DEFAULT_VALUE_MAP.keys()}",
+                    )
+                if "default" in v:
+                    default = v["default"]
+                else:
+                    default = DEFAULT_VALUE_MAP[v["type"]]
+
+                if v["type"] == "object":
+                    conf[k] = {}
+                    _parse_schema(v["items"], conf[k])
+                elif v["type"] == "template_list":
+                    conf[k] = default
+                else:
+                    conf[k] = default
+
+        _parse_schema(schema, conf)
+
+        return conf
+
+    @staticmethod
+    def _rename_legacy_log_paths(conf: dict) -> bool:
+        """把仍是旧默认文件名的日志路径改成 ldmbot。自定义路径不改。"""
+        renamed = False
+        for key, old, new in (
+            ("log_file_path", "logs/astrbot.log", "logs/ldmbot.log"),
+            ("trace_log_path", "logs/astrbot.trace.log", "logs/ldmbot.trace.log"),
+        ):
+            if conf.get(key) == old:
+                conf[key] = new
+                renamed = True
+        return renamed
+
+    def check_config_integrity(self, refer_conf: dict, conf: dict, path=""):
+        """检查配置完整性，如果有新的配置项或顺序不一致则返回 True"""
+        has_new = False
+
+        # 创建一个新的有序字典以保持参考配置的顺序
+        new_conf = {}
+
+        # 先按照参考配置的顺序添加配置项
+        for key, value in refer_conf.items():
+            if key not in conf:
+                # 配置项不存在，插入默认值
+                path_ = path + "." + key if path else key
+                logger.info("Config key missing; added default.")
+                new_conf[key] = value
+                has_new = True
+            elif conf[key] is None:
+                # 配置项为 None，使用默认值
+                new_conf[key] = value
+                has_new = True
+            elif isinstance(value, dict):
+                # 递归检查子配置项
+                if not isinstance(conf[key], dict):
+                    # 类型不匹配，使用默认值
+                    new_conf[key] = value
+                    has_new = True
+                else:
+                    # 递归检查并同步顺序
+                    child_has_new = self.check_config_integrity(
+                        value,
+                        conf[key],
+                        path + "." + key if path else key,
+                    )
+                    new_conf[key] = conf[key]
+                    has_new |= child_has_new
+            else:
+                # 直接使用现有配置
+                new_conf[key] = conf[key]
+
+        # 检查是否存在参考配置中没有的配置项
+        for key in list(conf.keys()):
+            if key not in refer_conf:
+                path_ = path + "." + key if path else key
+                logger.info("Config key removed: %s", path_)
+                has_new = True
+
+        # 顺序不一致也算作变更
+        if list(conf.keys()) != list(new_conf.keys()):
+            if path:
+                logger.info("Config key order fixed: %s", path)
+            else:
+                logger.info("Config key order fixed")
+            has_new = True
+
+        # 更新原始配置
+        conf.clear()
+        conf.update(new_conf)
+
+        return has_new
+
+    def save_config(
+        self, replace_config: dict | None = None, *, indent: int = 2
+    ) -> None:
+        """同步持久化当前配置。
+
+        Args:
+            replace_config: 保存前合并进配置的值。
+            indent: JSON 缩进空格数。
+        """
+        snapshot, revision = self._prepare_config_snapshot(replace_config)
+        self._write_config_snapshot(snapshot, revision, indent)
+
+    async def save_config_async(
+        self, replace_config: dict | None = None, *, indent: int = 2
+    ) -> bool:
+        """异步持久化配置快照，避免阻塞事件循环。
+
+        Args:
+            replace_config: 保存前合并进配置的值。
+            indent: JSON 缩进空格数。
+
+        Returns:
+            本快照是否真正落盘。较新的已提交快照会覆盖较旧快照。
+        """
+        snapshot, revision = self._prepare_config_snapshot(replace_config)
+        return await asyncio.to_thread(
+            self._write_config_snapshot,
+            snapshot,
+            revision,
+            indent,
+        )
+
+    def _prepare_config_snapshot(self, replace_config: dict | None) -> tuple[dict, int]:
+        """创建隔离快照并分配保存 revision。"""
+        with self._save_state_lock:
+            if replace_config:
+                self.update(replace_config)
+            snapshot = copy.deepcopy(dict(self))
+            revision = self._save_revision + 1
+            object.__setattr__(self, "_save_revision", revision)
+        return snapshot, revision
+
+    def _write_config_snapshot(
+        self, snapshot: dict, revision: int, indent: int
+    ) -> bool:
+        """写入并有条件提交配置快照。"""
+        directory = os.path.dirname(os.path.abspath(self.config_path)) or "."
+        fd, temp_path = tempfile.mkstemp(
+            dir=directory,
+            prefix=f".{os.path.basename(self.config_path)}.",
+            suffix=".tmp",
+        )
+        committed = False
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=indent, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            with self._save_commit_lock:
+                if revision > self._save_committed_revision:
+                    os.replace(temp_path, self.config_path)
+                    object.__setattr__(
+                        self,
+                        "_save_committed_revision",
+                        revision,
+                    )
+                    committed = True
+        finally:
+            if not committed:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+        return committed
+
+    def __getattr__(self, item):
+        try:
+            return self[item]
+        except KeyError:
+            return None
+
+    def __delattr__(self, key) -> None:
+        try:
+            del self[key]
+            self.save_config()
+        except KeyError:
+            raise AttributeError(f"没有找到 Key: '{key}'")
+
+    def __setattr__(self, key, value) -> None:
+        self[key] = value
+
+    def check_exist(self) -> bool:
+        if not self.config_path:  # 加判空
+            return False
+        return os.path.exists(self.config_path)

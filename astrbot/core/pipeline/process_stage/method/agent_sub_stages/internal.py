@@ -1,0 +1,1347 @@
+"""本地 Agent 模式的 LLM 调用 Stage"""
+
+import asyncio
+import base64
+from collections.abc import AsyncGenerator
+from dataclasses import replace
+
+from astrbot.core import db_helper, logger
+from astrbot.core.agent.message import (
+    CheckpointData,
+    CheckpointMessageSegment,
+    Message,
+    TextPart,
+    dump_messages_with_checkpoints,
+)
+from astrbot.core.agent.response import AgentStats
+from astrbot.core.agent.runners.tool_loop_agent_runner import (
+    extract_exception_code,
+)
+from astrbot.core.astr_main_agent import (
+    LLM_ERROR_MESSAGE_EXTRA_KEY,
+    MainAgentBuildConfig,
+    MainAgentBuildResult,
+    build_main_agent,
+)
+from astrbot.core.message.components import File, Image, Record, Reply, Video
+from astrbot.core.message.message_event_result import (
+    MessageChain,
+    MessageEventResult,
+    ResultContentType,
+)
+from astrbot.core.persona_error_reply import (
+    extract_persona_custom_error_message_from_event,
+)
+from astrbot.core.pipeline.stage import Stage
+from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.provider.entities import (
+    LLMResponse,
+    ProviderRequest,
+)
+from astrbot.core.star.session_llm_manager import SessionServiceManager
+from astrbot.core.star.star_handler import EventType
+from astrbot.core.utils.active_event_registry import active_event_registry
+from astrbot.core.utils.session_lock import session_lock_manager
+
+from .....astr_agent_run_util import (
+    AgentRunner,
+    build_llm_error_chain,
+    run_agent,
+    run_live_agent,
+)
+from ....context import PipelineContext, call_event_hook
+from ...follow_up import (
+    FollowUpCapture,
+    finalize_follow_up_capture,
+    get_active_runner,
+    prepare_follow_up_capture,
+    register_active_runner,
+    try_capture_follow_up,
+    unregister_active_runner,
+)
+
+# 消息防抖 per-UMO 状态表：首条消息开窗等待静默期，窗口内后续消息被吸收
+# （文本与媒体组件并入赢家请求，被吸收消息不再触发打断、不请求 LLM）
+_DEBOUNCE_STATE: dict[str, dict] = {}
+
+
+def _safe_error_model(agent_runner) -> str | None:
+    """安全获取 agent runner 当前使用的模型名，失败时返回 None。"""
+    try:
+        if agent_runner is not None and agent_runner.provider is not None:
+            return agent_runner.provider.get_model()
+    except Exception:
+        pass
+    return None
+
+
+class InternalAgentSubStage(Stage):
+    async def initialize(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+        conf = ctx.astrbot_config
+        settings = conf["provider_settings"]
+        self.streaming_response: bool = settings["streaming_response"]
+        self.unsupported_streaming_strategy: str = settings[
+            "unsupported_streaming_strategy"
+        ]
+        self.max_step: int = settings.get("max_agent_step", 30)
+        self.tool_call_timeout: int = settings.get("tool_call_timeout", 60)
+        self.tool_schema_mode: str = settings.get("tool_schema_mode", "full")
+        if self.tool_schema_mode not in ("skills_like", "full"):
+            logger.warning(
+                "Unsupported tool_schema_mode: %s, fallback to skills_like",
+                self.tool_schema_mode,
+            )
+            self.tool_schema_mode = "full"
+        if isinstance(self.max_step, bool):  # workaround: #2622
+            self.max_step = 30
+        self.show_tool_use: bool = settings.get("show_tool_use_status", True)
+        self.show_tool_call_result: bool = settings.get("show_tool_call_result", False)
+        self.buffer_intermediate_messages: bool = settings.get(
+            "buffer_intermediate_messages",
+            False,
+        )
+        self.show_reasoning = settings.get("display_reasoning_text", False)
+        self.sanitize_context_by_modalities: bool = settings.get(
+            "sanitize_context_by_modalities",
+            False,
+        )
+        self.kb_agentic_mode: bool = conf.get("kb_agentic_mode", False)
+
+        file_extract_conf: dict = settings.get("file_extract", {})
+        self.file_extract_enabled: bool = file_extract_conf.get("enable", False)
+        self.file_extract_prov: str = file_extract_conf.get("provider", "moonshotai")
+        self.file_extract_msh_api_key: str = file_extract_conf.get(
+            "moonshotai_api_key", ""
+        )
+
+        # 上下文管理相关
+        self.context_limit_reached_strategy: str = settings.get(
+            "context_limit_reached_strategy", "truncate_by_turns"
+        )
+        self.context_compress_threshold: float = float(
+            settings.get("context_compress_threshold", 0.82)
+        )
+        self.llm_compress_instruction: str = settings.get(
+            "llm_compress_instruction", ""
+        )
+        self.llm_compress_keep_recent_ratio: float = settings.get(
+            "llm_compress_keep_recent_ratio", 0.15
+        )
+        self.llm_compress_keep_recent_rounds: int = settings.get(
+            "llm_compress_keep_recent_rounds", 5
+        )
+        self.llm_compress_provider_id: str = settings.get(
+            "llm_compress_provider_id", ""
+        )
+        self.max_context_length = settings["max_context_length"]  # int
+        self.dequeue_context_length: int = min(
+            max(1, settings["dequeue_context_length"]),
+            self.max_context_length - 1,
+        )
+        if self.dequeue_context_length <= 0:
+            self.dequeue_context_length = 1
+        self.fallback_max_context_tokens: int = settings.get(
+            "fallback_max_context_tokens", 128000
+        )
+
+        self.llm_safety_mode = settings.get("llm_safety_mode", True)
+        self.safety_mode_strategy = settings.get(
+            "safety_mode_strategy", "system_prompt"
+        )
+
+        self.computer_use_runtime = settings.get("computer_use_runtime")
+        self.sandbox_cfg = settings.get("sandbox", {})
+
+        # Proactive capability configuration
+        proactive_cfg = settings.get("proactive_capability", {})
+        self.add_cron_tools = proactive_cfg.get("add_cron_tools", True)
+
+        self.conv_manager = ctx.plugin_manager.context.conversation_manager
+
+        self.main_agent_cfg = MainAgentBuildConfig(
+            tool_call_timeout=self.tool_call_timeout,
+            tool_schema_mode=self.tool_schema_mode,
+            sanitize_context_by_modalities=self.sanitize_context_by_modalities,
+            kb_agentic_mode=self.kb_agentic_mode,
+            file_extract_enabled=self.file_extract_enabled,
+            file_extract_prov=self.file_extract_prov,
+            file_extract_msh_api_key=self.file_extract_msh_api_key,
+            context_limit_reached_strategy=self.context_limit_reached_strategy,
+            context_compress_threshold=self.context_compress_threshold,
+            llm_compress_instruction=self.llm_compress_instruction,
+            llm_compress_keep_recent_ratio=self.llm_compress_keep_recent_ratio,
+            llm_compress_keep_recent_rounds=self.llm_compress_keep_recent_rounds,
+            llm_compress_provider_id=self.llm_compress_provider_id,
+            max_context_length=self.max_context_length,
+            dequeue_context_length=self.dequeue_context_length,
+            fallback_max_context_tokens=self.fallback_max_context_tokens,
+            llm_safety_mode=self.llm_safety_mode,
+            safety_mode_strategy=self.safety_mode_strategy,
+            computer_use_runtime=self.computer_use_runtime,
+            sandbox_cfg=self.sandbox_cfg,
+            add_cron_tools=self.add_cron_tools,
+            provider_settings=settings,
+            subagent_orchestrator=conf.get("subagent_orchestrator", {}),
+            timezone=self.ctx.plugin_manager.context.get_config().get("timezone"),
+            max_quoted_fallback_images=settings.get("max_quoted_fallback_images", 20),
+        )
+
+    async def _send_llm_error_message(
+        self,
+        event: AstrMessageEvent,
+        message: object,
+        model: str | None = None,
+        code: str | None = None,
+    ) -> None:
+        await event.send(
+            build_llm_error_chain(event, message, model=model, code=code)
+        )
+
+    def _get_interrupt_reply_config(self, event: AstrMessageEvent) -> dict:
+        conf = self.ctx.plugin_manager.context.get_config(umo=event.unified_msg_origin)
+        platform_settings = conf.get("platform_settings", {}) if conf else {}
+        interrupt_cfg = platform_settings.get("interrupt_reply", {}) or {}
+        return interrupt_cfg if isinstance(interrupt_cfg, dict) else {}
+
+    def _should_interrupt_reply(
+        self, event: AstrMessageEvent, interrupt_cfg: dict
+    ) -> bool:
+        if not interrupt_cfg.get("enable", False):
+            return False
+        if event.is_private_chat():
+            return bool(interrupt_cfg.get("enable_private", True))
+        return bool(interrupt_cfg.get("enable_group", True))
+
+    def _get_message_debounce_config(self, event: AstrMessageEvent) -> dict:
+        conf = self.ctx.plugin_manager.context.get_config(umo=event.unified_msg_origin)
+        platform_settings = conf.get("platform_settings", {}) if conf else {}
+        debounce_cfg = platform_settings.get("message_debounce", {}) or {}
+        return debounce_cfg if isinstance(debounce_cfg, dict) else {}
+
+    async def _message_debounce_wait(self, event: AstrMessageEvent) -> bool:
+        """消息防抖：私聊连发消息合并为一次 LLM 请求。
+
+        首条消息开窗等待静默期；窗口内后续消息被吸收（重置计时，文本与
+        图片/语音等组件并入缓冲），静默期满后由首条消息合并全部内容继续。
+        返回 False 表示本条被吸收，调用方应直接结束处理。
+        """
+        cfg = self._get_message_debounce_config(event)
+        if not cfg.get("enable", False) or not event.is_private_chat():
+            return True
+        try:
+            window = float(cfg.get("window", 2.0) or 2.0)
+        except (TypeError, ValueError):
+            window = 2.0
+        window = max(0.0, min(window, 60.0))
+        if window <= 0:
+            return True
+        try:
+            max_wait = float(cfg.get("max_wait", 60.0) or 60.0)
+        except (TypeError, ValueError):
+            max_wait = 60.0
+        max_wait = max(1.0, min(max_wait, 600.0))
+
+        umo = event.unified_msg_origin
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+
+        state = _DEBOUNCE_STATE.get(umo)
+        if state is not None and now < state["deadline"]:
+            # 防抖窗口进行中：吸收本条，重置静默计时（滑动窗口，累计上限 60s）
+            state["texts"].append(event.message_str or "")
+            state["outlines"].append(event.get_message_outline())
+            state["comps"].extend(
+                comp
+                for comp in event.get_messages()
+                if isinstance(comp, (Image, File, Record, Reply, Video))
+            )
+            state["deadline"] = min(now + window, state["hard_deadline"])
+            logger.info(
+                "消息防抖: 吸收消息 umo=%s 已缓冲=%s 条",
+                umo,
+                len(state["texts"]),
+            )
+            return False
+
+        entry: dict = {
+            "deadline": now + min(window, max_wait),
+            "hard_deadline": now + max_wait,
+            "texts": [],
+            "outlines": [],
+            "comps": [],
+        }
+        _DEBOUNCE_STATE[umo] = entry
+        event.set_extra("agent_debounce_waiting", True)
+        try:
+            while True:
+                remaining = entry["deadline"] - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(remaining)
+                if _DEBOUNCE_STATE.get(umo) is not entry:
+                    # 边界竞态：静默期满瞬间新消息开了新窗口，本条直接放行
+                    return True
+            if entry["texts"] or entry["comps"]:
+                parts = [
+                    "[Message 1] "
+                    + (event.message_str.strip() or event.get_message_outline())
+                ]
+                for idx, (text, outline) in enumerate(
+                    zip(entry["texts"], entry["outlines"]), start=2
+                ):
+                    parts.append(f"[Message {idx}] {(text or '').strip() or outline}")
+                total = len(entry["texts"]) + 1
+                # 提示随 message_str 走：本次请求与历史落库内容一致，
+                # 后续会话也能知道这条是连发合并的
+                parts.append(
+                    f"<system_reminder>The user sent {total} messages in rapid "
+                    "succession within a short time. They have been merged into "
+                    "this single message in chronological order, each prefixed "
+                    "with [Message N].</system_reminder>"
+                )
+                event.message_str = "\n".join(parts)
+                if entry["comps"]:
+                    event.message_obj.message.extend(entry["comps"])
+                logger.info(
+                    "消息防抖: 合并 %s 条消息后继续 umo=%s",
+                    total,
+                    umo,
+                )
+            return True
+        finally:
+            event.set_extra("agent_debounce_waiting", False)
+            if _DEBOUNCE_STATE.get(umo) is entry:
+                del _DEBOUNCE_STATE[umo]
+
+    async def _maybe_interrupt_active_reply(
+        self,
+        event: AstrMessageEvent,
+        interrupt_cfg: dict,
+        *,
+        wait_for_idle: bool = True,
+    ) -> bool:
+        """若同会话已有活跃 LLM 回复，则按配置打断并等待其收尾。
+
+        Returns:
+            True 表示发生了打断；False 表示无需打断。
+        """
+        umo = event.unified_msg_origin
+        active_runner = get_active_runner(umo)
+        has_other_events = active_event_registry.has_active(umo, exclude=event)
+        if active_runner is None and not has_other_events:
+            return False
+
+        # 工具调用期间防打断：当前任务正在执行工具调用时不打断，防止误操作。
+        # 开启「输出函数调用状态」时向用户发送提示，否则静默放入队列（走 follow-up）。
+        if (
+            interrupt_cfg.get("tool_interrupt_protect", True)
+            and active_runner is not None
+            and active_runner.is_tool_executing()
+        ):
+            if self.show_tool_use:
+                # 提示中的停止指令前缀取用户配置的第一个唤醒词，为空则不加前缀
+                wake_prefixes = self.ctx.astrbot_config.get("wake_prefix") or []
+                first_wake = str(wake_prefixes[0]).strip() if wake_prefixes else ""
+                stop_hint = f"{first_wake}stop" if first_wake else "stop"
+                try:
+                    await event.send(
+                        MessageChain().message(
+                            f"⚠️ 我正在使用工具，你的消息我将稍稍后回复，如需停止，请发送「{stop_hint}」"
+                        )
+                    )
+                except Exception:
+                    logger.warning("发送工具防打断提示失败", exc_info=True)
+            logger.info(
+                "当前任务正在执行工具调用，本次不打断: umo=%s",
+                umo,
+            )
+            return False
+
+        # 固定英文系统提示，只陈述事实，不引导后续行为
+        context_text = (
+            "The user sent a new message and interrupted this response."
+        )
+
+        # 不向旧任务写 history_note，避免与新请求重复注入
+        stopped_count = active_event_registry.request_agent_stop_all(
+            umo,
+            exclude=event,
+            extra_updates={"agent_user_aborted": True},
+        )
+        logger.info(
+            "打断当前回复: umo=%s, 停止请求数=%s, 有活跃runner=%s",
+            umo,
+            stopped_count,
+            active_runner is not None,
+        )
+
+        if interrupt_cfg.get("notify_user", True):
+            notify_text = str(
+                interrupt_cfg.get(
+                    "notify_text",
+                    "已打断当前回复，开始处理新消息。",
+                )
+                or "已打断当前回复，开始处理新消息。"
+            ).strip()
+            if notify_text:
+                try:
+                    await event.send(MessageChain().message(notify_text))
+                except Exception:
+                    logger.warning("发送打断提示失败", exc_info=True)
+
+        if not wait_for_idle:
+            # 防抖窗口不能阻塞打断：停止信号已经发出，旧任务可在窗口内自行收尾。
+            return True
+
+        try:
+            wait_timeout = float(interrupt_cfg.get("wait_timeout", 8.0) or 8.0)
+        except (TypeError, ValueError):
+            wait_timeout = 8.0
+        wait_timeout = max(0.0, min(wait_timeout, 60.0))
+
+        idle = await active_event_registry.wait_until_idle(
+            umo,
+            exclude=event,
+            timeout=wait_timeout,
+        )
+        # 再等一小会儿，尽量让旧任务释放 session lock / 写完历史
+        remaining = wait_timeout if not idle else min(1.0, wait_timeout)
+        if remaining > 0:
+            deadline = asyncio.get_running_loop().time() + remaining
+            while get_active_runner(umo) is not None:
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(0.1)
+
+        timed_out = (not idle) or (get_active_runner(umo) is not None)
+        if timed_out:
+            logger.warning(
+                "打断后等待旧任务结束超时: umo=%s, timeout=%s",
+                umo,
+                wait_timeout,
+            )
+            # 旧历史可能尚未写入打断提示，临时 system_reminder 兜底
+            if context_text:
+                event.set_extra("interrupt_reply_context_hint", context_text)
+        # 正常收尾时：打断提示已写入旧 assistant 消息历史，不再临时注入以免重复
+        return True
+
+    async def process(
+        self, event: AstrMessageEvent, provider_wake_prefix: str
+    ) -> AsyncGenerator[None, None]:
+        follow_up_capture: FollowUpCapture | None = None
+        follow_up_consumed_marked = False
+        follow_up_activated = False
+        typing_requested = False
+        try:
+            streaming_response = self.streaming_response
+            if (enable_streaming := event.get_extra("enable_streaming")) is not None:
+                streaming_response = bool(enable_streaming)
+            else:
+                # 会话级流式输出覆盖（/flow 命令设置）：未设置时跟随全局配置
+                session_streaming = (
+                    await SessionServiceManager.get_streaming_override_for_session(
+                        event.unified_msg_origin,
+                    )
+                )
+                if session_streaming is not None:
+                    streaming_response = bool(session_streaming)
+            logger.debug(
+                "流式诊断 - platform=%s enable_streaming_extra=%s "
+                "global_streaming=%s final_streaming=%s",
+                event.get_platform_name(),
+                enable_streaming,
+                self.streaming_response,
+                streaming_response,
+            )
+
+            # 逐请求覆盖显示思考：WebChat 前端 show_reasoning 开关
+            show_reasoning_override = event.get_extra("show_reasoning")
+            if show_reasoning_override is not None:
+                show_reasoning = bool(show_reasoning_override)
+            else:
+                show_reasoning = self.show_reasoning
+
+            has_provider_request = event.get_extra("provider_request") is not None
+            has_valid_message = bool(event.message_str and event.message_str.strip())
+            has_media_content = any(
+                isinstance(comp, (Image, File, Record, Video))
+                for comp in event.message_obj.message
+            )
+            has_reply = any(
+                isinstance(comp, Reply) for comp in event.message_obj.message
+            )
+
+            if (
+                not has_provider_request
+                and not has_valid_message
+                and not has_media_content
+                and not has_reply
+            ):
+                logger.debug("skip llm request: empty message and no provider_request")
+                return
+
+            logger.debug("ready to request llm provider")
+            interrupt_cfg = self._get_interrupt_reply_config(event)
+            interrupted = False
+            interrupt_started = False
+            # 先发停止信号，再进入防抖等待；否则静默窗口期间旧回复仍会继续分段发送。
+            if (
+                not has_provider_request
+                and self._should_interrupt_reply(event, interrupt_cfg)
+            ):
+                interrupted = await self._maybe_interrupt_active_reply(
+                    event,
+                    interrupt_cfg,
+                    wait_for_idle=False,
+                )
+                interrupt_started = interrupted
+
+            # 消息防抖（仅私聊自然聊天消息；插件 provider_request 不防抖）。
+            if not has_provider_request and not await self._message_debounce_wait(event):
+                return
+
+            # 防抖结束后等待旧任务收尾，但不重复发送停止提示或停止信号。
+            if interrupt_started:
+                await active_event_registry.wait_until_idle(
+                    event.unified_msg_origin,
+                    exclude=event,
+                    timeout=max(
+                        0.0,
+                        min(float(interrupt_cfg.get("wait_timeout", 8.0) or 8.0), 60.0),
+                    ),
+                )
+
+            follow_up_capture = None
+            if not interrupted:
+                follow_up_capture = try_capture_follow_up(event)
+            if follow_up_capture:
+                (
+                    follow_up_consumed_marked,
+                    follow_up_activated,
+                ) = await prepare_follow_up_capture(follow_up_capture)
+                if follow_up_consumed_marked:
+                    logger.info(
+                        "Follow-up ticket already consumed, stopping processing. umo=%s, seq=%s",
+                        event.unified_msg_origin,
+                        follow_up_capture.ticket.seq,
+                    )
+                    return
+
+            try:
+                typing_requested = True
+                await event.send_typing()
+            except Exception:
+                logger.warning("send_typing failed", exc_info=True)
+            if await call_event_hook(event, EventType.OnWaitingLLMRequestEvent):
+                return
+
+            async with session_lock_manager.acquire_lock(event.unified_msg_origin):
+                logger.debug("acquired session lock for llm request")
+                agent_runner: AgentRunner | None = None
+                runner_registered = False
+                try:
+                    build_cfg = replace(
+                        self.main_agent_cfg,
+                        provider_wake_prefix=provider_wake_prefix,
+                        streaming_response=streaming_response,
+                    )
+
+                    build_result: MainAgentBuildResult | None = await build_main_agent(
+                        event=event,
+                        plugin_context=self.ctx.plugin_manager.context,
+                        config=build_cfg,
+                        apply_reset=False,
+                    )
+
+                    if build_result is None:
+                        if llm_error_message := event.get_extra(
+                            LLM_ERROR_MESSAGE_EXTRA_KEY
+                        ):
+                            await self._send_llm_error_message(
+                                event,
+                                llm_error_message,
+                                model=event.get_extra("selected_model"),
+                            )
+                        return
+
+                    agent_runner = build_result.agent_runner
+                    req = build_result.provider_request
+                    provider = build_result.provider
+                    reset_coro = build_result.reset_coro
+
+                    api_base = provider.provider_config.get("api_base", "")
+                    for host in decoded_blocked:
+                        if host in api_base:
+                            error_message = (
+                                f"LLM 请求失败：Provider API base `{api_base}` "
+                                "因安全原因被拦截，请更换可用的 AI 提供商。"
+                            )
+                            logger.error(error_message)
+                            await self._send_llm_error_message(
+                                event,
+                                error_message,
+                                model=provider.get_model(),
+                            )
+                            return
+
+                    stream_to_general = (
+                        self.unsupported_streaming_strategy == "turn_off"
+                        and not event.platform_meta.support_streaming_message
+                    )
+
+                    # 仿 system_reminder：作为 extra_user_content_parts 注入，不污染 prompt，且 _no_save 不落库重复
+                    context_hint = event.get_extra("interrupt_reply_context_hint")
+                    if isinstance(context_hint, str) and context_hint.strip():
+                        reminder = f"<system_reminder>{context_hint}</system_reminder>"
+                        req.extra_user_content_parts.append(
+                            TextPart(text=reminder).mark_as_temp()
+                        )
+                        event.set_extra("interrupt_reply_context_hint", None)
+
+                    if await call_event_hook(event, EventType.OnLLMRequestEvent, req):
+                        if reset_coro:
+                            reset_coro.close()
+                        return
+
+                    # apply reset
+                    if reset_coro:
+                        await reset_coro
+
+                    register_active_runner(event.unified_msg_origin, agent_runner)
+                    runner_registered = True
+                    action_type = event.get_extra("action_type")
+
+                    event.trace.record(
+                        "astr_agent_prepare",
+                        system_prompt=req.system_prompt,
+                        tools=req.func_tool.names() if req.func_tool else [],
+                        stream=streaming_response,
+                        chat_provider={
+                            "id": provider.provider_config.get("id", ""),
+                            "model": provider.get_model(),
+                        },
+                    )
+
+                    # 检测 Live Mode
+                    if action_type == "live":
+                        # Live Mode: 使用 run_live_agent
+                        logger.info("[Internal Agent] 检测到 Live Mode，启用 TTS 处理")
+
+                        # 获取 TTS Provider
+                        tts_provider = (
+                            self.ctx.plugin_manager.context.get_using_tts_provider(
+                                event.unified_msg_origin
+                            )
+                        )
+
+                        if not tts_provider:
+                            logger.warning(
+                                "[Live Mode] TTS Provider 未配置，将使用普通流式模式"
+                            )
+
+                        # 使用 run_live_agent，总是使用流式响应
+                        event.set_result(
+                            MessageEventResult()
+                            .set_result_content_type(ResultContentType.STREAMING_RESULT)
+                            .set_async_stream(
+                                run_live_agent(
+                                    agent_runner,
+                                    tts_provider,
+                                    self.max_step,
+                                    self.show_tool_use,
+                                    self.show_tool_call_result,
+                                    show_reasoning=show_reasoning,
+                                    buffer_intermediate_messages=self.buffer_intermediate_messages,
+                                ),
+                            ),
+                        )
+                        yield
+
+                        # 保存历史记录
+                        if agent_runner.done() and (
+                            not event.is_stopped() or agent_runner.was_aborted()
+                        ):
+                            await self._save_to_history(
+                                event,
+                                req,
+                                agent_runner.get_final_llm_resp(),
+                                agent_runner.run_context.messages,
+                                agent_runner.stats,
+                                user_aborted=(
+                                    agent_runner.was_aborted()
+                                    or bool(event.get_extra("agent_stop_requested"))
+                                    or bool(event.get_extra("agent_user_aborted"))
+                                ),
+                                runner_aborted=agent_runner.was_aborted(),
+                            )
+
+                    elif streaming_response and not stream_to_general:
+                        # 流式响应
+                        event.set_result(
+                            MessageEventResult()
+                            .set_result_content_type(ResultContentType.STREAMING_RESULT)
+                            .set_async_stream(
+                                run_agent(
+                                    agent_runner,
+                                    self.max_step,
+                                    self.show_tool_use,
+                                    self.show_tool_call_result,
+                                    show_reasoning=show_reasoning,
+                                    buffer_intermediate_messages=self.buffer_intermediate_messages,
+                                ),
+                            ),
+                        )
+                        yield
+                        if agent_runner.done():
+                            if final_llm_resp := agent_runner.get_final_llm_resp():
+                                if final_llm_resp.role == "err":
+                                    # 模型请求出错：发送可展开的折叠错误消息（WebChat），
+                                    # 其他平台保持纯文本。不用 STREAMING_FINISH（会被丢弃）。
+                                    llm_err = getattr(
+                                        agent_runner, "last_llm_error", None
+                                    ) or {}
+                                    err_chain = build_llm_error_chain(
+                                        event,
+                                        final_llm_resp.completion_text
+                                        or "LLM 请求失败。",
+                                        model=llm_err.get("model")
+                                        or _safe_error_model(agent_runner)
+                                        or event.get_extra("selected_model"),
+                                        code=llm_err.get("code"),
+                                    )
+                                    event.set_result(
+                                        MessageEventResult(
+                                            chain=err_chain.chain,
+                                            type=err_chain.type,
+                                            result_content_type=ResultContentType.GENERAL_RESULT,
+                                        ),
+                                    )
+                                elif final_llm_resp.completion_text:
+                                    chain = (
+                                        MessageChain()
+                                        .message(final_llm_resp.completion_text)
+                                        .chain
+                                    )
+                                    event.set_result(
+                                        MessageEventResult(
+                                            chain=chain,
+                                            result_content_type=ResultContentType.STREAMING_FINISH,
+                                        ),
+                                    )
+                                elif final_llm_resp.result_chain:
+                                    chain = final_llm_resp.result_chain.chain
+                                    event.set_result(
+                                        MessageEventResult(
+                                            chain=chain,
+                                            result_content_type=ResultContentType.STREAMING_FINISH,
+                                        ),
+                                    )
+                    else:
+                        async for _ in run_agent(
+                            agent_runner,
+                            self.max_step,
+                            self.show_tool_use,
+                            self.show_tool_call_result,
+                            stream_to_general,
+                            show_reasoning=show_reasoning,
+                            buffer_intermediate_messages=self.buffer_intermediate_messages,
+                        ):
+                            yield
+
+                    final_resp = agent_runner.get_final_llm_resp()
+
+                    event.trace.record(
+                        "astr_agent_complete",
+                        stats=agent_runner.stats.to_dict(),
+                        resp=final_resp.completion_text if final_resp else None,
+                    )
+
+                    asyncio.create_task(
+                        _record_internal_agent_stats(
+                            event,
+                            req,
+                            agent_runner,
+                            final_resp,
+                        )
+                    )
+
+                    # 检查事件是否被停止，如果被停止则不保存历史记录
+                    if not event.is_stopped() or agent_runner.was_aborted():
+                        await self._save_to_history(
+                            event,
+                            req,
+                            final_resp,
+                            agent_runner.run_context.messages,
+                            agent_runner.stats,
+                            user_aborted=(
+                                agent_runner.was_aborted()
+                                or bool(event.get_extra("agent_stop_requested"))
+                                or bool(event.get_extra("agent_user_aborted"))
+                            ),
+                            runner_aborted=agent_runner.was_aborted(),
+                        )
+
+                finally:
+                    if runner_registered and agent_runner is not None:
+                        unregister_active_runner(event.unified_msg_origin, agent_runner)
+
+        except Exception as e:
+            logger.error(f"Error occurred while processing agent: {e}")
+            custom_error_message = extract_persona_custom_error_message_from_event(
+                event
+            )
+            error_text = custom_error_message or (
+                f"AI 执行请求时出现错误: {e}"
+            )
+            await self._send_llm_error_message(
+                event,
+                error_text,
+                model=(
+                    _safe_error_model(agent_runner)
+                    or str(getattr(locals().get("req"), "model", "") or "")
+                    or None
+                ),
+                code=extract_exception_code(e),
+            )
+        finally:
+            if typing_requested:
+                try:
+                    await event.stop_typing()
+                except Exception:
+                    logger.warning("stop_typing failed", exc_info=True)
+            if follow_up_capture:
+                await finalize_follow_up_capture(
+                    follow_up_capture,
+                    activated=follow_up_activated,
+                    consumed_marked=follow_up_consumed_marked,
+                )
+
+    def _extract_message_plain(self, content) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                text = getattr(part, "text", None)
+                if text:
+                    parts.append(str(text))
+                elif isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(str(part.get("text") or ""))
+            return "".join(parts)
+        return str(content)
+
+    @staticmethod
+    def _normalize_plain_for_compare(text: str) -> str:
+        """比较已发送文本与完整回复时忽略空白差异。"""
+        if not text:
+            return ""
+        return "".join(str(text).split())
+
+    def _get_delivered_llm_plain(self, event: AstrMessageEvent) -> str:
+        delivered = event.get_extra("_delivered_llm_plain_text") or ""
+        if not isinstance(delivered, str):
+            delivered = ""
+        delivered = delivered.strip()
+        if not delivered:
+            plain = event.get_extra("_delivered_plain_text") or ""
+            if isinstance(plain, str) and plain.strip():
+                delivered = plain.strip()
+        return delivered
+
+    def _is_llm_reply_fully_delivered(
+        self,
+        event: AstrMessageEvent,
+        *,
+        runner_aborted: bool = False,
+        original_text: str = "",
+        delivered_text: str = "",
+        force_stopped: bool = False,
+    ) -> bool:
+        """回复是否已完整发给用户。
+
+        用于区分：
+        - 真截断：生成中 / 分段发送中被软打断
+        - 收尾撞车：2/2 已发完，仅写历史/注销阶段被标 abort
+        后者不应再往历史追加停止系统提示。
+        用户主动停止（/stop、ChatUI 停止）必须写停止标记，不算「完整发出」。
+        """
+        if force_stopped:
+            return False
+        if event.get_extra("_llm_reply_send_truncated"):
+            return False
+        if event.get_extra("_llm_reply_send_completed"):
+            return True
+
+        original = self._normalize_plain_for_compare(original_text)
+        delivered = self._normalize_plain_for_compare(delivered_text)
+        if not original or not delivered:
+            return False
+        # delivered 可能因分段用换行拼接，归一化后应覆盖完整正文
+        return delivered == original or original in delivered
+
+    def _apply_interrupt_to_messages(
+        self,
+        event: AstrMessageEvent,
+        messages: list[Message],
+        *,
+        runner_aborted: bool = False,
+        force_stopped: bool = False,
+        llm_response: LLMResponse | None = None,
+    ) -> list[Message]:
+        """停止/打断后：历史仅保留已实际发送内容；追加固定英文停止标记。
+
+        Args:
+            event: 被打断的旧事件。
+            messages: 待落库的消息列表（会原地修改）。
+            runner_aborted: Agent 是否在生成阶段被 abort（流式中断等）。
+            force_stopped: 用户主动停止（/stop 或 Dashboard 停止按钮）。
+            llm_response: LLM 最终响应，用于在 WebChat 等无 send() 追踪的路径
+                中获取已产出文本。
+        """
+        delivered = self._get_delivered_llm_plain(event)
+
+        # WebChat 流式路径不走 send()，delivered 始终为空。
+        # 从 LLM 最终响应中取出已产出文本作为已发送内容。
+        if not delivered and (runner_aborted or force_stopped) and llm_response is not None:
+            completion = (llm_response.completion_text or "").strip()
+            if completion:
+                delivered = completion
+                event.set_extra("_delivered_llm_plain_text", delivered)
+
+        if not delivered and runner_aborted and not force_stopped:
+            logger.info(
+                "停止时未发送任何内容，跳过历史裁剪与停止标记: umo=%s",
+                event.unified_msg_origin,
+            )
+            return messages
+
+        # 固定英文系统提示，只陈述事实，不引导后续行为
+        if force_stopped:
+            note = (
+                "<system_reminder>"
+                "The user manually stopped this response."
+                "</system_reminder>"
+            )
+        else:
+            note = (
+                "<system_reminder>"
+                "The user sent a new message and interrupted this response."
+                "</system_reminder>"
+            )
+
+        # 消息序列中有 role="tool" 时：工具可能已修改文件/状态，tool 调用与
+        # 结果必须完整保留（不裁剪、不重写真实结果）。但中断可能发生在工具
+        # 之后的文本生成阶段——此时仍要在最终文本回复末尾追加停止标记，
+        # 所以继续走通用追加逻辑；只有以 tool 结果结尾（工具阶段被中断，
+        # 中断提示已由 runner 写在 tool 结果里）才原样保留。
+        has_tool_results = any(msg.role == "tool" for msg in messages)
+        if has_tool_results:
+            # 本轮是否有文本回复：最后一条 user 消息之后存在无 tool_calls 的
+            # 非空文本 assistant。只有这种情况才需要追加停止标记（文本阶段
+            # 被中断）；只看 messages[-1] 会误伤多轮场景下上一轮的旧回复。
+            last_user_idx = -1
+            for i, msg in enumerate(messages):
+                if msg.role == "user":
+                    last_user_idx = i
+            has_final_text_reply = any(
+                msg.role == "assistant"
+                and not msg.tool_calls
+                and self._extract_message_plain(msg.content).strip()
+                for msg in messages[last_user_idx + 1:]
+            )
+            if not has_final_text_reply:
+                logger.info(
+                    "工具阶段被中断，完整保留上下文，中断提示已写在 tool 结果中: umo=%s",
+                    event.unified_msg_origin,
+                )
+                return messages
+            logger.info(
+                "工具已执行且其后有文本回复，保留工具结果并在文本末尾追加停止标记: umo=%s",
+                event.unified_msg_origin,
+            )
+
+        # 优先最后一条无 tool_calls 的 assistant（最终回复）
+        target_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if msg.role == "assistant" and not msg.tool_calls:
+                target_idx = i
+                break
+        if target_idx is None:
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].role == "assistant":
+                    target_idx = i
+                    break
+
+        original = ""
+        if target_idx is not None:
+            original = self._extract_message_plain(messages[target_idx].content).strip()
+
+        fully_delivered = self._is_llm_reply_fully_delivered(
+            event,
+            runner_aborted=runner_aborted,
+            original_text=original,
+            delivered_text=delivered,
+            force_stopped=force_stopped,
+        )
+        if fully_delivered:
+            # 已完整发出：保留原回复正文，不写打断提示
+            note = ""
+            if not delivered and original:
+                delivered = original
+            logger.info(
+                "软打断时回复已完整发出，跳过打断提示落库: umo=%s, delivered_len=%s",
+                event.unified_msg_origin,
+                len(delivered or original),
+            )
+
+        if delivered:
+            final_body = delivered if not fully_delivered else (original or delivered)
+        elif runner_aborted:
+            # runner 已按已产出文本裁剪，保留其内容
+            final_body = None  # 表示保留原文
+        else:
+            # 生成完成但发送阶段打断且无任何已发送段：不写未发出正文
+            final_body = ""
+
+        if target_idx is None:
+            content = "" if final_body is None else final_body
+            if note:
+                content = f"{content}\n{note}" if content else note
+            if content:
+                messages.append(Message(role="assistant", content=content))
+            return messages
+
+        msg = messages[target_idx]
+        if final_body is None:
+            final_body = original
+
+        if note and note not in (final_body or ""):
+            final_body = f"{final_body}\n{note}" if final_body else note
+
+        if msg.tool_calls:
+            msg.content = final_body if final_body else None
+        else:
+            if not final_body:
+                messages.pop(target_idx)
+            else:
+                msg.content = final_body
+        return messages
+
+    @staticmethod
+    def _drop_dangling_tool_call_messages(messages: list[Message]) -> list[Message]:
+        """丢弃带 tool_calls 但 tool 结果不足以配对的 assistant 消息及其残留结果。
+
+        旧版本在 max_step 强制收尾步曾把悬空的 assistant(tool_calls) 消息写进
+        历史（#9912）：协议非法，下一轮发给 Provider 会被拒绝。落库前整组剔除，
+        顺带清理已中毒的存量会话；正常配对或已注入占位结果的消息不受影响。
+        """
+        cleaned: list[Message] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            if message.role == "assistant" and message.tool_calls:
+                end = index + 1
+                while end < len(messages) and messages[end].role == "tool":
+                    end += 1
+                call_ids = set()
+                for call in message.tool_calls:
+                    call_id = call.get("id") if isinstance(call, dict) else call.id
+                    if call_id:
+                        call_ids.add(call_id)
+                result_ids = {
+                    m.tool_call_id
+                    for m in messages[index + 1 : end]
+                    if m.tool_call_id
+                }
+                if not call_ids.issubset(result_ids):
+                    logger.warning(
+                        "丢弃悬空的 assistant(tool_calls) 历史消息：%d 个 tool_call "
+                        "中 %d 个缺少配对的 tool 结果，整组 %d 条消息不落库。",
+                        len(call_ids),
+                        len(call_ids - result_ids),
+                        end - index,
+                    )
+                    index = end
+                    continue
+            cleaned.append(message)
+            index += 1
+        return cleaned
+
+    async def _save_to_history(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        llm_response: LLMResponse | None,
+        all_messages: list[Message],
+        runner_stats: AgentStats | None,
+        user_aborted: bool = False,
+        runner_aborted: bool = False,
+    ) -> None:
+        if not req or not req.conversation:
+            return
+
+        # /stop 或 Dashboard 停止：保存已发送内容并标记用户主动停止
+        force_stopped = bool(event.get_extra("agent_force_stop"))
+        interrupted = bool(
+            user_aborted
+            or force_stopped
+            or event.get_extra("agent_stop_requested")
+            or event.get_extra("agent_user_aborted")
+        )
+
+        # 分段/发送已全部完成时：只是收尾撞上软打断，按正常回复落库。
+        # 用户主动停止仍要写入英文停止标记。
+        if interrupted and not runner_aborted and not force_stopped:
+            delivered = self._get_delivered_llm_plain(event)
+            completion = ""
+            if llm_response is not None:
+                completion = (llm_response.completion_text or "").strip()
+            if self._is_llm_reply_fully_delivered(
+                event,
+                runner_aborted=runner_aborted,
+                original_text=completion,
+                delivered_text=delivered,
+                force_stopped=force_stopped,
+            ):
+                logger.info(
+                    "软打断发生在回复完整发出之后，按正常历史落库: umo=%s",
+                    event.unified_msg_origin,
+                )
+                interrupted = False
+
+        def _collect_messages_to_save() -> list[Message]:
+            messages: list[Message] = []
+            skipped_initial_system = False
+            for message in all_messages:
+                if message.role == "system" and not skipped_initial_system:
+                    skipped_initial_system = True
+                    continue
+                if message.role in ["assistant", "user"] and message._no_save:
+                    continue
+                messages.append(message)
+            return self._drop_dangling_tool_call_messages(messages)
+            return messages
+
+        # LLM 失败（无响应 / 非 assistant）时仍尽量保留消息，便于续写（#9358）。
+        # 所有平台都必须落库：工具直接发送消息给用户（返回 None 结束循环）或
+        # LLM 出错的轮次，其用户消息与工具调用记录不能静默丢弃。
+        if not interrupted and (
+            llm_response is None or llm_response.role != "assistant"
+        ):
+            messages_to_save = _collect_messages_to_save()
+            checkpoint_id = event.get_extra("llm_checkpoint_id")
+            message_to_save = dump_messages_with_checkpoints(messages_to_save)
+            if isinstance(checkpoint_id, str) and checkpoint_id:
+                message_to_save.append(
+                    CheckpointMessageSegment(
+                        content=CheckpointData(id=checkpoint_id),
+                    ).model_dump()
+                )
+            await self.conv_manager.update_conversation(
+                event.unified_msg_origin,
+                req.conversation.cid,
+                history=message_to_save,
+                token_usage=None,
+                event=event,
+            )
+            return
+
+        if llm_response is None:
+            llm_response = LLMResponse(role="assistant", completion_text="")
+
+        if (
+            not llm_response.completion_text
+            and not req.tool_calls_result
+            and not interrupted
+        ):
+            logger.debug("LLM 响应为空，不保存记录。")
+            return
+
+        messages_to_save = _collect_messages_to_save()
+
+        if interrupted:
+            messages_to_save = self._apply_interrupt_to_messages(
+                event,
+                messages_to_save,
+                runner_aborted=runner_aborted,
+                force_stopped=force_stopped,
+                llm_response=llm_response,
+            )
+            logger.info(
+                "停止后按已发送内容裁剪历史: delivered_len=%s, runner_aborted=%s, force_stopped=%s, send_completed=%s",
+                len(self._get_delivered_llm_plain(event)),
+                runner_aborted,
+                force_stopped,
+                bool(event.get_extra("_llm_reply_send_completed")),
+            )
+
+        checkpoint_id = event.get_extra("llm_checkpoint_id")
+        message_to_save = dump_messages_with_checkpoints(messages_to_save)
+        if isinstance(checkpoint_id, str) and checkpoint_id:
+            message_to_save.append(
+                CheckpointMessageSegment(
+                    content=CheckpointData(id=checkpoint_id),
+                ).model_dump()
+            )
+
+        token_usage = None
+        if runner_stats:
+            token_usage = llm_response.usage.total if llm_response.usage else None
+
+        await self.conv_manager.update_conversation(
+            event.unified_msg_origin,
+            req.conversation.cid,
+            history=message_to_save,
+            token_usage=token_usage,
+            event=event,
+        )
+
+
+
+# we prevent astrbot from connecting to known malicious hosts
+# these hosts are base64 encoded
+BLOCKED = {"dGZid2h2d3IuY2xvdWQuc2VhbG9zLmlv", "a291cmljaGF0"}
+decoded_blocked = [base64.b64decode(b).decode("utf-8") for b in BLOCKED]
+
+
+def _format_tokens_k(n: int | float | None) -> str:
+    """token 数量格式化：<1000 原样，否则按 k（两位小数）。"""
+    try:
+        value = int(n or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if abs(value) < 1000:
+        return str(value)
+    return f"{value / 1000:.2f}k"
+
+
+def _format_seconds(seconds: float | None) -> str:
+    try:
+        value = float(seconds or 0.0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value <= 0:
+        return "-"
+    if value < 10:
+        return f"{value:.2f}s"
+    return f"{value:.1f}s"
+
+
+def _agent_status_label(status: str) -> str:
+    return {
+        "completed": "完成",
+        "aborted": "已中断",
+        "error": "错误",
+    }.get(status, status or "未知")
+
+
+def _log_internal_agent_usage(
+    *,
+    provider,
+    stats: AgentStats,
+    status: str,
+) -> None:
+    """把本轮 Agent token/耗时用量打成一条中文 INFO 日志（不发到 IM）。"""
+    usage = stats.token_usage
+    input_other = int(getattr(usage, "input_other", 0) or 0)
+    input_cached = int(getattr(usage, "input_cached", 0) or 0)
+    output = int(getattr(usage, "output", 0) or 0)
+    input_total = input_other + input_cached
+    total = input_total + output
+    context_tokens = int(getattr(stats, "current_context_tokens", 0) or 0)
+    duration = float(getattr(stats, "duration", 0.0) or 0.0)
+    ttft = float(getattr(stats, "time_to_first_token", 0.0) or 0.0)
+
+    model = ""
+    provider_display = ""
+    try:
+        model = str(provider.get_model() or "")
+    except Exception:
+        model = ""
+    try:
+        if hasattr(provider, "display_provider_id"):
+            provider_display = str(provider.display_provider_id() or "")
+        else:
+            provider_display = str(getattr(provider.meta(), "id", "") or "")
+    except Exception:
+        provider_display = ""
+
+    # 缓存为 0 时不啰嗦展示
+    if input_cached > 0:
+        input_part = (
+            f"输入 {_format_tokens_k(input_total)}"
+            f"（非缓存 {_format_tokens_k(input_other)} / 缓存 {_format_tokens_k(input_cached)}）"
+        )
+    else:
+        input_part = f"输入 {_format_tokens_k(input_total)}"
+
+    logger.info(
+        "Agent 用量: %s | 输出 %s | 合计 %s | 上下文 %s | 耗时 %s | 首token %s | 状态 %s | 模型 %s（提供商: %s）",
+        input_part,
+        _format_tokens_k(output),
+        _format_tokens_k(total),
+        _format_tokens_k(context_tokens),
+        _format_seconds(duration),
+        _format_seconds(ttft),
+        _agent_status_label(status),
+        model or "unknown",
+        provider_display or "unknown",
+    )
+
+
+async def _record_internal_agent_stats(
+    event: AstrMessageEvent,
+    req: ProviderRequest | None,
+    agent_runner: AgentRunner | None,
+    final_resp: LLMResponse | None,
+) -> None:
+    """Persist internal agent stats without affecting the user response flow."""
+    if agent_runner is None:
+        return
+
+    provider = agent_runner.provider
+    stats = agent_runner.stats
+    if provider is None or stats is None:
+        return
+
+    try:
+        provider_config = getattr(provider, "provider_config", {}) or {}
+        conversation_id = (
+            req.conversation.cid
+            if req is not None and req.conversation is not None
+            else None
+        )
+
+        if agent_runner.was_aborted():
+            status = "aborted"
+        elif final_resp is not None and final_resp.role == "err":
+            status = "error"
+        else:
+            status = "completed"
+
+        # 全平台可见的用量日志；token 按 k 格式化，不发送到 QQ 等 IM
+        try:
+            _log_internal_agent_usage(
+                provider=provider,
+                stats=stats,
+                status=status,
+            )
+        except Exception as log_err:
+            logger.debug("打印 Agent 用量日志失败: %s", log_err)
+
+        await db_helper.insert_provider_stat(
+            umo=event.unified_msg_origin,
+            conversation_id=conversation_id,
+            provider_id=provider_config.get("id", "") or provider.meta().id,
+            provider_model=provider.get_model(),
+            status=status,
+            stats=stats.to_dict(),
+            agent_type="internal",
+        )
+    except Exception as e:
+        logger.warning("Persist provider stats failed: %s", e, exc_info=True)
