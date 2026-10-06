@@ -1,0 +1,44 @@
+import typing as T
+from dataclasses import dataclass, field
+
+from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.provider.entities import TokenUsage
+
+
+class AgentResponseData(T.TypedDict):
+    chain: MessageChain
+
+
+@dataclass
+class AgentResponse:
+    type: str
+    data: AgentResponseData
+
+
+@dataclass
+class AgentStats:
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
+    current_context_tokens: int = 0
+    """最近一次 LLM 请求发送的 input tokens，用于上下文占用显示。"""
+    start_time: float = 0.0
+    end_time: float = 0.0
+    time_to_first_token: float = 0.0
+    provider_id: str = ""
+    """实际使用的 chat provider ID。"""
+    model_name: str = ""
+    """实际使用的模型名称。"""
+
+    @property
+    def duration(self) -> float:
+        return self.end_time - self.start_time
+
+    def to_dict(self) -> dict:
+        return {
+            "token_usage": self.token_usage.__dict__.copy(),
+            "current_context_tokens": self.current_context_tokens,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "time_to_first_token": self.time_to_first_token,
+            "provider_id": self.provider_id,
+            "model_name": self.model_name,
+        }

@@ -1,0 +1,2160 @@
+import asyncio
+import copy
+import hashlib
+import json
+import sys
+import time
+import traceback
+import typing as T
+import uuid
+from contextlib import suppress
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+
+from mcp.types import (
+    BlobResourceContents,
+    CallToolResult,
+    EmbeddedResource,
+    ImageContent,
+    TextContent,
+    TextResourceContents,
+)
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    wait_exponential,
+)
+
+from astrbot import logger
+from astrbot.core.agent.message import ImageURLPart, TextPart, ThinkPart
+from astrbot.core.agent.tool import FunctionTool, ToolSet
+from astrbot.core.agent.tool_image_cache import tool_image_cache
+from astrbot.core.exceptions import (
+    AstrBotError,
+    EmptyModelOutputError,
+    ReasoningOnlyOutputError,
+)
+from astrbot.core.message.components import Json, Plain
+from astrbot.core.message.message_event_result import (
+    MessageChain,
+)
+from astrbot.core.persona_error_reply import (
+    extract_persona_custom_error_message_from_event,
+)
+from astrbot.core.provider.entities import (
+    LLMResponse,
+    ProviderRequest,
+    ToolCallsResult,
+)
+from astrbot.core.provider.modalities import (
+    log_context_sanitize_stats,
+    provider_supports_modality,
+    sanitize_contexts_by_modalities,
+)
+from astrbot.core.provider.provider import Provider
+from astrbot.core.utils.media_utils import compress_images_for_provider
+
+from ..context.compressor import ContextCompressor
+from ..context.config import ContextConfig
+from ..context.manager import ContextManager
+from ..context.token_counter import EstimateTokenCounter, TokenCounter
+from ..hooks import BaseAgentRunHooks
+from ..message import (
+    AssistantMessageSegment,
+    Message,
+    ToolCallMessageSegment,
+    bind_checkpoint_messages,
+)
+from ..response import AgentResponseData, AgentStats
+from ..run_context import ContextWrapper, TContext
+from ..tool_executor import BaseFunctionToolExecutor
+from .base import AgentResponse, AgentState, BaseAgentRunner
+
+if sys.version_info >= (3, 12):
+    from typing import override
+else:
+    from typing_extensions import override
+
+
+@dataclass(slots=True)
+class _HandleFunctionToolsResult:
+    kind: T.Literal["message_chain", "tool_call_result_blocks", "cached_image"]
+    message_chain: MessageChain | None = None
+    tool_call_result_blocks: list[ToolCallMessageSegment] | None = None
+    cached_image: T.Any = None
+
+    @classmethod
+    def from_message_chain(cls, chain: MessageChain) -> "_HandleFunctionToolsResult":
+        return cls(kind="message_chain", message_chain=chain)
+
+    @classmethod
+    def from_tool_call_result_blocks(
+        cls, blocks: list[ToolCallMessageSegment]
+    ) -> "_HandleFunctionToolsResult":
+        return cls(kind="tool_call_result_blocks", tool_call_result_blocks=blocks)
+
+    @classmethod
+    def from_cached_image(cls, image: T.Any) -> "_HandleFunctionToolsResult":
+        return cls(kind="cached_image", cached_image=image)
+
+
+@dataclass(slots=True)
+class FollowUpTicket:
+    seq: int
+    text: str
+    consumed: bool = False
+    resolved: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@dataclass(slots=True)
+class _ContextUsageSnapshot:
+    """Store provider prompt usage bound to one request context."""
+
+    message_fingerprints: tuple[str, ...]
+    prompt_tokens: int
+    provider: Provider
+    tool_schema_fingerprint: str | None
+
+
+class _ToolExecutionInterrupted(Exception):
+    """Raised when a running tool call is interrupted because the user actively requested to stop."""
+
+    def __init__(
+        self,
+        message: str = "Tool execution interrupted because the user actively requested to stop.",
+        completed_blocks: list[ToolCallMessageSegment] | None = None,
+        interrupted_tool_call_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        # 中断前已真实执行完成的工具结果（按 tool_call_id 记录），收尾时保留真实结果
+        self.completed_blocks = completed_blocks or []
+        # 被中断的那个工具调用的 ID，收尾时只给它写中断提示
+        self.interrupted_tool_call_id = interrupted_tool_call_id
+
+
+def _format_llm_error_detail(exc: BaseException) -> str:
+    """构造用户可见的 LLM 错误详情。
+
+    框架自带异常的文案已中文化，直接展示；第三方 SDK 异常保留
+    异常类名 + 原始信息，便于排查。
+    """
+    if isinstance(exc, AstrBotError):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
+
+
+def extract_exception_code(exc: BaseException | None) -> str | None:
+    """从异常中提取可展示的错误码（HTTP 状态码 / 业务 code）。
+
+    按 异常自身属性(status_code/code/status) → 包装的 HTTP 响应(status_code)
+    → __cause__/__context__ 链 的顺序查找，取第一个非空值。
+    """
+    if exc is None:
+        return None
+    seen: set[int] = set()
+    cursor: BaseException | None = exc
+    while cursor is not None and id(cursor) not in seen:
+        seen.add(id(cursor))
+        for attr in ("status_code", "code", "status", "statusCode"):
+            try:
+                raw = getattr(cursor, attr, None)
+            except Exception:
+                raw = None
+            if raw is None:
+                continue
+            if callable(raw):
+                continue
+            try:
+                raw = int(raw)
+                if raw > 0:
+                    return str(raw)
+            except (TypeError, ValueError):
+                text = str(raw).strip()
+                if text:
+                    return text
+        # 部分异常把状态码包在 HTTP 响应对象上（如 httpx.HTTPStatusError.response）
+        for wrap_attr in ("response", "resp"):
+            try:
+                wrapped = getattr(cursor, wrap_attr, None)
+            except Exception:
+                wrapped = None
+            if wrapped is None:
+                continue
+            try:
+                sc = getattr(wrapped, "status_code", None) or getattr(
+                    wrapped, "status", None
+                )
+            except Exception:
+                sc = None
+            if sc is not None:
+                try:
+                    sc = int(sc)
+                    if sc > 0:
+                        return str(sc)
+                except (TypeError, ValueError):
+                    text = str(sc).strip()
+                    if text:
+                        return text
+        cursor = cursor.__cause__ or cursor.__context__
+    return None
+
+
+ToolExecutorResultT = T.TypeVar("ToolExecutorResultT")
+
+
+class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
+    TOOL_RESULT_MAX_ESTIMATED_TOKENS = 27_500
+    TOOL_RESULT_PREVIEW_MAX_ESTIMATED_TOKENS = 7000
+    EMPTY_OUTPUT_RETRY_ATTEMPTS = 3
+    EMPTY_OUTPUT_RETRY_WAIT_MIN_S = 1
+    EMPTY_OUTPUT_RETRY_WAIT_MAX_S = 4
+    # 「模型无正文时重新请求」的最大尝试次数（含首次请求）
+    EMPTY_CONTENT_RETRY_ATTEMPTS = 5
+    USER_INTERRUPTION_MESSAGE = (
+        "<system_reminder>User actively interrupted the response generation. "
+        "Partial output before interruption is preserved.</system_reminder>"
+    )
+    FOLLOW_UP_NOTICE_TEMPLATE = (
+        "\n\n<system_reminder>User sent follow-up messages while tool execution was in progress. "
+        "These follow-up messages have been merged into this single message in chronological order, "
+        "each prefixed with [Message N].\n"
+        "{follow_up_lines}</system_reminder>"
+    )
+    MAX_STEPS_REACHED_PROMPT = (
+        "<system_reminder>Maximum tool call limit reached.</system_reminder>"
+    )
+    SKILLS_LIKE_REQUERY_INSTRUCTION_TEMPLATE = (
+        "<system_reminder>Selected tool(s): {tool_names}. "
+        "Full parameter schema is provided below.</system_reminder>"
+    )
+    SKILLS_LIKE_REQUERY_REPAIR_INSTRUCTION = (
+        "<system_reminder>This is the second-stage tool execution step. "
+        "Selected tools and their full schemas are provided.</system_reminder>"
+    )
+    REPEATED_TOOL_NOTICE_L1_THRESHOLD = 3
+    REPEATED_TOOL_NOTICE_L2_THRESHOLD = 4
+    REPEATED_TOOL_NOTICE_L3_THRESHOLD = 5
+    MALFORMED_TOOL_NAME_PLACEHOLDER = "__malformed_tool_name__"
+    REPEATED_TOOL_NOTICE_L1_TEMPLATE = (
+        "\n\n<system_reminder>Tool `{tool_name}` has been executed with the same "
+        "arguments {streak} times consecutively.</system_reminder>"
+    )
+    REPEATED_TOOL_NOTICE_L2_TEMPLATE = (
+        "\n\n<system_reminder>Tool `{tool_name}` has been executed with the same "
+        "arguments {streak} times consecutively.</system_reminder>"
+    )
+    REPEATED_TOOL_NOTICE_L3_TEMPLATE = (
+        "\n\n<system_reminder>Tool `{tool_name}` has been executed with the same "
+        "arguments {streak} times consecutively.</system_reminder>"
+    )
+    TOOL_RESULT_OVERFLOW_NOTICE_TEMPLATE = (
+        "<system_reminder>Truncated tool output preview shown above. "
+        "Full output was written to `{overflow_path}`.</system_reminder>"
+    )
+
+    def _get_persona_custom_error_message(self) -> str | None:
+        """Read persona-level custom error message from event extras when available."""
+        event = getattr(self.run_context.context, "event", None)
+        return extract_persona_custom_error_message_from_event(event)
+
+    async def _complete_with_assistant_response(self, llm_resp: LLMResponse) -> None:
+        """Finalize the current step as a plain assistant response with no tool calls."""
+        self.final_llm_resp = llm_resp
+        self._transition_state(AgentState.DONE)
+        self.stats.end_time = time.time()
+
+        parts = []
+        if llm_resp.reasoning_content is not None or llm_resp.reasoning_signature:
+            parts.append(
+                ThinkPart(
+                    think=llm_resp.reasoning_content or "",
+                    encrypted=llm_resp.reasoning_signature,
+                )
+            )
+        if llm_resp.completion_text:
+            parts.append(TextPart(text=llm_resp.completion_text))
+        if len(parts) == 0:
+            logger.warning("LLM returned empty assistant message with no tool calls.")
+        self.run_context.messages.append(Message(role="assistant", content=parts))
+
+        try:
+            await self.agent_hooks.on_agent_done(self.run_context, llm_resp)
+        except Exception as e:
+            logger.error(f"Error in on_agent_done hook: {e}", exc_info=True)
+        self._resolve_unconsumed_follow_ups()
+
+    @override
+    async def reset(
+        self,
+        provider: Provider,
+        request: ProviderRequest,
+        run_context: ContextWrapper[TContext],
+        tool_executor: BaseFunctionToolExecutor[TContext],
+        agent_hooks: BaseAgentRunHooks[TContext],
+        streaming: bool = False,
+        # enforce max turns, will discard older turns when exceeded BEFORE compression
+        # -1 means no limit
+        enforce_max_turns: int = -1,
+        # compression trigger threshold: context tokens / window above which compression kicks in
+        context_compress_threshold: float = 0.82,
+        # llm compressor
+        llm_compress_instruction: str | None = None,
+        llm_compress_keep_recent_ratio: float = 0.15,
+        llm_compress_keep_recent_rounds: int | None = None,
+        llm_compress_provider: Provider | None = None,
+        # truncate by turns compressor
+        truncate_turns: int = 1,
+        # customize
+        custom_token_counter: TokenCounter | None = None,
+        custom_compressor: ContextCompressor | None = None,
+        tool_schema_mode: str | None = "full",
+        fallback_providers: list[Provider] | None = None,
+        request_max_retries: int | None = None,
+        empty_content_retry_enabled: bool = False,
+        empty_content_retry_mode: str = "retry_current",
+        tool_result_overflow_dir: str | None = None,
+        read_tool: FunctionTool | None = None,
+        **kwargs: T.Any,
+    ) -> None:
+        self.req = request
+        self.streaming = streaming
+        self.enforce_max_turns = enforce_max_turns
+        self.context_compress_threshold = context_compress_threshold
+        self.llm_compress_instruction = llm_compress_instruction
+        self.llm_compress_keep_recent_ratio = llm_compress_keep_recent_ratio
+        self.llm_compress_keep_recent_rounds = llm_compress_keep_recent_rounds
+        self.llm_compress_provider = llm_compress_provider
+        self.truncate_turns = truncate_turns
+        self.custom_token_counter = custom_token_counter
+        self.custom_compressor = custom_compressor
+        self.request_max_retries = request_max_retries
+        # 「模型无正文时重新请求」：仅有思考内容、无正文也无工具调用时的处理方式
+        # retry_current=重试当前模型；fallback=请求回退模型
+        self.empty_content_retry_enabled = empty_content_retry_enabled
+        self.empty_content_retry_mode = empty_content_retry_mode
+        self.tool_result_overflow_dir = tool_result_overflow_dir
+        self.read_tool = read_tool
+        self._tool_result_token_counter = EstimateTokenCounter()
+        self.request_context_manager_config = ContextConfig(
+            # <=0 disables token-based guarding.
+            max_context_tokens=provider.provider_config.get("max_context_tokens", 0),
+            # Enforce max turns before token-based guarding.
+            enforce_max_turns=self.enforce_max_turns,
+            truncate_turns=self.truncate_turns,
+            context_compress_threshold=self.context_compress_threshold,
+            llm_compress_instruction=self.llm_compress_instruction,
+            llm_compress_keep_recent_ratio=self.llm_compress_keep_recent_ratio,
+            llm_compress_keep_recent_rounds=self.llm_compress_keep_recent_rounds,
+            llm_compress_provider=self.llm_compress_provider,
+            custom_token_counter=self.custom_token_counter,
+            custom_compressor=self.custom_compressor,
+        )
+        self.request_context_manager = ContextManager(
+            self.request_context_manager_config
+        )
+
+        self.provider = provider
+        self._context_usage_snapshot: _ContextUsageSnapshot | None = None
+        self.fallback_providers: list[Provider] = []
+        seen_provider_ids: set[str] = {str(provider.provider_config.get("id", ""))}
+        for fallback_provider in fallback_providers or []:
+            fallback_id = str(fallback_provider.provider_config.get("id", ""))
+            if fallback_provider is provider:
+                continue
+            if fallback_id and fallback_id in seen_provider_ids:
+                continue
+            self.fallback_providers.append(fallback_provider)
+            if fallback_id:
+                seen_provider_ids.add(fallback_id)
+        self.final_llm_resp = None
+        self.last_llm_error: dict | None = None
+        self._state = AgentState.IDLE
+        self.tool_executor = tool_executor
+        self.agent_hooks = agent_hooks
+        self.run_context = run_context
+        self._aborted = False
+        self._abort_signal = asyncio.Event()
+        self._streamed_assistant_text = ""
+        self._pending_follow_ups: list[FollowUpTicket] = []
+        self._follow_up_seq = 0
+        self._last_tool_name: str | None = None
+        self._last_tool_args: dict[str, T.Any] | None = None
+        self._same_tool_streak = 0
+        # 当前正在执行的工具调用 ID（None = 没有工具在执行），供「工具调用期间防打断」判断
+        self._tool_executing: str | None = None
+
+        # These two are used for tool schema mode handling
+        # We now have two modes:
+        # - "full": use full tool schema for LLM calls, default.
+        # - "skills_like": use light tool schema for LLM calls, and re-query with param-only schema when needed.
+        #   Light tool schema does not include tool parameters.
+        #   This can reduce token usage when tools have large descriptions.
+        # See #4681
+        self.tool_schema_mode = tool_schema_mode
+        self._tool_schema_param_set = None
+        self._skill_like_raw_tool_set = None
+        if tool_schema_mode == "skills_like":
+            tool_set = self.req.func_tool
+            if not tool_set:
+                return
+            self._skill_like_raw_tool_set = tool_set
+            light_set = tool_set.get_light_tool_set()
+            self._tool_schema_param_set = tool_set.get_param_only_tool_set()
+            # MODIFIE the req.func_tool to use light tool schemas
+            self.req.func_tool = light_set
+
+        # append existing messages in the run context
+        messages = bind_checkpoint_messages(request.contexts or [])
+        if (
+            request.prompt is not None
+            or request.image_urls
+            or request.audio_urls
+            or request.extra_user_content_parts
+            or request.leading_user_content_parts
+        ):
+            m = await self._assemble_request_context_for_provider(request)
+            messages.append(Message.model_validate(m))
+        if request.system_prompt:
+            messages.insert(
+                0,
+                Message(role="system", content=request.system_prompt),
+            )
+        self.run_context.messages = messages
+
+        self.stats = AgentStats()
+        self.stats.start_time = time.time()
+        self.stats.provider_id = str(
+            self.provider.provider_config.get("id", "")
+        )
+        self.stats.model_name = str(
+            self.provider.provider_config.get("model", "")
+        )
+
+    def _provider_supports_image_input(self) -> bool:
+        """当前主模型是否支持图片输入，判定与收到的图片走同一实现。"""
+        return provider_supports_modality(self.provider, "image")
+
+    def _get_image_caption_settings(self) -> tuple[str, bool]:
+        """读取默认图片转述模型配置，与收到的图片共用同一组配置项。
+
+        Returns:
+            (default_image_caption_provider_id, always_use_image_caption_provider)
+        """
+        agent_ctx = self.run_context.context
+        plugin_ctx = getattr(agent_ctx, "context", None)
+        event = getattr(agent_ctx, "event", None)
+        if plugin_ctx is None or event is None:
+            return "", False
+        try:
+            provider_settings = (
+                plugin_ctx.get_config(umo=event.unified_msg_origin).get(
+                    "provider_settings",
+                    {},
+                )
+                or {}
+            )
+            caption_provider_id = str(
+                provider_settings.get("default_image_caption_provider_id") or ""
+            ).strip()
+            always_caption = bool(
+                provider_settings.get("always_use_image_caption_provider", False)
+            )
+            return caption_provider_id, always_caption
+        except Exception:  # noqa: BLE001
+            return "", False
+
+    def _tool_image_inject_for_review(self) -> bool:
+        """是否把工具生成的图片回注给模型审查。
+
+        与收到的图片走同一套全局配置逻辑：
+        - 模型支持图片输入且未开启「始终使用默认图片转述模型」→ 回注原图；
+        - 否则不回注（避免 base64 大图入上下文 / 不支持视觉的模型报 400），
+          先用默认图片转述模型生成描述放进工具结果，图片由 LLM 手动发送。
+        """
+        _, always_caption = self._get_image_caption_settings()
+        return self._provider_supports_image_input() and not always_caption
+
+    async def _caption_tool_image(self, image_path: str) -> str:
+        """用默认图片转述模型描述工具生成的图片，失败时返回空串。"""
+        caption_provider_id, _ = self._get_image_caption_settings()
+        if not caption_provider_id:
+            return ""
+        agent_ctx = self.run_context.context
+        try:
+            prov = agent_ctx.context.get_provider_by_id(caption_provider_id)
+            if prov is None:
+                logger.warning(
+                    "工具图片转述跳过：找不到图片转述模型 %s",
+                    caption_provider_id,
+                )
+                return ""
+            provider_settings = (
+                agent_ctx.context.get_config(
+                    umo=agent_ctx.event.unified_msg_origin,
+                ).get("provider_settings", {})
+                or {}
+            )
+            prompt = str(
+                provider_settings.get("image_caption_prompt")
+                or "Please describe the image using Chinese."
+            ).strip()
+            urls = await compress_images_for_provider([image_path], provider_settings)
+            resp = await prov.text_chat(prompt=prompt, image_urls=urls)
+            return (resp.completion_text or "").strip()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"工具图片转述失败: {e}", exc_info=True)
+            return ""
+
+    def _tool_image_review_hint(
+        self,
+        file_path: str,
+        *,
+        inject_for_review: bool,
+        caption: str = "",
+    ) -> str:
+        """工具图片缓存后写入工具结果的提示语，按处理路径给出不同指引。"""
+        if inject_for_review:
+            return (
+                "Review the image below. Use send_message_to_user to send it to "
+                "the user if satisfied, "
+                f"with type='image' and path='{file_path}'."
+            )
+        # 非回注路径：模型看不到原图，发送动作仍交给 LLM 手动完成
+        # （与回注路径一致，都由 LLM 调用 send_message_to_user 发送）
+        send_instruction = (
+            "Use send_message_to_user to send it to the user, "
+            f"with type='image' and path='{file_path}'."
+        )
+        if caption:
+            return f"<image_caption>{caption}</image_caption> {send_instruction}"
+        return send_instruction
+
+    async def _assemble_request_context_for_provider(
+        self,
+        request: ProviderRequest,
+    ) -> dict[str, T.Any]:
+        modalities = self.provider.provider_config.get("modalities", None)
+        if not modalities:  # Unconfigured (None or empty list) defaults to support all modalities for backward compatibility
+            return await request.assemble_context()
+
+        supports_image = "image" in modalities
+        supports_audio = "audio" in modalities
+        if supports_image and supports_audio:
+            return await request.assemble_context()
+
+        adjusted_request = replace(
+            request,
+            image_urls=request.image_urls if supports_image else [],
+            audio_urls=request.audio_urls if supports_audio else [],
+        )
+        context = await adjusted_request.assemble_context()
+        content = context.get("content")
+        if isinstance(content, str):
+            content_blocks: list[dict[str, T.Any]] = [{"type": "text", "text": content}]
+        elif isinstance(content, list):
+            content_blocks = content
+        else:
+            content_blocks = []
+
+        if not supports_image:
+            for _ in request.image_urls:
+                content_blocks.append({"type": "text", "text": "[Image]"})
+        if not supports_audio:
+            for _ in request.audio_urls:
+                content_blocks.append({"type": "text", "text": "[Audio]"})
+
+        return {"role": "user", "content": content_blocks}
+
+    async def _write_tool_result_overflow_file(
+        self,
+        *,
+        tool_call_id: str,
+        content: str,
+    ) -> str:
+        if self.tool_result_overflow_dir is None:
+            raise ValueError("tool_result_overflow_dir is not configured")
+
+        overflow_dir = Path(self.tool_result_overflow_dir).resolve(strict=False)
+        safe_tool_call_id = (
+            "".join(
+                ch if ch.isalnum() or ch in {"-", "_", "."} else "_"
+                for ch in tool_call_id
+            ).strip("._")
+            or "tool_call"
+        )
+        file_name = f"{safe_tool_call_id}_{uuid.uuid4().hex[:8]}.txt"
+        overflow_path = overflow_dir / file_name
+
+        def _run() -> str:
+            overflow_dir.mkdir(parents=True, exist_ok=True)
+            overflow_path.write_text(content, encoding="utf-8")
+            return str(overflow_path)
+
+        return await asyncio.to_thread(_run)
+
+    async def _materialize_large_tool_result(
+        self,
+        *,
+        tool_call_id: str,
+        content: str,
+    ) -> str:
+        if self.tool_result_overflow_dir is None or self.read_tool is None:
+            return content
+
+        estimated_tokens = self._tool_result_token_counter.count_tokens(
+            [Message(role="tool", content=content, tool_call_id=tool_call_id)]
+        )
+        if estimated_tokens <= self.TOOL_RESULT_MAX_ESTIMATED_TOKENS:
+            return content
+
+        preview = self._truncate_tool_result_preview(content, tool_call_id=tool_call_id)
+        try:
+            overflow_path = await self._write_tool_result_overflow_file(
+                tool_call_id=tool_call_id,
+                content=content,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to spill oversized tool result for %s: %s",
+                tool_call_id,
+                exc,
+                exc_info=True,
+            )
+            error_notice = (
+                "Tool output exceeded the inline result limit "
+                f"({estimated_tokens} estimated tokens > "
+                f"{self.TOOL_RESULT_MAX_ESTIMATED_TOKENS}) and could not be written "
+                f"to `{self.tool_result_overflow_dir}`: {exc}"
+            )
+            if not preview:
+                return error_notice
+            return f"{preview}\n\n{error_notice}"
+
+        notice = self.TOOL_RESULT_OVERFLOW_NOTICE_TEMPLATE.format(
+            overflow_path=overflow_path,
+        )
+        if not preview:
+            return notice
+        return f"{preview}\n\n{notice}"
+
+    def _truncate_tool_result_preview(
+        self,
+        content: str,
+        *,
+        tool_call_id: str,
+    ) -> str:
+        preview = content
+        while preview:
+            estimated_tokens = self._tool_result_token_counter.count_tokens(
+                [Message(role="tool", content=preview, tool_call_id=tool_call_id)]
+            )
+            if estimated_tokens <= self.TOOL_RESULT_PREVIEW_MAX_ESTIMATED_TOKENS:
+                return preview
+            next_len = len(preview) // 2
+            if next_len <= 0:
+                break
+            preview = preview[:next_len]
+        return preview
+
+    async def _iter_llm_responses(
+        self, *, include_model: bool = True
+    ) -> T.AsyncGenerator[LLMResponse, None]:
+        """Yields chunks *and* a final LLMResponse.
+
+        当 _abort_signal 被 set 时，流式/非流式都会被立即打断——不再等下一个 chunk
+        或完整响应，从而 /stop 可以做到「真正的立即停止」。
+        """
+        payload = {
+            "contexts": self._sanitize_contexts_for_provider(self.run_context.messages),
+            "func_tool": self._func_tool_for_provider(),
+            "session_id": self.req.session_id,
+            "extra_user_content_parts": self.req.extra_user_content_parts,  # list[ContentPart]
+            "abort_signal": self._abort_signal,
+            "request_max_retries": self.request_max_retries,
+        }
+        if include_model:
+            # For primary provider we keep explicit model selection if provided.
+            payload["model"] = self.req.model
+        if self.streaming:
+            stream = self.provider.text_chat_stream(**payload)  # type: ignore
+            # 将流式迭代与 abort_signal 竞速：一旦收到停止信号，立即停止消费流
+            async for resp in self._race_stream_against_abort(stream):  # type: ignore
+                yield resp
+        else:
+            resp = await self._race_call_against_abort(
+                lambda: self.provider.text_chat(**payload)
+            )
+            if resp is not None:
+                yield resp
+
+    async def _race_stream_against_abort(
+        self, stream: T.AsyncGenerator[LLMResponse, None]
+    ) -> T.AsyncGenerator[LLMResponse, None]:
+        """流式响应与 abort_signal 竞速；收到停止信号后立即停止消费流。"""
+        stream_aiter = stream.__aiter__()
+        while True:
+            if self._is_stop_requested():
+                # 停止信号已到，不再消费任何剩余 chunk
+                with suppress(StopAsyncIteration, RuntimeError):
+                    await stream_aiter.aclose()
+                return
+            next_chunk_task = asyncio.ensure_future(stream_aiter.__anext__())
+            abort_task = asyncio.ensure_future(self._abort_signal.wait())
+            try:
+                done, _pending = await asyncio.wait(
+                    {next_chunk_task, abort_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if abort_task in done:
+                    # 停止信号赢得竞速：取消正在等待的 chunk 读取
+                    next_chunk_task.cancel()
+                    with suppress(asyncio.CancelledError, StopAsyncIteration, RuntimeError):
+                        await next_chunk_task
+                    with suppress(StopAsyncIteration, RuntimeError):
+                        await stream_aiter.aclose()
+                    return
+                # chunk 先到（abort_task 仍未完成），yield 给上层
+                try:
+                    yield next_chunk_task.result()
+                except StopAsyncIteration:
+                    return
+            finally:
+                if not abort_task.done():
+                    abort_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await abort_task
+
+    async def _race_call_against_abort(self, coro_fn: T.Callable[[], T.Awaitable[LLMResponse]]) -> LLMResponse | None:
+        """非流式调用与 abort_signal 竞速；收到停止信号后取消请求并返回 None。"""
+        call_task = asyncio.ensure_future(coro_fn())
+        abort_task = asyncio.ensure_future(self._abort_signal.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {call_task, abort_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if abort_task in done:
+                # 停止信号赢得竞速：取消正在进行的 LLM 请求
+                call_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await call_task
+                return None
+            return call_task.result()
+        finally:
+            if not abort_task.done():
+                abort_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await abort_task
+
+    def _is_reasoning_only_output(self, resp: LLMResponse) -> bool:
+        """判断响应是否为「仅有思考内容、无正文也无工具调用」。"""
+        if resp.tools_call_name:
+            return False
+        if (resp.completion_text or "").strip():
+            return False
+        if not (resp.reasoning_content or "").strip():
+            return False
+        chain = resp.result_chain
+        if chain is None:
+            return True
+        # 链中含图片等非文本组件的多模态响应不算「无正文」
+        return not any(not isinstance(comp, Plain) for comp in chain.chain)
+
+    def _should_retry_output_error(self, exc: BaseException) -> bool:
+        """空输出重试谓词：完全空输出按原策略重试；仅有思考输出按配置决定。"""
+        if isinstance(exc, ReasoningOnlyOutputError):
+            return (
+                self.empty_content_retry_enabled
+                and self.empty_content_retry_mode == "retry_current"
+            )
+        return isinstance(exc, EmptyModelOutputError)
+
+    def _stop_output_retry(self, retry_state) -> bool:
+        """按异常类型区分最大尝试次数：仅思考输出与完全空输出。"""
+        attempt_number = retry_state.attempt_number
+        outcome = retry_state.outcome
+        exc = outcome.exception() if outcome is not None else None
+        if isinstance(exc, ReasoningOnlyOutputError):
+            return attempt_number >= self.EMPTY_CONTENT_RETRY_ATTEMPTS
+        return attempt_number >= self.EMPTY_OUTPUT_RETRY_ATTEMPTS
+
+    async def _iter_llm_responses_with_fallback(
+        self,
+    ) -> T.AsyncGenerator[LLMResponse, None]:
+        """Wrap _iter_llm_responses with provider fallback handling."""
+        candidates = [self.provider, *self.fallback_providers]
+        total_candidates = len(candidates)
+        last_exception: Exception | None = None
+        last_err_response: LLMResponse | None = None
+
+        for idx, candidate in enumerate(candidates):
+            candidate_id = candidate.provider_config.get("id", "<unknown>")
+            is_last_candidate = idx == total_candidates - 1
+            if idx > 0:
+                logger.warning(
+                    "主模型请求失败，已切换到回退对话模型：%s（原模型：%s）",
+                    candidate_id,
+                    self.provider.provider_config.get("id", "<unknown>"),
+                )
+            self.provider = candidate
+            self.stats.provider_id = str(
+                candidate.provider_config.get("id", "")
+            )
+            self.stats.model_name = str(
+                candidate.provider_config.get("model", "")
+            )
+            try:
+                retrying = AsyncRetrying(
+                    retry=retry_if_exception(self._should_retry_output_error),
+                    stop=self._stop_output_retry,
+                    wait=wait_exponential(
+                        multiplier=1,
+                        min=self.EMPTY_OUTPUT_RETRY_WAIT_MIN_S,
+                        max=self.EMPTY_OUTPUT_RETRY_WAIT_MAX_S,
+                    ),
+                    reraise=True,
+                )
+
+                async for attempt in retrying:
+                    has_stream_output = False
+                    with attempt:
+                        try:
+                            async for resp in self._iter_llm_responses(
+                                include_model=idx == 0
+                            ):
+                                if resp.is_chunk:
+                                    has_stream_output = True
+                                    yield resp
+                                    continue
+
+                                if (
+                                    resp.role == "err"
+                                    and not has_stream_output
+                                    and (not is_last_candidate)
+                                ):
+                                    last_err_response = resp
+                                    logger.warning(
+                                        "对话模型 %s 返回错误响应，尝试切换到下一个回退模型。",
+                                        candidate_id,
+                                    )
+                                    break
+
+                                # 「模型无正文时重新请求」：仅有思考内容、无正文也无工具
+                                # 调用时抛错，由重试谓词决定重试当前模型还是走回退链
+                                if (
+                                    self.empty_content_retry_enabled
+                                    and self._is_reasoning_only_output(resp)
+                                ):
+                                    raise ReasoningOnlyOutputError(
+                                        "模型仅返回思考内容，未生成正文或工具调用"
+                                    )
+
+                                self._sanitize_malformed_tool_calls(resp)
+                                yield resp
+                                return
+
+                            # /stop 强制停止：不再尝试 fallback，立即返回
+                            if self._is_stop_requested():
+                                return
+
+                            if has_stream_output:
+                                return
+                        except ReasoningOnlyOutputError:
+                            if self.empty_content_retry_mode == "retry_current":
+                                logger.warning(
+                                    "对话模型 %s 第 %s/%s 次仅返回思考内容、无正文输出，继续重试当前模型。",
+                                    candidate_id,
+                                    attempt.retry_state.attempt_number,
+                                    self.EMPTY_CONTENT_RETRY_ATTEMPTS,
+                                )
+                            else:
+                                logger.warning(
+                                    "对话模型 %s 仅返回思考内容、无正文输出，判定为失败，尝试请求回退模型。",
+                                    candidate_id,
+                                )
+                            raise
+                        except EmptyModelOutputError:
+                            if has_stream_output:
+                                logger.warning(
+                                    "对话模型 %s 在流式输出开始后返回空输出，跳过空输出重试。",
+                                    candidate_id,
+                                )
+                            else:
+                                logger.warning(
+                                    "对话模型 %s 第 %s/%s 次尝试返回空输出。",
+                                    candidate_id,
+                                    attempt.retry_state.attempt_number,
+                                    self.EMPTY_OUTPUT_RETRY_ATTEMPTS,
+                                )
+                            raise
+            except Exception as exc:  # noqa: BLE001
+                last_exception = exc
+                logger.warning(
+                    "对话模型 %s 请求出错：%s",
+                    candidate_id,
+                    exc,
+                    exc_info=True,
+                )
+                # /stop 强制停止：不再尝试 fallback，立即返回
+                if self._is_stop_requested():
+                    return
+                continue
+
+        if last_err_response:
+            self.last_llm_error = {
+                "model": self.provider.provider_config.get("model", "")
+                if self.provider
+                else "",
+                "code": None,
+                "detail": last_err_response.completion_text
+                or "LLM 请求失败，未返回可用响应。",
+            }
+            yield last_err_response
+            return
+        if last_exception:
+            detail = _format_llm_error_detail(last_exception)
+            self.last_llm_error = {
+                "model": self.provider.provider_config.get("model", "")
+                if self.provider
+                else "",
+                "code": extract_exception_code(last_exception),
+                "detail": detail,
+            }
+            yield LLMResponse(
+                role="err",
+                completion_text=f"所有对话模型均请求失败：{detail}",
+            )
+            return
+        yield LLMResponse(
+            role="err",
+            completion_text="所有可用的对话模型均请求失败。",
+        )
+
+    def _sanitize_contexts_for_provider(
+        self,
+        contexts: list[Message] | list[dict[str, T.Any]],
+    ) -> list[Message] | list[dict[str, T.Any]]:
+        modalities = self.provider.provider_config.get("modalities", None)
+        if (
+            not modalities
+        ):  # Unconfigured (None or empty list) defaults to support all modalities
+            return contexts
+        sanitized_contexts, stats = sanitize_contexts_by_modalities(
+            contexts,
+            self.provider.provider_config.get("modalities", None),
+        )
+        log_context_sanitize_stats(stats)
+        return sanitized_contexts
+
+    def _context_usage_fingerprints(
+        self,
+        messages: list[Message],
+        func_tool: ToolSet | None,
+    ) -> tuple[tuple[str, ...], str | None]:
+        """Build immutable fingerprints for a context-usage snapshot.
+
+        Args:
+            messages: Messages that form the provider request context.
+            func_tool: Tools exposed to the provider for that request.
+
+        Returns:
+            Immutable fingerprints for the messages and tool schema.
+        """
+        json_dump_kwargs = {
+            "default": str,
+            "ensure_ascii": False,
+            "separators": (",", ":"),
+            "sort_keys": True,
+        }
+        message_fingerprints = tuple(
+            hashlib.sha256(
+                json.dumps(message.model_dump(), **json_dump_kwargs).encode()
+            ).hexdigest()
+            for message in messages
+        )
+        tool_schema_fingerprint = None
+        if func_tool is not None:
+            tool_schema_fingerprint = hashlib.sha256(
+                json.dumps(
+                    [
+                        {
+                            "active": getattr(tool, "active", True),
+                            "description": tool.description,
+                            "name": tool.name,
+                            "parameters": tool.parameters,
+                        }
+                        for tool in func_tool.tools
+                    ],
+                    **json_dump_kwargs,
+                ).encode()
+            ).hexdigest()
+        return message_fingerprints, tool_schema_fingerprint
+
+    def _func_tool_for_provider(self) -> ToolSet | None:
+        if not self.req.func_tool:
+            return None
+        modalities = self.provider.provider_config.get("modalities", None)
+        if isinstance(modalities, list) and modalities and "tool_use" not in modalities:
+            logger.debug(
+                "Provider %s does not support tool_use, clearing tools for request.",
+                self.provider,
+            )
+            return None
+        return self.req.func_tool
+
+    def _simple_print_message_role(self, tag: str, messages: list):
+        roles = [m.role for m in messages]
+        n = len(roles)
+        if n > 10:
+            summary = ",".join(roles[:4]) + ",...," + ",".join(roles[-4:])
+        else:
+            summary = ",".join(roles)
+        logger.debug(f"{tag} messages -> [{n}] {summary}")
+
+    def follow_up(
+        self,
+        *,
+        message_text: str,
+    ) -> FollowUpTicket | None:
+        """Queue a follow-up message for the next tool result."""
+        if self.done() or self._is_stop_requested():
+            return None
+        text = (message_text or "").strip()
+        if not text:
+            return None
+        ticket = FollowUpTicket(seq=self._follow_up_seq, text=text)
+        self._follow_up_seq += 1
+        self._pending_follow_ups.append(ticket)
+        return ticket
+
+    def _resolve_unconsumed_follow_ups(self) -> None:
+        if not self._pending_follow_ups:
+            return
+        follow_ups = self._pending_follow_ups
+        self._pending_follow_ups = []
+        # 仅显式强制停止（/stop、Dashboard 停止）才丢弃排队消息——stop 的语义是取消一切；
+        # 软打断（新消息打断文本回复）不丢弃，释放后排队消息按到达顺序作为新请求正常处理
+        if self._is_stop_requested():
+            runner_event = getattr(
+                getattr(self.run_context, "context", None), "event", None
+            )
+            force_stop = bool(runner_event.get_extra("agent_force_stop")) if runner_event else False
+            if force_stop:
+                for ticket in follow_ups:
+                    ticket.consumed = True
+                    ticket.resolved.set()
+                logger.info(
+                    f"用户已强制停止，丢弃排队中的 {len(follow_ups)} 条 follow-up 消息。"
+                )
+                return
+        for ticket in follow_ups:
+            ticket.resolved.set()
+
+    @staticmethod
+    def _format_follow_up_line(idx: int, text: str) -> str:
+        """follow-up 消息注入格式：保持全英文，与 NOTICE 模板语言一致"""
+        return f"[Message {idx + 1}] {text}"
+
+    def _consume_follow_up_notice(self) -> str:
+        if not self._pending_follow_ups:
+            return ""
+        follow_ups = self._pending_follow_ups
+        self._pending_follow_ups = []
+        for ticket in follow_ups:
+            ticket.consumed = True
+            ticket.resolved.set()
+        follow_up_lines = "\n".join(
+            self._format_follow_up_line(idx, ticket.text)
+            for idx, ticket in enumerate(follow_ups)
+        )
+        return self.FOLLOW_UP_NOTICE_TEMPLATE.format(
+            follow_up_lines=follow_up_lines,
+        )
+
+    def _merge_follow_up_notice(self, content: str) -> str:
+        notice = self._consume_follow_up_notice()
+        if not notice:
+            return content
+        return f"{content}{notice}"
+
+    def _track_tool_call_streak(
+        self,
+        tool_name: str,
+        tool_args: dict[str, T.Any] | None,
+    ) -> int:
+        """统计连续「同名 + 同参数」工具调用次数。"""
+        normalized_args = {} if tool_args is None else tool_args
+        if (
+            tool_name == self._last_tool_name
+            and normalized_args == self._last_tool_args
+        ):
+            self._same_tool_streak += 1
+        else:
+            self._last_tool_name = tool_name
+            self._last_tool_args = copy.deepcopy(normalized_args)
+            self._same_tool_streak = 1
+        return self._same_tool_streak
+
+    def _build_repeated_tool_call_guidance(self, tool_name: str, streak: int) -> str:
+        if streak < self.REPEATED_TOOL_NOTICE_L1_THRESHOLD:
+            return ""
+
+        if streak >= self.REPEATED_TOOL_NOTICE_L3_THRESHOLD:
+            return self.REPEATED_TOOL_NOTICE_L3_TEMPLATE.format(
+                tool_name=tool_name,
+                streak=streak,
+            )
+
+        if streak >= self.REPEATED_TOOL_NOTICE_L2_THRESHOLD:
+            return self.REPEATED_TOOL_NOTICE_L2_TEMPLATE.format(
+                tool_name=tool_name,
+                streak=streak,
+            )
+
+        return self.REPEATED_TOOL_NOTICE_L1_TEMPLATE.format(
+            tool_name=tool_name,
+            streak=streak,
+        )
+
+    def _sanitize_malformed_tool_calls(
+        self,
+        llm_resp: LLMResponse,
+    ) -> None:
+        """Normalize malformed tool call names.
+
+        Args:
+            llm_resp: The LLM response whose tool call lists should be sanitized.
+        """
+        llm_resp.tools_call_name = [
+            self.MALFORMED_TOOL_NAME_PLACEHOLDER
+            if tool_name is None or tool_name.strip() == ""
+            else tool_name
+            for tool_name in llm_resp.tools_call_name
+        ]
+
+    @override
+    async def step(self):
+        """Process a single step of the agent.
+        This method should return the result of the step.
+        """
+        if not self.req:
+            raise ValueError("Request is not set. Please call reset() first.")
+
+        # 工具执行完毕后如果用户已停止，不再发起新 LLM 请求
+        if self._is_stop_requested():
+            self._aborted = True
+            self._transition_state(AgentState.DONE)
+            self.stats.end_time = time.time()
+            yield AgentResponse(
+                type="aborted",
+                data=AgentResponseData(chain=MessageChain(type="aborted")),
+            )
+            return
+
+        if self._state == AgentState.IDLE:
+            try:
+                await self.agent_hooks.on_agent_begin(self.run_context)
+            except Exception as e:
+                logger.error(f"Error in on_agent_begin hook: {e}", exc_info=True)
+
+        # 开始处理，转换到运行状态
+        self._transition_state(AgentState.RUNNING)
+        llm_resp_result = None
+
+        # Process request-time context before sending it to the provider.
+        trusted_token_usage = 0
+        snapshot = self._context_usage_snapshot
+        current_func_tool = self._func_tool_for_provider()
+        if snapshot:
+            message_fingerprints, tool_schema_fingerprint = (
+                self._context_usage_fingerprints(
+                    self.run_context.messages,
+                    current_func_tool,
+                )
+            )
+            if (
+                self.enforce_max_turns == -1
+                and snapshot.provider is self.provider
+                and snapshot.tool_schema_fingerprint == tool_schema_fingerprint
+                and len(self.run_context.messages) >= len(snapshot.message_fingerprints)
+                and snapshot.message_fingerprints
+                == message_fingerprints[: len(snapshot.message_fingerprints)]
+            ):
+                # The previous provider prompt includes overhead such as tool schemas.
+                # Only reuse it while the current request preserves that exact prefix.
+                tail_messages = self.run_context.messages[
+                    len(snapshot.message_fingerprints) :
+                ]
+                trusted_token_usage = snapshot.prompt_tokens + (
+                    self.request_context_manager.token_counter.count_tokens(
+                        tail_messages
+                    )
+                )
+        self._simple_print_message_role("[BefCompact]", self.run_context.messages)
+        self.run_context.messages = await self.request_context_manager.process(
+            self.run_context.messages,
+            trusted_token_usage=trusted_token_usage,
+        )
+        if snapshot:
+            processed_message_fingerprints, processed_tool_schema_fingerprint = (
+                self._context_usage_fingerprints(
+                    self.run_context.messages,
+                    self._func_tool_for_provider(),
+                )
+            )
+            if (
+                len(self.run_context.messages) < len(snapshot.message_fingerprints)
+                or snapshot.tool_schema_fingerprint != processed_tool_schema_fingerprint
+                or snapshot.message_fingerprints
+                != processed_message_fingerprints[: len(snapshot.message_fingerprints)]
+            ):
+                self._context_usage_snapshot = None
+        self._simple_print_message_role("[AftCompact]", self.run_context.messages)
+
+        async for llm_response in self._iter_llm_responses_with_fallback():
+            if llm_response.is_chunk:
+                if self.stats.time_to_first_token == 0:
+                    self.stats.time_to_first_token = time.time() - self.stats.start_time
+
+                if llm_response.reasoning_content:
+                    yield AgentResponse(
+                        type="streaming_delta",
+                        data=AgentResponseData(
+                            chain=MessageChain(type="reasoning").message(
+                                llm_response.reasoning_content,
+                            ),
+                        ),
+                    )
+                if llm_response.result_chain:
+                    try:
+                        plain = llm_response.result_chain.get_plain_text() or ""
+                    except Exception:
+                        plain = ""
+                    if plain:
+                        self._streamed_assistant_text += plain
+                    yield AgentResponse(
+                        type="streaming_delta",
+                        data=AgentResponseData(chain=llm_response.result_chain),
+                    )
+                elif llm_response.completion_text:
+                    self._streamed_assistant_text += llm_response.completion_text
+                    yield AgentResponse(
+                        type="streaming_delta",
+                        data=AgentResponseData(
+                            chain=MessageChain().message(llm_response.completion_text),
+                        ),
+                    )
+                if self._is_stop_requested():
+                    # 仅保留已向下游产出的文本，不写入“未发出”的完整回复或系统打断占位
+                    llm_resp_result = LLMResponse(
+                        role="assistant",
+                        completion_text=self._streamed_assistant_text,
+                        reasoning_content=llm_response.reasoning_content,
+                        reasoning_signature=llm_response.reasoning_signature,
+                    )
+                    break
+                continue
+            llm_resp_result = llm_response
+
+            # chunk 响应上面已 continue；缺 usage 时当前上下文占用未知
+            self.stats.current_context_tokens = 0
+            if llm_response.usage:
+                # 累计 usage 供计费；单独暴露最近一次 input 供上下文占用显示
+                self.stats.token_usage += llm_response.usage
+                self.stats.current_context_tokens = llm_response.usage.input
+                if self.req.conversation:
+                    self.req.conversation.token_usage = llm_response.usage.total
+                if llm_response.usage.input > 0:
+                    # 把本次真实 prompt 的占用绑定到消息指纹上，供下一次
+                    # step 做压缩判断；conversation.token_usage 是含缓存
+                    # 命中和输出 token 的计费累计值，不能反映当前上下文大小
+                    message_fingerprints, tool_schema_fingerprint = (
+                        self._context_usage_fingerprints(
+                            self.run_context.messages,
+                            self._func_tool_for_provider(),
+                        )
+                    )
+                    self._context_usage_snapshot = _ContextUsageSnapshot(
+                        message_fingerprints=message_fingerprints,
+                        prompt_tokens=llm_response.usage.input,
+                        provider=self.provider,
+                        tool_schema_fingerprint=tool_schema_fingerprint,
+                    )
+            yield AgentResponse(
+                type="agent_stats",
+                data=AgentResponseData(
+                    chain=MessageChain(
+                        type="agent_stats",
+                        chain=[Json(data=self.stats.to_dict())],
+                    )
+                ),
+            )
+            break  # got final response
+
+        if not llm_resp_result:
+            if self._is_stop_requested():
+                llm_resp_result = LLMResponse(role="assistant", completion_text="")
+            else:
+                return
+
+        if self._is_stop_requested():
+            yield await self._finalize_aborted_step(llm_resp_result)
+            return
+
+        # 处理 LLM 响应
+        llm_resp = llm_resp_result
+
+        if llm_resp.role == "err":
+            # 如果 LLM 响应错误，转换到错误状态
+            self.final_llm_resp = llm_resp
+            self.stats.end_time = time.time()
+            self._transition_state(AgentState.ERROR)
+            self._resolve_unconsumed_follow_ups()
+            custom_error_message = self._get_persona_custom_error_message()
+            error_text = custom_error_message or (
+                f"LLM 响应错误: {llm_resp.completion_text or '未知错误'}"
+            )
+            yield AgentResponse(
+                type="err",
+                data=AgentResponseData(
+                    chain=MessageChain().message(error_text),
+                ),
+            )
+            return
+
+        # 工具集已被移除（如 max_step 强制收尾步）时，部分模型仍会幻觉输出
+        # 工具调用。必须在 skills_like requery 之前剥离工具调用字段、按普通
+        # 回复收尾：否则 _handle_function_tools 会因 func_tool 为空直接返回，
+        # 一条悬空的 assistant(tool_calls) 消息（无配对 tool 结果）进入上下文
+        # 并被持久化，且运行停在 RUNNING，用户收不到任何最终回复。
+        if llm_resp.tools_call_name and not self.req.func_tool:
+            logger.warning(
+                "LLM 返回了工具调用，但当前没有可用工具"
+                "（可能已达到 max_step 强制收尾）；视为幻觉调用，按普通回复收尾。"
+            )
+            llm_resp.tools_call_name = []
+            llm_resp.tools_call_args = []
+            llm_resp.tools_call_ids = []
+            llm_resp.tools_call_extra_content = {}
+            # 纯工具调用、无任何文本的幻觉剥离后本步会以空回复结束，
+            # 补一条上限提示，保证用户能收到可见回复
+            if not llm_resp.completion_text and not llm_resp.result_chain:
+                llm_resp.completion_text = "（工具调用次数已达上限，未能生成最终回复。）"
+
+        if not llm_resp.tools_call_name:
+            await self._complete_with_assistant_response(llm_resp)
+
+        # 返回 LLM 结果
+        if llm_resp.reasoning_content:
+            yield AgentResponse(
+                type="llm_result",
+                data=AgentResponseData(
+                    chain=MessageChain(type="reasoning").message(
+                        llm_resp.reasoning_content,
+                    ),
+                ),
+            )
+        if llm_resp.result_chain:
+            yield AgentResponse(
+                type="llm_result",
+                data=AgentResponseData(chain=llm_resp.result_chain),
+            )
+        elif llm_resp.completion_text:
+            yield AgentResponse(
+                type="llm_result",
+                data=AgentResponseData(
+                    chain=MessageChain().message(llm_resp.completion_text),
+                ),
+            )
+
+        # 如果有工具调用，还需处理工具调用
+        if llm_resp.tools_call_name:
+            if self.tool_schema_mode == "skills_like":
+                requery_resp, _ = await self._resolve_tool_exec(llm_resp)
+                if not requery_resp.tools_call_name:
+                    llm_resp = requery_resp
+                    logger.warning(
+                        "skills_like tool re-query returned no tool calls; fallback to assistant response."
+                    )
+                    if llm_resp.reasoning_content:
+                        yield AgentResponse(
+                            type="llm_result",
+                            data=AgentResponseData(
+                                chain=MessageChain(type="reasoning").message(
+                                    llm_resp.reasoning_content,
+                                ),
+                            ),
+                        )
+                    if llm_resp.result_chain:
+                        yield AgentResponse(
+                            type="llm_result",
+                            data=AgentResponseData(chain=llm_resp.result_chain),
+                        )
+                    elif llm_resp.completion_text:
+                        yield AgentResponse(
+                            type="llm_result",
+                            data=AgentResponseData(
+                                chain=MessageChain().message(llm_resp.completion_text),
+                            ),
+                        )
+
+                    await self._complete_with_assistant_response(llm_resp)
+                    return
+                else:
+                    llm_resp.tools_call_name = requery_resp.tools_call_name
+                    llm_resp.tools_call_args = requery_resp.tools_call_args
+                    llm_resp.tools_call_ids = requery_resp.tools_call_ids
+
+            tool_call_result_blocks = []
+            cached_images = []  # Collect cached images for LLM visibility
+            try:
+                async for result in self._handle_function_tools(self.req, llm_resp):
+                    if result.kind == "tool_call_result_blocks":
+                        if result.tool_call_result_blocks is not None:
+                            tool_call_result_blocks = result.tool_call_result_blocks
+                    elif result.kind == "cached_image":
+                        if result.cached_image is not None:
+                            # Collect cached image info
+                            cached_images.append(result.cached_image)
+                    elif result.kind == "message_chain":
+                        chain = result.message_chain
+                        if chain is None or chain.type is None:
+                            # should not happen
+                            continue
+                        if chain.type == "tool_direct_result":
+                            ar_type = "tool_call_result"
+                        else:
+                            ar_type = chain.type
+                        yield AgentResponse(
+                            type=ar_type,
+                            data=AgentResponseData(chain=chain),
+                        )
+            except _ToolExecutionInterrupted as e:
+                # 带上中断前已完成工具的真实结果，只给真正被中断的工具写提示
+                yield await self._finalize_aborted_step(
+                    llm_resp,
+                    completed_blocks=e.completed_blocks,
+                    interrupted_tool_call_id=e.interrupted_tool_call_id,
+                )
+                return
+
+            # 协议安全网：每个 tool_call_id 必须有配对的 tool 结果，否则上下文
+            # 会留下悬空的 assistant(tool_calls) 消息而被 Provider 拒绝。逐个 id
+            # 检查而非比较数量：数量相等不代表配对（一个调用可能产出多个结果
+            # 块，另一个调用一个都没有）。
+            existing_result_ids = {
+                block.tool_call_id for block in tool_call_result_blocks
+            }
+            for tool_call_id in llm_resp.tools_call_ids:
+                if tool_call_id not in existing_result_ids:
+                    tool_call_result_blocks.append(
+                        ToolCallMessageSegment(
+                            role="tool",
+                            tool_call_id=tool_call_id,
+                            content=(
+                                "error: tool execution produced no result (tools may "
+                                "have been removed or the call was interrupted); "
+                                "ignore this call and answer based on the information "
+                                "gathered so far."
+                            ),
+                        )
+                    )
+
+            # 将结果添加到上下文中
+            parts = []
+            if llm_resp.reasoning_content is not None or llm_resp.reasoning_signature:
+                parts.append(
+                    ThinkPart(
+                        think=llm_resp.reasoning_content or "",
+                        encrypted=llm_resp.reasoning_signature,
+                    )
+                )
+            if llm_resp.completion_text:
+                parts.append(TextPart(text=llm_resp.completion_text))
+            if len(parts) == 0:
+                parts = None
+            tool_calls_result = ToolCallsResult(
+                tool_calls_info=AssistantMessageSegment(
+                    tool_calls=llm_resp.to_openai_to_calls_model(),
+                    content=parts,
+                ),
+                tool_calls_result=tool_call_result_blocks,
+            )
+            # record the assistant message with tool calls
+            self.run_context.messages.extend(
+                tool_calls_result.to_openai_messages_model()
+            )
+
+            # 仅当走"回注审查"路径时才把缓存图片回注为 user 消息供模型审查；
+            # 判定与 _handle_function_tools 的提示语一致：模型支持图片输入且未开启
+            # 「始终使用默认图片转述模型」。其余路径图片由 LLM 手动发送（可选转述）。
+            if cached_images and self._tool_image_inject_for_review():
+                # Build user message with images for LLM to review
+                image_parts = []
+                for cached_img in cached_images:
+                    img_data = tool_image_cache.get_image_base64_by_path(
+                        cached_img.file_path, cached_img.mime_type
+                    )
+                    if img_data:
+                        base64_data, mime_type = img_data
+                        image_parts.append(
+                            TextPart(
+                                text=f"[Image from tool '{cached_img.tool_name}', path='{cached_img.file_path}']"
+                            )
+                        )
+                        image_parts.append(
+                            ImageURLPart(
+                                image_url=ImageURLPart.ImageURL(
+                                    url=f"data:{mime_type};base64,{base64_data}",
+                                    id=cached_img.file_path,
+                                )
+                            )
+                        )
+                if image_parts:
+                    self.run_context.messages.append(
+                        Message(role="user", content=image_parts)
+                    )
+                    logger.debug(
+                        f"Appended {len(cached_images)} cached image(s) to context for LLM review"
+                    )
+
+            self.req.append_tool_calls_result(tool_calls_result)
+
+    async def step_until_done(
+        self, max_step: int
+    ) -> T.AsyncGenerator[AgentResponse, None]:
+        """Process steps until the agent is done."""
+        step_count = 0
+        while not self.done() and step_count < max_step:
+            step_count += 1
+            async for resp in self.step():
+                yield resp
+
+        #  如果循环结束了但是 agent 还没有完成，说明是达到了 max_step
+        if not self.done():
+            logger.warning(
+                f"Agent reached max steps ({max_step}), forcing a final response."
+            )
+            # 拔掉所有工具
+            if self.req:
+                self.req.func_tool = None
+            # 注入提示词
+            self.run_context.messages.append(
+                Message(
+                    role="user",
+                    content=self.MAX_STEPS_REACHED_PROMPT,
+                )
+            )
+            # 再执行最后一步
+            async for resp in self.step():
+                yield resp
+
+    async def _handle_function_tools(
+        self,
+        req: ProviderRequest,
+        llm_response: LLMResponse,
+    ) -> T.AsyncGenerator[_HandleFunctionToolsResult, None]:
+        """处理函数工具调用。"""
+        tool_call_result_blocks: list[ToolCallMessageSegment] = []
+        # 本步内是否把工具图片回注给模型审查；非回注路径会先转述，再由 LLM 手动发送
+        inject_for_review = self._tool_image_inject_for_review()
+        logger.info(f"Agent 使用工具: {llm_response.tools_call_name}")
+
+        def _append_tool_call_result(tool_call_id: str, content: str) -> None:
+            tool_call_result_blocks.append(
+                ToolCallMessageSegment(
+                    role="tool",
+                    tool_call_id=tool_call_id,
+                    content=self._merge_follow_up_notice(content),
+                ),
+            )
+
+        # 执行函数调用
+        for func_tool_name, func_tool_args, func_tool_id in zip(
+            llm_response.tools_call_name,
+            llm_response.tools_call_args,
+            llm_response.tools_call_ids,
+        ):
+            tool_result_blocks_start = len(tool_call_result_blocks)
+            tool_call_streak = self._track_tool_call_streak(
+                func_tool_name,
+                func_tool_args,
+            )
+            # 标记当前正在执行的工具调用，供「工具调用期间防打断」判断
+            self._tool_executing = func_tool_id
+            yield _HandleFunctionToolsResult.from_message_chain(
+                MessageChain(
+                    type="tool_call",
+                    chain=[
+                        Json(
+                            data={
+                                "id": func_tool_id,
+                                "name": func_tool_name,
+                                "args": func_tool_args,
+                                "ts": time.time(),
+                            }
+                        )
+                    ],
+                )
+            )
+            try:
+                if not req.func_tool:
+                    return
+
+                if (
+                    self.tool_schema_mode == "skills_like"
+                    and self._skill_like_raw_tool_set
+                ):
+                    # in 'skills_like' mode, raw.func_tool is light schema, does not have handler
+                    # so we need to get the tool from the raw tool set
+                    func_tool = self._skill_like_raw_tool_set.get_tool(func_tool_name)
+                    available_tools = self._skill_like_raw_tool_set.names()
+                else:
+                    func_tool = req.func_tool.get_tool(func_tool_name)
+                    available_tools = req.func_tool.names()
+
+                #  Some API may return None for tools with no parameters
+                if func_tool_args is None:
+                    func_tool_args = {}
+                logger.info(f"使用工具：{func_tool_name}，参数：{func_tool_args}")
+
+                if not func_tool:
+                    logger.warning(f"未找到指定的工具: {func_tool_name}，将跳过。")
+                    _append_tool_call_result(
+                        func_tool_id,
+                        f"error: Tool {func_tool_name} not found. Available tools are: {', '.join(available_tools)}",
+                    )
+                    continue
+
+                valid_params = {}  # 参数过滤：只传递函数实际需要的参数
+
+                # 获取实际的 handler 函数
+                if func_tool.handler:
+                    logger.debug(
+                        f"工具 {func_tool_name} 期望的参数: {func_tool.parameters}",
+                    )
+                    if func_tool.parameters and func_tool.parameters.get("properties"):
+                        expected_params = set(func_tool.parameters["properties"].keys())
+
+                        valid_params = {
+                            k: v
+                            for k, v in func_tool_args.items()
+                            if k in expected_params
+                        }
+
+                    # 记录被忽略的参数
+                    ignored_params = set(func_tool_args.keys()) - set(
+                        valid_params.keys(),
+                    )
+                    if ignored_params:
+                        logger.warning(
+                            f"工具 {func_tool_name} 忽略非期望参数: {ignored_params}",
+                        )
+                else:
+                    # 如果没有 handler（如 MCP 工具），使用所有参数
+                    valid_params = func_tool_args
+
+                try:
+                    await self.agent_hooks.on_tool_start(
+                        self.run_context,
+                        func_tool,
+                        valid_params,
+                    )
+                except Exception as e:
+                    logger.error(f"Error in on_tool_start hook: {e}", exc_info=True)
+
+                executor = self.tool_executor.execute(
+                    tool=func_tool,
+                    run_context=self.run_context,
+                    **valid_params,  # 只传递有效的参数
+                )
+
+                _final_resp: CallToolResult | None = None
+                # 传入已完成结果列表和当前工具 ID：中断异常需要带上它们，
+                # 收尾时才能保留已完成工具的真实结果、只给被中断的工具写提示
+                async for resp in self._iter_tool_executor_results(
+                    executor,
+                    tool_call_result_blocks,
+                    func_tool_id,
+                ):  # type: ignore
+                    if isinstance(resp, CallToolResult):
+                        res = resp
+                        _final_resp = resp
+                        if not res.content:
+                            _append_tool_call_result(
+                                func_tool_id,
+                                "The tool returned no content.",
+                            )
+                            continue
+
+                        result_parts: list[str] = []
+                        for index, content_item in enumerate(res.content):
+                            if isinstance(content_item, TextContent):
+                                result_parts.append(content_item.text)
+                            elif isinstance(content_item, ImageContent):
+                                # Cache the image instead of sending directly
+                                cached_img = tool_image_cache.save_image(
+                                    base64_data=content_item.data,
+                                    tool_call_id=func_tool_id,
+                                    tool_name=func_tool_name,
+                                    index=index,
+                                    mime_type=content_item.mimeType or "image/png",
+                                )
+                                caption = ""
+                                if not inject_for_review:
+                                    caption = await self._caption_tool_image(
+                                        cached_img.file_path,
+                                    )
+                                result_parts.append(
+                                    f"Image returned and cached at path='{cached_img.file_path}'. "
+                                    + self._tool_image_review_hint(
+                                        cached_img.file_path,
+                                        inject_for_review=inject_for_review,
+                                        caption=caption,
+                                    )
+                                )
+                                # Yield image info for LLM visibility (will be handled in step())
+                                yield _HandleFunctionToolsResult.from_cached_image(
+                                    cached_img
+                                )
+                            elif isinstance(content_item, EmbeddedResource):
+                                resource = content_item.resource
+                                if isinstance(resource, TextResourceContents):
+                                    result_parts.append(resource.text)
+                                elif (
+                                    isinstance(resource, BlobResourceContents)
+                                    and resource.mimeType
+                                    and resource.mimeType.startswith("image/")
+                                ):
+                                    # Cache the image instead of sending directly
+                                    cached_img = tool_image_cache.save_image(
+                                        base64_data=resource.blob,
+                                        tool_call_id=func_tool_id,
+                                        tool_name=func_tool_name,
+                                        index=index,
+                                        mime_type=resource.mimeType,
+                                    )
+                                    caption = ""
+                                    if not inject_for_review:
+                                        caption = await self._caption_tool_image(
+                                            cached_img.file_path,
+                                        )
+                                    result_parts.append(
+                                        f"Image returned and cached at path='{cached_img.file_path}'. "
+                                        + self._tool_image_review_hint(
+                                            cached_img.file_path,
+                                            inject_for_review=inject_for_review,
+                                            caption=caption,
+                                        )
+                                    )
+                                    # Yield image info for LLM visibility
+                                    yield _HandleFunctionToolsResult.from_cached_image(
+                                        cached_img
+                                    )
+                                else:
+                                    result_parts.append(
+                                        "The tool has returned a data type that is not supported."
+                                    )
+                        if result_parts:
+                            inline_result = "\n\n".join(result_parts)
+                            inline_result = await self._materialize_large_tool_result(
+                                tool_call_id=func_tool_id,
+                                content=inline_result,
+                            )
+                            _append_tool_call_result(
+                                func_tool_id,
+                                inline_result
+                                + self._build_repeated_tool_call_guidance(
+                                    func_tool_name, tool_call_streak
+                                ),
+                            )
+
+                    elif resp is None:
+                        # Tool 直接请求发送消息给用户
+                        # 这里我们将直接结束 Agent Loop
+                        # 发送消息逻辑在 ToolExecutor 中处理了
+                        logger.warning(
+                            f"{func_tool_name} 没有返回值，或者已将结果直接发送给用户。"
+                        )
+                        self._transition_state(AgentState.DONE)
+                        self.stats.end_time = time.time()
+                        _append_tool_call_result(
+                            func_tool_id,
+                            "The tool has no return value, or has sent the result directly to the user."
+                            + self._build_repeated_tool_call_guidance(
+                                func_tool_name, tool_call_streak
+                            ),
+                        )
+                    else:
+                        # 不应该出现其他类型
+                        logger.warning(
+                            f"Tool 返回了不支持的类型: {type(resp)}。",
+                        )
+                        _append_tool_call_result(
+                            func_tool_id,
+                            "*The tool has returned an unsupported type. Please tell the user to check the definition and implementation of this tool.*"
+                            + self._build_repeated_tool_call_guidance(
+                                func_tool_name, tool_call_streak
+                            ),
+                        )
+
+                try:
+                    await self.agent_hooks.on_tool_end(
+                        self.run_context,
+                        func_tool,
+                        func_tool_args,
+                        _final_resp,
+                    )
+                except Exception as e:
+                    logger.error(f"Error in on_tool_end hook: {e}", exc_info=True)
+            except Exception as e:
+                if isinstance(e, _ToolExecutionInterrupted):
+                    raise
+                logger.warning(traceback.format_exc())
+                _append_tool_call_result(
+                    func_tool_id,
+                    f"error: {e!s}"
+                    + self._build_repeated_tool_call_guidance(
+                        func_tool_name, tool_call_streak
+                    ),
+                )
+
+            if len(tool_call_result_blocks) > tool_result_blocks_start:
+                tool_result_content = str(tool_call_result_blocks[-1].content)
+                yield _HandleFunctionToolsResult.from_message_chain(
+                    MessageChain(
+                        type="tool_call_result",
+                        chain=[
+                            Json(
+                                data={
+                                    "id": func_tool_id,
+                                    "ts": time.time(),
+                                    "result": tool_result_content,
+                                }
+                            )
+                        ],
+                    )
+                )
+                logger.info(f"Tool `{func_tool_name}` Result: {tool_result_content}")
+
+            # 该工具已执行完毕，清除「工具执行中」标记
+            if self._tool_executing == func_tool_id:
+                self._tool_executing = None
+
+        # 处理函数调用响应
+        if tool_call_result_blocks:
+            yield _HandleFunctionToolsResult.from_tool_call_result_blocks(
+                tool_call_result_blocks
+            )
+
+    def _build_tool_requery_context(
+        self,
+        tool_names: list[str],
+        extra_instruction: str | None = None,
+    ) -> list[dict[str, T.Any]]:
+        """Build contexts for re-querying LLM with param-only tool schemas."""
+        contexts: list[dict[str, T.Any]] = []
+        for msg in self.run_context.messages:
+            if hasattr(msg, "model_dump"):
+                contexts.append(msg.model_dump())  # type: ignore[call-arg]
+            elif isinstance(msg, dict):
+                contexts.append(copy.deepcopy(msg))
+        instruction = self.SKILLS_LIKE_REQUERY_INSTRUCTION_TEMPLATE.format(
+            tool_names=", ".join(tool_names)
+        )
+        if extra_instruction:
+            instruction = f"{instruction}\n{extra_instruction}"
+        if contexts and contexts[0].get("role") == "system":
+            content = contexts[0].get("content") or ""
+            contexts[0]["content"] = f"{content}\n{instruction}"
+        else:
+            contexts.insert(0, {"role": "system", "content": instruction})
+        return contexts
+
+    @staticmethod
+    def _has_meaningful_assistant_reply(llm_resp: LLMResponse) -> bool:
+        text = (llm_resp.completion_text or "").strip()
+        return bool(text)
+
+    def _build_tool_subset(self, tool_set: ToolSet, tool_names: list[str]) -> ToolSet:
+        """Build a subset of tools from the given tool set based on tool names."""
+        subset = ToolSet()
+        for name in tool_names:
+            tool = tool_set.get_tool(name)
+            if tool:
+                subset.add_tool(tool)
+        return subset
+
+    async def _resolve_tool_exec(
+        self,
+        llm_resp: LLMResponse,
+    ) -> tuple[LLMResponse, ToolSet | None]:
+        """Used in 'skills_like' tool schema mode to re-query LLM with param-only tool schemas."""
+        tool_names = llm_resp.tools_call_name
+        if not tool_names:
+            return llm_resp, self.req.func_tool
+        full_tool_set = self.req.func_tool
+        if not isinstance(full_tool_set, ToolSet):
+            return llm_resp, self.req.func_tool
+
+        subset = self._build_tool_subset(full_tool_set, tool_names)
+        if not subset.tools:
+            return llm_resp, full_tool_set
+
+        if isinstance(self._tool_schema_param_set, ToolSet):
+            param_subset = self._build_tool_subset(
+                self._tool_schema_param_set, tool_names
+            )
+            if param_subset.tools and tool_names:
+                contexts = self._build_tool_requery_context(tool_names)
+                requery_resp = await self.provider.text_chat(
+                    contexts=self._sanitize_contexts_for_provider(contexts),
+                    func_tool=param_subset,
+                    model=self.req.model,
+                    session_id=self.req.session_id,
+                    extra_user_content_parts=self.req.extra_user_content_parts,
+                    # tool_choice="required",
+                    abort_signal=self._abort_signal,
+                    request_max_retries=self.request_max_retries,
+                )
+                if requery_resp:
+                    llm_resp = requery_resp
+                    self._sanitize_malformed_tool_calls(llm_resp)
+
+                # If the re-query still returns no tool calls, and also does not have a meaningful assistant reply,
+                # we consider it as a failure of the LLM to follow the tool-use instruction,
+                # and we will retry once with a stronger instruction that explicitly requires the LLM to either call the tool or give an explanation.
+                if (
+                    not llm_resp.tools_call_name
+                    and not self._has_meaningful_assistant_reply(llm_resp)
+                ):
+                    logger.warning(
+                        "skills_like tool re-query returned no tool calls and no explanation; retrying with stronger instruction."
+                    )
+                    repair_contexts = self._build_tool_requery_context(
+                        tool_names,
+                        extra_instruction=self.SKILLS_LIKE_REQUERY_REPAIR_INSTRUCTION,
+                    )
+                    repair_resp = await self.provider.text_chat(
+                        contexts=self._sanitize_contexts_for_provider(repair_contexts),
+                        func_tool=param_subset,
+                        model=self.req.model,
+                        session_id=self.req.session_id,
+                        extra_user_content_parts=self.req.extra_user_content_parts,
+                        # tool_choice="required",
+                        abort_signal=self._abort_signal,
+                        request_max_retries=self.request_max_retries,
+                    )
+                    if repair_resp:
+                        llm_resp = repair_resp
+                        self._sanitize_malformed_tool_calls(llm_resp)
+
+        return llm_resp, subset
+
+    def done(self) -> bool:
+        """检查 Agent 是否已完成工作"""
+        return self._state in (AgentState.DONE, AgentState.ERROR)
+
+    def request_stop(self) -> None:
+        self._abort_signal.set()
+
+    def _is_stop_requested(self) -> bool:
+        return self._abort_signal.is_set()
+
+    def is_tool_executing(self) -> bool:
+        """当前是否有工具调用正在执行（供工具防打断判断）。"""
+        return self._tool_executing is not None
+
+    def was_aborted(self) -> bool:
+        return self._aborted
+
+    def get_final_llm_resp(self) -> LLMResponse | None:
+        return self.final_llm_resp
+
+    async def _finalize_aborted_step(
+        self,
+        llm_resp: LLMResponse | None = None,
+        completed_blocks: list[ToolCallMessageSegment] | None = None,
+        interrupted_tool_call_id: str | None = None,
+    ) -> AgentResponse:
+        """结束被打断的一步。
+
+        历史只保留已向用户/下游产出的内容：
+        - 流式：已 yield 的 streaming_delta 文本
+        - 非流式：若完整回复尚未交付给下游，则不写入 assistant 正文
+        - 工具调用中断时：写入 tool_calls + 工具结果；串行执行下已完成的工具
+          保留真实结果，被中断的工具写中断提示，未执行的工具写未执行提示
+        """
+        logger.info("Agent execution was requested to stop by user.")
+        delivered = (getattr(self, "_streamed_assistant_text", "") or "").strip()
+        if llm_resp is None:
+            llm_resp = LLMResponse(role="assistant", completion_text=delivered)
+        elif llm_resp.role != "assistant":
+            llm_resp = LLMResponse(
+                role="assistant",
+                completion_text=delivered,
+                reasoning_content=llm_resp.reasoning_content,
+                reasoning_signature=llm_resp.reasoning_signature,
+                tools_call_args=llm_resp.tools_call_args,
+                tools_call_name=llm_resp.tools_call_name,
+                tools_call_ids=llm_resp.tools_call_ids,
+                tools_call_extra_content=llm_resp.tools_call_extra_content,
+            )
+        else:
+            # 避免把未发出的完整生成写入历史；流式以已产出文本为准
+            if self.streaming:
+                llm_resp = LLMResponse(
+                    role="assistant",
+                    completion_text=delivered,
+                    reasoning_content=llm_resp.reasoning_content,
+                    reasoning_signature=llm_resp.reasoning_signature,
+                    tools_call_args=llm_resp.tools_call_args,
+                    tools_call_name=llm_resp.tools_call_name,
+                    tools_call_ids=llm_resp.tools_call_ids,
+                    tools_call_extra_content=llm_resp.tools_call_extra_content,
+                )
+            else:
+                # 非流式：中断时通常尚未 set_result/发送，不保留正文
+                llm_resp = LLMResponse(
+                    role="assistant",
+                    completion_text="",
+                    reasoning_content=None,
+                    reasoning_signature=llm_resp.reasoning_signature,
+                    tools_call_args=llm_resp.tools_call_args,
+                    tools_call_name=llm_resp.tools_call_name,
+                    tools_call_ids=llm_resp.tools_call_ids,
+                    tools_call_extra_content=llm_resp.tools_call_extra_content,
+                )
+
+        self.final_llm_resp = llm_resp
+        self._aborted = True
+        self._transition_state(AgentState.DONE)
+        self.stats.end_time = time.time()
+
+        # 构造 assistant 消息的 parts
+        parts = []
+        if delivered:
+            parts.append(TextPart(text=delivered))
+
+        # 如果有工具调用：写入 tool_calls + 工具结果，让 LLM 知道工具的执行情况
+        has_tool_calls = bool(llm_resp.tools_call_name)
+        if has_tool_calls:
+            # assistant 消息（含 tool_calls）
+            if parts:
+                self.run_context.messages.append(
+                    Message(role="assistant", content=parts, tool_calls=llm_resp.to_openai_to_calls_model())
+                )
+            else:
+                self.run_context.messages.append(
+                    Message(role="assistant", content=None, tool_calls=llm_resp.to_openai_to_calls_model())
+                )
+
+            # 串行执行：中断前已完成的工具保留真实结果，只有真正被中断的那个工具
+            # 写中断提示，其余未执行的工具不写（不能所有工具都标成被中断）
+            completed_blocks = completed_blocks or []
+            for block in completed_blocks:
+                self.run_context.messages.append(
+                    Message(
+                        role="tool",
+                        content=block.content,
+                        tool_call_id=block.tool_call_id,
+                    )
+                )
+            handled_ids = {block.tool_call_id for block in completed_blocks}
+            tool_call_ids = llm_resp.tools_call_ids or []
+            tool_call_names = llm_resp.tools_call_name or []
+            for i, call_id in enumerate(tool_call_ids):
+                if call_id in handled_ids:
+                    continue
+                tool_name = tool_call_names[i] if i < len(tool_call_names) else "unknown"
+                if interrupted_tool_call_id and call_id == interrupted_tool_call_id:
+                    # 真正被中断的那个工具：写中断提示
+                    result = (
+                        f"<system_reminder>"
+                        f"The tool '{tool_name}' was interrupted because the user actively requested to stop. "
+                        f"The execution was incomplete."
+                        f"</system_reminder>"
+                    )
+                else:
+                    # 未执行到的工具：写未执行提示（每个 tool_call 都必须有结果，否则历史不完整）
+                    result = (
+                        f"<system_reminder>"
+                        f"The tool '{tool_name}' was not executed because the user actively requested to stop."
+                        f"</system_reminder>"
+                    )
+                self.run_context.messages.append(
+                    Message(role="tool", content=result, tool_call_id=call_id)
+                )
+        else:
+            # 无工具调用：仅当确有已交付正文时才追加 assistant
+            if parts:
+                self.run_context.messages.append(Message(role="assistant", content=parts))
+
+        try:
+            await self.agent_hooks.on_agent_done(self.run_context, llm_resp)
+        except Exception as e:
+            logger.error(f"Error in on_agent_done hook: {e}", exc_info=True)
+
+        self._resolve_unconsumed_follow_ups()
+        return AgentResponse(
+            type="aborted",
+            data=AgentResponseData(chain=MessageChain(type="aborted")),
+        )
+
+    async def _close_executor(self, executor: T.Any) -> None:
+        close_executor = getattr(executor, "aclose", None)
+        if close_executor is None:
+            return
+        with suppress(asyncio.CancelledError, RuntimeError, StopAsyncIteration):
+            await close_executor()
+
+    async def _iter_tool_executor_results(
+        self,
+        executor: T.AsyncGenerator[ToolExecutorResultT, None],
+        completed_blocks: list[ToolCallMessageSegment],
+        current_tool_call_id: str,
+    ) -> T.AsyncGenerator[ToolExecutorResultT, None]:
+        async def _next_executor_result() -> ToolExecutorResultT:
+            return await anext(executor)
+
+        while True:
+            if self._is_stop_requested():
+                await self._close_executor(executor)
+                raise _ToolExecutionInterrupted(
+                    "Tool execution interrupted because the user actively requested to stop, "
+                    "before reading the next tool result.",
+                    completed_blocks=list(completed_blocks),
+                    interrupted_tool_call_id=current_tool_call_id,
+                )
+
+            next_result_task = asyncio.create_task(_next_executor_result())
+            abort_task = asyncio.create_task(self._abort_signal.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {next_result_task, abort_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if abort_task in done:
+                    if not next_result_task.done():
+                        next_result_task.cancel()
+                        with suppress(asyncio.CancelledError, StopAsyncIteration):
+                            await next_result_task
+
+                    await self._close_executor(executor)
+
+                    raise _ToolExecutionInterrupted(
+                        "Tool execution interrupted because the user actively requested to stop.",
+                        completed_blocks=list(completed_blocks),
+                        interrupted_tool_call_id=current_tool_call_id,
+                    )
+
+                try:
+                    yield next_result_task.result()
+                except StopAsyncIteration:
+                    return
+            finally:
+                if not abort_task.done():
+                    abort_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await abort_task

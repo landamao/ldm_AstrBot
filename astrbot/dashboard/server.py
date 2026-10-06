@@ -1,0 +1,799 @@
+import asyncio
+import ipaddress
+import mimetypes
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+from typing import Any, Protocol, cast
+
+import jwt
+import psutil
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from hypercorn.asyncio import serve
+from hypercorn.config import Config as HyperConfig
+from hypercorn.logging import AccessLogAtoms
+from hypercorn.logging import Logger as HypercornLogger
+
+from astrbot.core import logger
+from astrbot.core.config.astrbot_config import warn_deprecated_reset_env_vars
+from astrbot.core.config.default import VERSION
+from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
+from astrbot.core.dashboard_assets import resolve_dashboard_dist
+from astrbot.core.db import BaseDatabase
+from astrbot.core.utils.io import get_local_ip_addresses
+from astrbot.dashboard.asgi_runtime import (
+    DashboardRequestState,
+    FastAPIAppAdapter,
+)
+from astrbot.dashboard.responses import error
+from astrbot.dashboard.services.backup_service import CHUNK_SIZE
+from astrbot.dashboard.services.chat_service import MAX_UPLOAD_FILE_SIZE_BYTES
+from astrbot.dashboard.services.config_service import MAX_FILE_BYTES
+
+from .api.app import create_dashboard_asgi_app
+from .api.auth import _auth_scheme_and_credentials
+from .plugin_page_auth import PluginPageAuth
+from .services.auth_service import DASHBOARD_JWT_COOKIE_NAME
+
+try:  # 与 starlette.requests 保持同一套 media type 判定，堵住前导空格绕过
+    from python_multipart.multipart import parse_options_header
+except ImportError:  # pragma: no cover
+    try:
+        from multipart.multipart import parse_options_header
+    except ImportError:
+        parse_options_header = None
+
+if os.name == "nt":
+    # Windows 的 mimetypes 会把 .svg 映射成非标准的 image/svg,这里强制覆盖为标准类型
+    mimetypes.add_type("image/svg+xml", ".svg", strict=True)
+
+# multipart 的框架开销（boundary、part 头）叠加在文件载荷之上，整文件上传路由
+# 需要在文件大小上限之外留出余量，否则恰好压线的文件会被误判 413。
+_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+
+# 按路由前缀覆盖默认请求体上限的表。更具体的前缀必须放在前面；
+# 未列出的路由回退到默认值；不带 Content-Length 的请求放行，
+# 由各端点保存时的 max_bytes 检查兜底。
+_BODY_LIMIT_OVERRIDES: tuple[tuple[str, int], ...] = (
+    ("/api/v1/backups/upload/chunk", CHUNK_SIZE * 2),
+    ("/api/backup/upload/chunk", CHUNK_SIZE * 2),
+    ("/api/v1/files", MAX_UPLOAD_FILE_SIZE_BYTES + _MULTIPART_OVERHEAD_BYTES),
+    (
+        "/api/chat/post_file",
+        MAX_UPLOAD_FILE_SIZE_BYTES + _MULTIPART_OVERHEAD_BYTES,
+    ),
+    ("/api/v1/plugins/config-files", MAX_FILE_BYTES + _MULTIPART_OVERHEAD_BYTES),
+    (
+        "/api/v1/knowledge-bases/",
+        MAX_UPLOAD_FILE_SIZE_BYTES + _MULTIPART_OVERHEAD_BYTES,
+    ),
+)
+
+
+# 有请求体语义的方法；411 补丁只作用于这些方法——
+# 无body方法（GET 等）不会触发表单解析及其磁盘暂存。
+_BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+
+def _check_body_limit(
+    path: str,
+    content_length: int | None,
+    content_type: str,
+    *,
+    method: str = "POST",
+    default_limit: int,
+) -> tuple[int, str] | None:
+    """判断一个 /api 请求体是否应在解析前被拒绝。
+
+    Returns:
+        拒绝时返回 (status_code, message)；放行返回 None。
+
+    Note:
+        411 规则是针对带 body 语义方法上 multipart 上传的补丁：这类请求
+        的表单解析会在任何按文件大小检查执行之前把大 body 暂存到磁盘，
+        因此必须先声明 Content-Length 才能提前限定。其他不带
+        Content-Length 的 body 仍只能靠保存时检查兜底；要彻底封死需要
+        在字节到达时计数，超出本次改动范围。
+    """
+    if not path.startswith("/api"):
+        return None
+    if content_length is None:
+        if method not in _BODY_METHODS:
+            return None
+        # 用表单解析器同一套规则识别 media type：parse_options_header
+        # 会去掉首尾空白，startswith() 会漏掉的前导空格 Content-Type
+        # 在这里仍能拦住。
+        media_type = (
+            parse_options_header(content_type)[0] if parse_options_header else b""
+        )
+        if media_type == b"multipart/form-data":
+            return 411, "上传请求必须携带 Content-Length 头"
+        return None
+    limit = default_limit
+    for prefix, route_limit in _BODY_LIMIT_OVERRIDES:
+        if path.startswith(prefix):
+            limit = route_limit
+            break
+    if content_length > limit:
+        return 413, f"请求体超过大小上限（{limit} 字节）"
+    return None
+
+
+_RATE_LIMITED_ENDPOINTS: frozenset = frozenset(
+    {
+        "/api/config/astrbot/update",
+        "/api/auth/totp/setup",
+        "/api/v1/auth/totp/setup",
+        "/api/auth/login",
+        "/api/v1/auth/login",
+    }
+)
+
+
+class _AuthRateLimiter:
+    def __init__(self, capacity: int, refill_rate: float):
+        self.capacity = capacity
+        self.refill_rate = refill_rate
+        self.tokens = float(capacity)
+        self.last_refill = time.monotonic()
+        self.last_accessed = time.monotonic()
+        self.lock = asyncio.Lock()
+
+    async def acquire(self) -> bool:
+        async with self.lock:
+            now = time.monotonic()
+            elapsed = now - self.last_refill
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
+            self.last_refill = now
+            self.last_accessed = now
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return True
+            return False
+
+
+class _RateLimiterRegistry:
+    """Per-IP token-bucket rate limiter registry. Idle entries expire after 1 hour."""
+
+    _ENTRY_TTL: float = 3600.0
+    _INTERVAL: float = 1800.0
+
+    def __init__(self) -> None:
+        self._limiters: dict[str, _AuthRateLimiter] = {}
+        self._last_eviction = time.monotonic()
+
+    def get_or_create(
+        self, key: str, capacity: int, refill_rate: float
+    ) -> _AuthRateLimiter:
+        self._evict_expired()
+        limiter = self._limiters.get(key)
+        if limiter is None:
+            limiter = _AuthRateLimiter(capacity=capacity, refill_rate=refill_rate)
+            self._limiters[key] = limiter
+        return limiter
+
+    def _evict_expired(self) -> None:
+        now = time.monotonic()
+        if now - self._last_eviction < self._INTERVAL:
+            return
+        self._last_eviction = now
+        cutoff = now - self._ENTRY_TTL
+        stale = [k for k, v in self._limiters.items() if v.last_accessed < cutoff]
+        for k in stale:
+            del self._limiters[k]
+
+    def clear(self) -> None:
+        self._limiters.clear()
+
+    def __len__(self) -> int:
+        return len(self._limiters)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._limiters
+
+
+class _AddrWithPort(Protocol):
+    port: int
+
+
+APP: FastAPIAppAdapter | None = None
+
+
+def _parse_env_bool(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+class _ChineseHypercornLogger(HypercornLogger):
+    async def info(self, message: str, *args: Any, **kwargs: Any) -> None:
+        if message.startswith("Running on "):
+            message = "正在运行于 " + message[len("Running on "):]
+        elif message == "CTRL + C to quit":
+            message = "按 Ctrl+C 退出"
+        await super().info(message, *args, **kwargs)
+
+
+class _ProxyAwareHypercornLogger(_ChineseHypercornLogger):
+    @staticmethod
+    def _get_request_log_host(request_scope) -> str | None:
+        forwarded_for = None
+        real_ip = None
+        for raw_name, raw_value in request_scope.get("headers", []):
+            header_name = raw_name.decode("latin1").lower()
+            if header_name == "x-forwarded-for":
+                forwarded_for = raw_value.decode("latin1")
+            elif header_name == "x-real-ip":
+                real_ip = raw_value.decode("latin1")
+
+            if forwarded_for is not None and real_ip is not None:
+                break
+
+        forwarded_for = str(forwarded_for or "").strip()
+        if forwarded_for:
+            first_ip = forwarded_for.split(",", 1)[0].strip()
+            if first_ip and first_ip.lower() != "unknown":
+                try:
+                    return str(ipaddress.ip_address(first_ip))
+                except ValueError:
+                    pass
+
+        real_ip = str(real_ip or "").strip()
+        if real_ip and real_ip.lower() != "unknown":
+            try:
+                return str(ipaddress.ip_address(real_ip))
+            except ValueError:
+                pass
+
+        client = request_scope.get("client")
+        if not client:
+            return None
+        host = str(client[0]).strip()
+        if host:
+            return host
+        return None
+
+    def atoms(self, request, response, request_time):
+        atoms = AccessLogAtoms(request, response, request_time)
+        client_host = self._get_request_log_host(request)
+        if client_host:
+            atoms["h"] = client_host
+        return atoms
+
+
+class AstrBotDashboard:
+    def __init__(
+        self,
+        core_lifecycle: AstrBotCoreLifecycle,
+        db: BaseDatabase,
+        shutdown_event: asyncio.Event,
+        webui_dir: str | None = None,
+    ) -> None:
+        self.core_lifecycle = core_lifecycle
+        self.config = core_lifecycle.astrbot_config
+        self.db = db
+
+        # Path priority（统一委托 resolve_dashboard_dist）:
+        # 1. 显式指定的 webui_dir 参数（存在即用）
+        # 2. 项目根 dashboard/dist（源码内置，优先）
+        # 3. 随包 astrbot/dashboard/dist
+        # 4. data/dist（历史遗留，仅作最后回退）
+        if webui_dir and not os.path.exists(webui_dir):
+            logger.warning(
+                "指定的 WebUI 目录不存在: %s，将使用默认解析逻辑。",
+                webui_dir,
+            )
+            webui_dir = None
+        resolved_dist = resolve_dashboard_dist(webui_dir)
+        self.data_path = str(resolved_dist) if resolved_dist is not None else None
+
+        self._rate_limiter_registry = _RateLimiterRegistry()
+        self._init_jwt_secret()
+        self.asgi_app = create_dashboard_asgi_app(
+            core_lifecycle=core_lifecycle,
+            db=db,
+            jwt_secret=self._jwt_secret,
+            static_folder=self.data_path,
+        )
+        self.app = FastAPIAppAdapter(self.asgi_app, static_folder=self.data_path)
+        self.asgi_app.state.dashboard_app_adapter = self.app
+        self.app._dashboard_server = self
+        global APP
+        APP = self.app
+        self.app.config["MAX_CONTENT_LENGTH"] = (
+            128 * 1024 * 1024
+        )  # 将 Flask 允许的最大上传文件体大小设置为 128 MB
+
+        @self.asgi_app.middleware("http")
+        async def dashboard_auth_middleware(request_, call_next):
+            request_.state.dashboard_g = DashboardRequestState()
+            auth_response = await self.auth_middleware(request_)
+            if auth_response is not None:
+                return auth_response
+            return await call_next(request_)
+
+        @self.asgi_app.middleware("http")
+        async def dashboard_body_limit_middleware(request_, call_next):
+            # 注册在鉴权中间件之后，因此运行在最外层，
+            # 可以在任何解析发生前拒绝超限请求体。
+            raw_length = request_.headers.get("content-length")
+            try:
+                content_length = int(raw_length) if raw_length else None
+            except ValueError:
+                content_length = None
+            rejection = _check_body_limit(
+                request_.url.path,
+                content_length,
+                request_.headers.get("content-type", ""),
+                method=request_.method,
+                default_limit=self.app.config["MAX_CONTENT_LENGTH"],
+            )
+            if rejection is not None:
+                status_code, message = rejection
+                return JSONResponse(error(message), status_code=status_code)
+            return await call_next(request_)
+
+        self.shutdown_event = shutdown_event
+
+    async def auth_middleware(self, current_request: Request):
+        path = current_request.url.path
+        if not path.startswith("/api"):
+            return None
+        rate_limit_response = await self._apply_auth_rate_limit(current_request, path)
+        if rate_limit_response is not None:
+            return rate_limit_response
+        if path.startswith("/api/v1"):
+            return None
+
+        allowed_exact_endpoints = {
+            "/api/auth/login",
+            "/api/auth/logout",
+            "/api/auth/setup-status",
+            "/api/auth/setup",
+        }
+        allowed_endpoint_prefixes = [
+            "/api/file",
+            "/api/v1/files/tokens",
+            "/api/platform/webhook",
+            # legacy 备份下载：用一次性 ticket query 鉴权，不旁路到无鉴权
+            # （路由内校验 ticket；无 ticket 时仍走 require_dashboard_user）
+            "/api/backup/download",
+        ]
+        if path in allowed_exact_endpoints or any(
+            path.startswith(prefix) for prefix in allowed_endpoint_prefixes
+        ):
+            return None
+        is_plugin_page_path = PluginPageAuth.is_protected_path(path)
+        dashboard_token = self._extract_dashboard_jwt(current_request)
+        asset_token = (
+            PluginPageAuth.extract_asset_token(current_request.query_params)
+            if is_plugin_page_path
+            else None
+        )
+        token_candidates = []
+        if dashboard_token:
+            token_candidates.append(dashboard_token)
+        if asset_token and asset_token != dashboard_token:
+            token_candidates.append(asset_token)
+        if not token_candidates:
+            r = JSONResponse(error("未授权"))
+            r.status_code = 401
+            return r
+
+        token_errors: list[str] = []
+        for token in token_candidates:
+            payload, token_error = self._validate_dashboard_token(token, path)
+            if payload is not None:
+                current_request.state.dashboard_g.username = cast(
+                    str, payload["username"]
+                )
+                return None
+            token_errors.append(token_error)
+
+        error_message = (
+            "Token 过期"
+            if token_errors and all(item == "Token 过期" for item in token_errors)
+            else "Token 无效"
+        )
+        r = JSONResponse(error(error_message))
+        r.status_code = 401
+        return r
+
+    def _validate_dashboard_token(
+        self,
+        token: str,
+        path: str,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Validate a dashboard JWT or scoped plugin page asset token.
+
+        Args:
+            token: JWT value from the Authorization header, cookie, or query string.
+            path: Current request path used for plugin page asset token scope checks.
+
+        Returns:
+            A tuple of the decoded payload and an error message. The payload is
+            present only when the token is valid for the current request path.
+        """
+        try:
+            # 优先读 config 里的最新密钥（改密会轮换）；回退到启动时缓存
+            jwt_secret = (
+                self.config.get("dashboard", {}).get("jwt_secret") or self._jwt_secret
+            )
+            payload = jwt.decode(token, jwt_secret, algorithms=["HS256"])
+        except jwt.ExpiredSignatureError:
+            return None, "Token 过期"
+        except jwt.InvalidTokenError:
+            return None, "Token 无效"
+
+        if PluginPageAuth.is_asset_token(payload) and not PluginPageAuth.is_scope_valid(
+            payload,
+            path,
+        ):
+            return None, "Token 无效"
+
+        username = payload.get("username")
+        if not isinstance(username, str) or not username.strip():
+            return None, "Token 无效"
+
+        return payload, ""
+
+    async def _apply_auth_rate_limit(
+        self,
+        current_request: Request,
+        path: str,
+    ) -> JSONResponse | None:
+        if (
+            os.environ.get("LDMBOT_TEST_MODE") != "true"
+            and path in _RATE_LIMITED_ENDPOINTS
+        ):
+            rl_config = self.config.get("dashboard", {}).get("auth_rate_limit", {})
+            rl_enabled = rl_config.get("enable", True)
+            if rl_enabled:
+                average_interval = float(rl_config.get("average_interval", 1.0))
+                max_burst = int(rl_config.get("max_burst", 3))
+                if average_interval <= 0:
+                    average_interval = 1.0
+                if max_burst <= 0:
+                    max_burst = 3
+                refill_rate = 1.0 / average_interval
+                client_ip = self._get_request_client_ip(current_request)
+                limiter = self._rate_limiter_registry.get_or_create(
+                    client_ip, capacity=max_burst, refill_rate=refill_rate
+                )
+                if not await limiter.acquire():
+                    r = JSONResponse(
+                        error("验证尝试过于频繁，系统可能正在遭受暴力破解")
+                    )
+                    r.status_code = 429
+                    return r
+        return None
+
+    def _get_request_client_ip(self, current_request) -> str:
+        if bool(self.config.get("dashboard", {}).get("trust_proxy_headers", False)):
+            forwarded_for = str(
+                current_request.headers.get("X-Forwarded-For", "")
+            ).strip()
+            if forwarded_for:
+                first_ip = forwarded_for.split(",", 1)[0].strip()
+                if first_ip and first_ip.lower() != "unknown":
+                    try:
+                        return str(ipaddress.ip_address(first_ip))
+                    except ValueError:
+                        pass
+
+            real_ip = str(current_request.headers.get("X-Real-IP", "")).strip()
+            if real_ip and real_ip.lower() != "unknown":
+                try:
+                    return str(ipaddress.ip_address(real_ip))
+                except ValueError:
+                    pass
+
+        remote_addr = (
+            str(current_request.client.host).strip()
+            if current_request.client is not None
+            else ""
+        )
+        if remote_addr:
+            try:
+                return str(ipaddress.ip_address(remote_addr))
+            except ValueError:
+                pass
+
+        return "unknown"
+
+    @staticmethod
+    def _extract_dashboard_jwt(current_request: Request) -> str | None:
+        auth_header = current_request.headers.get("Authorization", "").strip()
+        scheme, credentials = _auth_scheme_and_credentials(auth_header)
+        if scheme == "bearer" and credentials:
+            return credentials
+
+        cookie_token = current_request.cookies.get(
+            DASHBOARD_JWT_COOKIE_NAME,
+            "",
+        ).strip()
+        if cookie_token:
+            return cookie_token
+        return None
+
+    def _prompt_new_port(self) -> int:
+        """Interactively prompt for a new, available WebUI port.
+
+        Keeps asking until the user enters a valid port number (1-65535) that
+        is not currently in use.
+
+        Returns:
+            The chosen available port number.
+        """
+        while True:
+            raw = input("请输入新的端口号 (1-65535): ").strip()
+            try:
+                candidate = int(raw)
+            except ValueError:
+                print("端口号必须是数字，请重新输入。")
+                continue
+            if not (1 <= candidate <= 65535):
+                print("端口号必须在 1-65535 之间，请重新输入。")
+                continue
+            if self.check_port_in_use(candidate):
+                print(f"端口 {candidate} 也被占用了，请换一个。")
+                continue
+            return candidate
+
+    def check_port_in_use(self, port: int) -> bool:
+        """跨平台检测端口是否被占用"""
+        try:
+            # 创建 IPv4 TCP Socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # 设置超时时间
+            sock.settimeout(2)
+            result = sock.connect_ex(("127.0.0.1", port))
+            sock.close()
+            # result 为 0 表示端口被占用
+            return result == 0
+        except Exception as e:
+            logger.warning(f"检查端口 {port} 时发生错误: {e!s}")
+            # 如果出现异常，保守起见认为端口可能被占用
+            return True
+
+    def get_process_using_port(self, port: int) -> str:
+        """获取占用端口的进程详细信息"""
+        try:
+            # 只匹配 LISTEN 连接：残留的 TIME_WAIT 等内核连接不属于任何存活进程
+            for conn in psutil.net_connections(kind="inet"):
+                if conn.status != psutil.CONN_LISTEN:
+                    continue
+                if cast(_AddrWithPort, conn.laddr).port != port:
+                    continue
+                try:
+                    process = psutil.Process(conn.pid)
+                    proc_info = [
+                        f"进程名: {process.name()}",
+                        f"PID: {process.pid}",
+                        f"执行路径: {process.exe()}",
+                        f"工作目录: {process.cwd()}",
+                        f"启动命令: {' '.join(process.cmdline())}",
+                    ]
+                    return "\n           ".join(proc_info)
+                except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                    return f"无法获取进程详细信息(可能需要管理员权限): {e!s}"
+            return "未找到占用进程"
+        except Exception as e:
+            return f"获取进程信息失败: {e!s}"
+
+    def _init_jwt_secret(self) -> None:
+        if not self.config.get("dashboard", {}).get("jwt_secret", None):
+            # 如果没有设置 JWT 密钥，则生成一个新的密钥
+            jwt_secret = os.urandom(32).hex()
+            self.config["dashboard"]["jwt_secret"] = jwt_secret
+            self.config.save_config()
+            logger.info("已为管理面板初始化随机 JWT 密钥。")
+        self._jwt_secret = self.config["dashboard"]["jwt_secret"]
+
+    def _build_dashboard_credentials_display(self) -> str:
+        username = self.config["dashboard"].get("username", "astrbot")
+        generated_password = getattr(self.config, "_generated_dashboard_password", None)
+        if not generated_password:
+            return f"   ➜  用户名: {username}\n ✨✨✨\n"
+
+        credentials_display = (
+            f"   ➜  初始用户名: {username}\n"
+            f"   ➜  初始密码: {generated_password}\n"
+            "   ➜  登录后请及时修改\n ✨✨✨\n"
+        )
+        object.__setattr__(self.config, "_generated_dashboard_password", None)
+        return credentials_display
+
+    @staticmethod
+    def _resolve_dashboard_ssl_config(
+        ssl_config: dict,
+    ) -> tuple[bool, dict[str, str]]:
+        cert_file = (
+            os.environ.get("LDMBOT_DASHBOARD_SSL_CERT")
+            or ssl_config.get("cert_file", "")
+        )
+        key_file = (
+            os.environ.get("LDMBOT_DASHBOARD_SSL_KEY")
+            or ssl_config.get("key_file", "")
+        )
+        ca_certs = (
+            os.environ.get("LDMBOT_DASHBOARD_SSL_CA_CERTS")
+            or ssl_config.get("ca_certs", "")
+        )
+
+        if not cert_file or not key_file:
+            logger.warning(
+                "dashboard.ssl.enable 已启用，但未同时配置 cert_file 和 key_file，SSL 已禁用。",
+            )
+            return False, {}
+
+        cert_path = Path(cert_file).expanduser()
+        key_path = Path(key_file).expanduser()
+        if not cert_path.is_file():
+            logger.warning(
+                f"dashboard.ssl.enable 已启用，但 SSL 证书文件不存在: {cert_path}，SSL 已禁用。",
+            )
+            return False, {}
+        if not key_path.is_file():
+            logger.warning(
+                f"dashboard.ssl.enable 已启用，但 SSL 私钥文件不存在: {key_path}，SSL 已禁用。",
+            )
+            return False, {}
+
+        resolved_ssl_config = {
+            "certfile": str(cert_path.resolve()),
+            "keyfile": str(key_path.resolve()),
+        }
+
+        if ca_certs:
+            ca_path = Path(ca_certs).expanduser()
+            if not ca_path.is_file():
+                logger.warning(
+                    f"dashboard.ssl.enable 已启用，但 SSL CA 证书文件不存在: {ca_path}，SSL 已禁用。",
+                )
+                return False, {}
+            resolved_ssl_config["ca_certs"] = str(ca_path.resolve())
+
+        return True, resolved_ssl_config
+
+    def run(self):
+        ip_addr = []
+        dashboard_config = self.core_lifecycle.astrbot_config.get("dashboard", {})
+        port = (
+            os.environ.get("LDMBOT_DASHBOARD_PORT")
+            or dashboard_config.get("port", 6185)
+        )
+        host = (
+            os.environ.get("LDMBOT_DASHBOARD_HOST")
+            or dashboard_config.get("host", "0.0.0.0")
+        )
+        enable = dashboard_config.get("enable", True)
+        ssl_config = dashboard_config.get("ssl", {})
+        if not isinstance(ssl_config, dict):
+            ssl_config = {}
+        ssl_enable = _parse_env_bool(
+            os.environ.get("LDMBOT_DASHBOARD_SSL_ENABLE"),
+            bool(ssl_config.get("enable", False)),
+        )
+        resolved_ssl_config: dict[str, str] = {}
+        if ssl_enable:
+            ssl_enable, resolved_ssl_config = self._resolve_dashboard_ssl_config(
+                ssl_config,
+            )
+        scheme = "https" if ssl_enable else "http"
+
+        if not enable:
+            logger.info("WebUI 已被禁用。")
+            return None
+
+        logger.info("正在启动 WebUI，监听地址: %s://%s:%s", scheme, host, port)
+        if host == "0.0.0.0":
+            logger.info(
+                "提示: WebUI 将监听所有网络接口，请注意安全。（可在 data/cmd_config.json 中配置 dashboard.host 以修改 host）",
+            )
+
+        if host not in ["localhost", "127.0.0.1"]:
+            try:
+                ip_addr = get_local_ip_addresses()
+            except Exception as _:
+                pass
+        if isinstance(port, str):
+            port = int(port)
+
+        if self.check_port_in_use(port):
+            process_info = self.get_process_using_port(port)
+            logger.error(
+                f"错误：端口 {port} 已被占用\n"
+                f"占用信息: \n           {process_info}\n"
+                f"请确保：\n"
+                f"1. 没有其他 ldm 实例正在运行\n"
+                f"2. 端口 {port} 没有被其他程序占用\n"
+                f"3. 如需使用其他端口，请修改配置文件",
+            )
+
+            # Customized: when running interactively, offer to switch to a new
+            # port, persist it to the config, then prompt for a restart and exit.
+            if sys.stdin and sys.stdin.isatty():
+                # 启动横幅动画播放期间，直接写 stdout 的交互提示会被
+                # 动画覆盖（loguru 日志有挂起机制，input 没有）。
+                # 等待横幅播放结束再询问，避免 (y/N) 提示被遮挡。
+                try:
+                    _main_module = sys.modules.get("__main__")
+                    if (
+                        _main_module is not None
+                        and hasattr(_main_module, "is_startup_banner_running")
+                        and _main_module.is_startup_banner_running()
+                    ):
+                        _main_module.wait_startup_banner()
+                except Exception:
+                    pass
+                answer = (
+                    input(f"端口 {port} 已被占用，是否使用其他端口？(y/N): ")
+                    .strip()
+                    .lower()
+                )
+                if answer == "y":
+                    new_port = self._prompt_new_port()
+                    self.config["dashboard"]["port"] = new_port
+                    self.config.save_config()
+                    logger.info(
+                        f"已将 WebUI 端口写入配置文件为 {new_port}，请重启 ldm 生效。"
+                    )
+                    print(f"已将端口修改为 {new_port} 并写入配置文件，请重启 ldm。")
+                    sys.exit(0)
+
+            raise Exception(f"端口 {port} 已被占用")
+
+        if self.data_path and (Path(self.data_path) / "index.html").is_file():
+            webui_status = "WebUI 已就绪"
+        else:
+            webui_status = (
+                f"WebUI 未就绪：静态文件缺失，路径: {self.data_path}"
+            )
+        parts = [f"\n ✨✨✨\n  ldm v{VERSION} {webui_status}\n\n"]
+        parts.append(f"   ➜  本地: {scheme}://localhost:{port}\n")
+        for ip in ip_addr:
+            parts.append(f"   ➜  网络: {scheme}://{ip}:{port}\n")
+        parts.append(self._build_dashboard_credentials_display())
+        display = "".join(parts)
+
+        if not ip_addr:
+            display += (
+                "可在 data/cmd_config.json 中配置 dashboard.host 以便远程访问。\n"
+            )
+
+        logger.info(display)
+
+        # WebUI 就绪后补打一次废弃环境变量警告：配置加载期那条容易被启动日志刷掉
+        warn_deprecated_reset_env_vars("dashboard_ready")
+
+        # 配置 Hypercorn
+        config = HyperConfig()
+        config.bind = [f"{host}:{port}"]
+        config.logger_class = _ProxyAwareHypercornLogger
+        if ssl_enable:
+            config.certfile = resolved_ssl_config["certfile"]
+            config.keyfile = resolved_ssl_config["keyfile"]
+            if "ca_certs" in resolved_ssl_config:
+                config.ca_certs = resolved_ssl_config["ca_certs"]
+
+        # 根据配置决定是否禁用访问日志
+        disable_access_log = dashboard_config.get("disable_access_log", True)
+        if disable_access_log:
+            config.accesslog = None
+        else:
+            # 启用访问日志，使用简洁格式
+            config.accesslog = "-"
+            config.access_log_format = "%(h)s %(r)s %(s)s %(b)s %(D)s"
+
+        return serve(
+            cast(Any, self.asgi_app), config, shutdown_trigger=self.shutdown_trigger
+        )
+
+    async def shutdown_trigger(self) -> None:
+        await self.shutdown_event.wait()
+        logger.info("ldm WebUI 已经被关闭")

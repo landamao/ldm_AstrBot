@@ -1,0 +1,8 @@
+{
+    "懒大猫": {
+        "description": "你想配置懒大猫？",
+        "type": "text",
+        "default": "",
+        "hint": "你想怎么配置懒大猫呢，配置懒大猫当你的…，还是来交流群配置吧，qq群 → 1103659691，telegram → @landamaogroup"
+    }
+}

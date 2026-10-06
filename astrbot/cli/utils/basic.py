@@ -1,0 +1,82 @@
+import os
+from pathlib import Path
+
+import click
+
+# Static assets bundled inside the installed wheel (built by hatch_build.py).
+_BUNDLED_DIST = Path(__file__).parent.parent.parent / "dashboard" / "dist"
+
+
+def check_astrbot_root(path: str | Path) -> bool:
+    """Check if the path is an AstrBot root directory"""
+    if not isinstance(path, Path):
+        path = Path(path)
+    if not path.exists() or not path.is_dir():
+        return False
+    if not (path / ".astrbot").exists():
+        return False
+    return True
+
+
+def get_astrbot_root() -> Path:
+    """Get the AstrBot root directory path"""
+    return Path.cwd()
+
+
+def resolve_cli_data_path(project_root: Path | None = None) -> Path:
+    """Resolve the data directory for CLI commands.
+
+    1. 从项目根加载 .env（示例模板缺失时生成 .env.example）
+    2. 优先 LDMBOT_DATA_DIR，其次 LDMBOT_ROOT/data，最后 <cwd>/data
+    """
+    from astrbot.utils.env_file import bootstrap_env
+
+    root = (project_root or get_astrbot_root()).resolve()
+    bootstrap_env(str(root))
+
+    # 未显式配置时，默认 data = <项目根>/data，与 main.py 行为一致
+    if not os.environ.get("LDMBOT_DATA_DIR") and not os.environ.get("LDMBOT_ROOT"):
+        os.environ["LDMBOT_ROOT"] = str(root)
+
+    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+    return Path(get_astrbot_data_path())
+
+
+async def check_dashboard(astrbot_root: Path) -> None:
+    """检查管理面板是否可用；不自动下载或覆盖本地 WebUI。"""
+    from astrbot.core.config.default import VERSION
+    from astrbot.core.utils.io import get_dashboard_version
+
+    from .version_comparator import VersionComparator
+
+    # If the wheel ships bundled dashboard assets, no network download is needed.
+    if _BUNDLED_DIST.exists() or (astrbot_root / "dashboard" / "dist").exists():
+        click.echo("Dashboard is bundled with the package – skipping download.")
+        return
+
+    try:
+        dashboard_version = await get_dashboard_version()
+        match dashboard_version:
+            case None:
+                click.echo(
+                    "Dashboard is not installed. 已禁用 WebUI 自动下载；"
+                    "请构建 dashboard 并部署到项目根 dashboard/dist，或重新安装 ldm（安装包自带 WebUI）。"
+                )
+                return
+
+            case str():
+                if VersionComparator.compare_version(VERSION, dashboard_version) <= 0:
+                    click.echo("Dashboard is already up to date")
+                    return
+                click.echo(
+                    f"Dashboard version: {dashboard_version}. 已禁用 WebUI 自动下载/覆盖，"
+                    "请重新构建 dashboard 并部署到项目根 dashboard/dist。"
+                )
+                return
+    except FileNotFoundError:
+        click.echo(
+            "Dashboard directory is missing. 已禁用 WebUI 自动下载；"
+            "请构建 dashboard 并部署到项目根 dashboard/dist，或重新安装 ldm（安装包自带 WebUI）。"
+        )
+        return

@@ -1,0 +1,588 @@
+import base64
+import inspect
+import logging
+import os
+import re
+import shutil
+import socket
+import ssl
+import time
+import uuid
+import zipfile
+from pathlib import Path
+from typing import cast
+from urllib.parse import unquote, urlparse
+
+import aiohttp
+import certifi
+import psutil
+from PIL import Image
+
+from .astrbot_path import get_astrbot_data_path, get_astrbot_path, get_astrbot_temp_path
+from .version_comparator import VersionComparator
+
+logger = logging.getLogger("astrbot")
+
+
+def _safe_url_for_log(url: str) -> str:
+    """Return a URL summary that omits query strings and fragments.
+
+    Args:
+        url: URL that may contain signed query parameters.
+
+    Returns:
+        A short description suitable for logs.
+    """
+
+    parsed = urlparse(url)
+    if parsed.scheme in {"http", "https"}:
+        filename = Path(unquote(parsed.path or "")).name
+        suffix = f" file={filename!r}" if filename else ""
+        return f"{parsed.scheme} URL host={parsed.netloc!r}{suffix} len={len(url)}"
+    return f"URL len={len(url)}"
+
+
+def _remove_partial_download(path: str) -> None:
+    """下载中断后尽力移除半成品文件。"""
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError as e:
+        logger.debug("移除未完成的下载文件失败 %s: %s", path, e)
+
+
+def on_error(func, path, exc_info) -> None:
+    """A callback of the rmtree function."""
+    import stat
+
+    if not os.access(path, os.W_OK):
+        os.chmod(path, stat.S_IWUSR)
+        func(path)
+    else:
+        raise exc_info[1]
+
+
+def remove_dir(file_path: str) -> bool:
+    if not os.path.lexists(file_path):
+        return True
+    if os.path.isfile(file_path) or os.path.islink(file_path):
+        os.remove(file_path)
+    else:
+        shutil.rmtree(file_path, onerror=on_error)
+    return True
+
+
+def ensure_dir(dir_path: str | Path) -> None:
+    """确保目录存在。如果路径处存在非目录的文件或损坏的符号链接，则先将其删除。"""
+    p = Path(dir_path)
+    if (p.exists() or p.is_symlink()) and not p.is_dir():
+        logger.warning(f"路径 {p} 已存在但不是目录，正在清理以创建目录。")
+        try:
+            if p.is_dir():
+                shutil.rmtree(p, onerror=on_error)
+            else:
+                p.unlink()
+        except Exception as e:
+            logger.error(f"清理冲突路径 {p} 失败: {e!s}")
+            raise RuntimeError(f"无法清理冲突路径 {p}：{e!s}") from e
+
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.error(f"创建目录 {p} 失败: {e!s}")
+        raise RuntimeError(f"无法创建目录 {p}：{e!s}") from e
+
+
+def port_checker(port: int, host: str = "localhost") -> bool:
+    sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sk.settimeout(1)
+    try:
+        sk.connect((host, port))
+        sk.close()
+        return True
+    except Exception:
+        sk.close()
+        return False
+
+
+def save_temp_img(img: Image.Image | bytes) -> str:
+    temp_dir = get_astrbot_temp_path()
+    # 获得时间戳
+    timestamp = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    p = os.path.join(temp_dir, f"io_temp_img_{timestamp}.jpg")
+
+    if isinstance(img, Image.Image):
+        cast(Image.Image, img).save(p)
+    else:
+        with open(p, "wb") as f:
+            f.write(img)
+    return p
+
+
+async def download_image_by_url(
+    url: str,
+    post: bool = False,
+    post_data: dict | None = None,
+    path: str | None = None,
+) -> str:
+    """下载图片, 返回 path"""
+    try:
+        ssl_context = ssl.create_default_context(
+            cafile=certifi.where(),
+        )  # 使用 certifi 提供的 CA 证书
+        connector = aiohttp.TCPConnector(ssl=ssl_context)  # 使用 certifi 的根证书
+        async with aiohttp.ClientSession(
+            trust_env=True,
+            connector=connector,
+        ) as session:
+            if post:
+                async with session.post(url, json=post_data) as resp:
+                    if not path:
+                        return save_temp_img(await resp.read())
+                    with open(path, "wb") as f:
+                        f.write(await resp.read())
+                    return path
+            else:
+                async with session.get(url) as resp:
+                    if not path:
+                        return save_temp_img(await resp.read())
+                    with open(path, "wb") as f:
+                        f.write(await resp.read())
+                    return path
+    except (aiohttp.ClientConnectorSSLError, aiohttp.ClientConnectorCertificateError):
+        # 关闭SSL验证（仅在证书验证失败时作为fallback）
+        logger.warning(
+            f"SSL certificate verification failed for {_safe_url_for_log(url)}. "
+            "Disabling SSL verification (CERT_NONE) as a fallback. "
+            "This is insecure and exposes the application to man-in-the-middle attacks. "
+            "Please investigate and resolve certificate issues."
+        )
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        async with aiohttp.ClientSession() as session:
+            if post:
+                async with session.post(url, json=post_data, ssl=ssl_context) as resp:
+                    if not path:
+                        return save_temp_img(await resp.read())
+                    with open(path, "wb") as f:
+                        f.write(await resp.read())
+                    return path
+            else:
+                async with session.get(url, ssl=ssl_context) as resp:
+                    if not path:
+                        return save_temp_img(await resp.read())
+                    with open(path, "wb") as f:
+                        f.write(await resp.read())
+                    return path
+    except Exception as e:
+        raise e
+
+
+async def _emit_download_progress(progress_callback, payload: dict) -> None:
+    if not progress_callback:
+        return
+    result = progress_callback(payload)
+    if inspect.isawaitable(result):
+        await result
+
+
+class DownloadFileHTTPError(RuntimeError):
+    """Raised when a file download returns an unsuccessful HTTP status."""
+
+
+class DownloadFileSizeLimitError(RuntimeError):
+    """下载文件大小超过配置的限制时抛出。"""
+
+    def __init__(self, url: str, size_bytes: int, max_bytes: int) -> None:
+        self.url = url
+        self.size_bytes = size_bytes
+        self.max_bytes = max_bytes
+        super().__init__(
+            f"文件大小超过下载限制: size={size_bytes} max={max_bytes} url={_safe_url_for_log(url)}"
+        )
+
+
+def _raise_for_download_status(resp, url: str) -> None:
+    if resp.status == 200:
+        return
+    logger.error(
+        "Failed to download file from %s. HTTP status code: %s",
+        _safe_url_for_log(url),
+        resp.status,
+    )
+    raise DownloadFileHTTPError(
+        "Failed to download file from "
+        f"{_safe_url_for_log(url)}. HTTP status code: {resp.status}"
+    )
+
+
+async def _download_response_to_file(
+    resp,
+    file_obj,
+    url: str,
+    show_progress: bool,
+    progress_callback,
+    show_downloading_label: bool = True,
+    max_bytes: int | None = None,
+) -> None:
+    """Write a successful download response to a local file.
+
+    Args:
+        resp: aiohttp response object to read from.
+        file_obj: Open writable binary file object.
+        url: Source URL used for progress events and sanitized errors.
+        show_progress: Whether to print progress to stdout.
+        progress_callback: Optional callback for progress payloads.
+        show_downloading_label: Whether to use the standard download heading.
+        max_bytes: Optional maximum number of bytes allowed; exceeding aborts.
+
+    """
+
+    total_size = int(resp.headers.get("content-length", 0))
+    if max_bytes and max_bytes > 0 and total_size > max_bytes:
+        raise DownloadFileSizeLimitError(url, total_size, max_bytes)
+    downloaded_size = 0
+    start_time = time.time()
+    if show_progress:
+        if show_downloading_label:
+            print(
+                f"Downloading: {_safe_url_for_log(url)} | "
+                f"Size: {total_size / 1024:.2f} KB"
+            )
+        else:
+            print(f"Size: {total_size / 1024:.2f} KB | URL: {_safe_url_for_log(url)}")
+    await _emit_download_progress(
+        progress_callback,
+        {
+            "url": url,
+            "downloaded": 0,
+            "total": total_size,
+            "percent": 0,
+            "speed": 0,
+        },
+    )
+    while True:
+        chunk = await resp.content.read(8192)
+        if not chunk:
+            break
+        file_obj.write(chunk)
+        downloaded_size += len(chunk)
+        if max_bytes and max_bytes > 0 and downloaded_size > max_bytes:
+            raise DownloadFileSizeLimitError(url, downloaded_size, max_bytes)
+        elapsed_time = time.time() - start_time if time.time() - start_time > 0 else 1
+        speed = downloaded_size / 1024 / elapsed_time  # KB/s
+        percent = downloaded_size / total_size if total_size > 0 else 0
+        await _emit_download_progress(
+            progress_callback,
+            {
+                "url": url,
+                "downloaded": downloaded_size,
+                "total": total_size,
+                "percent": percent,
+                "speed": speed,
+            },
+        )
+        if show_progress:
+            print(
+                f"\rProgress: {percent:.2%} Speed: {speed:.2f} KB/s",
+                end="",
+            )
+    await _emit_download_progress(
+        progress_callback,
+        {
+            "url": url,
+            "downloaded": downloaded_size,
+            "total": total_size,
+            "percent": 1,
+            "speed": 0,
+        },
+    )
+
+
+async def download_file(
+    url: str,
+    path: str,
+    show_progress: bool = False,
+    progress_callback=None,
+    allow_insecure_ssl_fallback: bool = True,
+    max_bytes: int | None = None,
+) -> None:
+    """Download a remote file to a local path.
+
+    Args:
+        url: Remote URL to download.
+        path: Local destination path.
+        show_progress: Whether to print progress to stdout.
+        progress_callback: Optional callback for progress payloads.
+        allow_insecure_ssl_fallback: Whether certificate failures may retry with
+            TLS certificate verification disabled.
+        max_bytes: Optional maximum download size in bytes. When exceeded, a
+            DownloadFileSizeLimitError is raised and the partial file removed.
+
+    Returns:
+        None.
+    """
+
+    try:
+        ssl_context = ssl.create_default_context(
+            cafile=certifi.where(),
+        )  # 使用 certifi 提供的 CA 证书
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        async with aiohttp.ClientSession(
+            trust_env=True,
+            connector=connector,
+        ) as session:
+            async with session.get(url, timeout=1800) as resp:
+                _raise_for_download_status(resp, url)
+                try:
+                    with open(path, "wb") as f:
+                        await _download_response_to_file(
+                            resp,
+                            f,
+                            url,
+                            show_progress,
+                            progress_callback,
+                            max_bytes=max_bytes,
+                        )
+                except BaseException:
+                    _remove_partial_download(path)
+                    raise
+    except (aiohttp.ClientConnectorSSLError, aiohttp.ClientConnectorCertificateError):
+        if not allow_insecure_ssl_fallback:
+            raise
+        # 关闭SSL验证（仅在证书验证失败时作为fallback）
+        logger.warning(
+            f"SSL certificate verification failed for {_safe_url_for_log(url)}. "
+            "Falling back to unverified connection (CERT_NONE). "
+        )
+        logger.warning(
+            f"SSL certificate verification failed for {_safe_url_for_log(url)}. "
+            "Falling back to unverified connection (CERT_NONE). "
+            "This is insecure and exposes the application to man-in-the-middle attacks. "
+            "Please investigate certificate issues with the remote server."
+        )
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, ssl=ssl_context, timeout=120) as resp:
+                _raise_for_download_status(resp, url)
+                try:
+                    with open(path, "wb") as f:
+                        await _download_response_to_file(
+                            resp,
+                            f,
+                            url,
+                            show_progress,
+                            progress_callback,
+                            show_downloading_label=False,
+                            max_bytes=max_bytes,
+                        )
+                except BaseException:
+                    _remove_partial_download(path)
+                    raise
+    if show_progress:
+        print()
+
+
+def file_to_base64(file_path: str) -> str:
+    with open(file_path, "rb") as f:
+        data_bytes = f.read()
+        base64_str = base64.b64encode(data_bytes).decode()
+    return "base64://" + base64_str
+
+
+def get_local_ip_addresses():
+    net_interfaces = psutil.net_if_addrs()
+    network_ips = []
+
+    for interface, addrs in net_interfaces.items():
+        for addr in addrs:
+            if addr.family == socket.AF_INET:  # 使用 socket.AF_INET 代替 psutil.AF_INET
+                network_ips.append(addr.address)
+
+    return network_ips
+
+
+def get_dashboard_dist_version(dist_dir: str | Path) -> str | None:
+    """Read the WebUI version from a dashboard dist directory.
+
+    Args:
+        dist_dir: Dashboard dist directory path.
+
+    Returns:
+        The version string from assets/version, or None when unavailable.
+    """
+
+    version_file = Path(dist_dir) / "assets" / "version"
+    try:
+        if version_file.exists():
+            return version_file.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("Failed to read WebUI version from %s: %s", version_file, exc)
+    return None
+
+
+def get_bundled_dashboard_dist_path() -> Path:
+    return Path(get_astrbot_path()) / "astrbot" / "dashboard" / "dist"
+
+
+def _normalize_dashboard_version(version: str) -> str:
+    version = version.strip()
+    if version[:1].lower() == "v":
+        version = version[1:]
+    if not re.match(
+        r"^[0-9]+(?:\.[0-9]+)*"
+        r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+        r"(?:\+.+)?$",
+        version,
+    ):
+        raise ValueError(f"invalid dashboard version: {version!r}")
+    return version
+
+
+def is_dashboard_version_compatible(
+    dashboard_version: str | None, current_version: str
+) -> bool:
+    """Check whether a WebUI version matches the current core version.
+
+    Args:
+        dashboard_version: Version read from the WebUI assets/version file.
+        current_version: Current AstrBot core version.
+
+    Returns:
+        True when both versions are valid SemVer values and compare equal.
+    """
+
+    if dashboard_version is None:
+        return False
+    try:
+        return (
+            VersionComparator.compare_version(
+                _normalize_dashboard_version(dashboard_version),
+                _normalize_dashboard_version(current_version),
+            )
+            == 0
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def is_dashboard_dist_compatible(dist_dir: str | Path, current_version: str) -> bool:
+    """Check whether a WebUI dist is complete and matches the core version.
+
+    Args:
+        dist_dir: Dashboard dist directory path.
+        current_version: Current AstrBot core version.
+
+    Returns:
+        True when the dist has an index file and a compatible assets/version.
+    """
+
+    dist_path = Path(dist_dir)
+    return (dist_path / "index.html").is_file() and is_dashboard_version_compatible(
+        get_dashboard_dist_version(dist_path),
+        current_version,
+    )
+
+
+def should_use_bundled_dashboard_dist(
+    user_dist: str | Path, current_version: str
+) -> bool:
+    """Decide whether bundled WebUI should replace a user data dist.
+
+    Args:
+        user_dist: Runtime dashboard dist directory under data/.
+        current_version: Current AstrBot core version.
+
+    Returns:
+        True when user_dist exists but is missing or mismatched against the
+        current core version, and bundled WebUI matches the current core version.
+    """
+
+    user_dist = Path(user_dist)
+    user_version = get_dashboard_dist_version(user_dist)
+    bundled_dist = get_bundled_dashboard_dist_path()
+    if not user_dist.exists() or not is_dashboard_dist_compatible(
+        bundled_dist,
+        current_version,
+    ):
+        return False
+    if user_version is None or not (user_dist / "index.html").is_file():
+        return True
+    try:
+        return not is_dashboard_version_compatible(user_version, current_version)
+    except (TypeError, ValueError):
+        return False
+
+
+async def get_dashboard_version():
+    """Return the effective WebUI version for the current runtime.
+
+    与运行时解析同一优先级（委托 resolve_dashboard_dist）：
+    显式目录 > 项目根 dashboard/dist > 随包 > data/dist。
+
+    Returns:
+        The version declared by the resolved WebUI dist, or None when
+        no usable dist is found.
+    """
+
+    from astrbot.core.dashboard_assets import resolve_dashboard_dist
+
+    resolved = resolve_dashboard_dist()
+    if resolved is None:
+        return None
+    return get_dashboard_dist_version(resolved)
+
+
+def extract_dashboard(
+    zip_path: str | Path,
+    extract_path: str | Path | None = None,
+) -> None:
+    """兼容入口：把包含 dist 的 zip 解压到 data 目录。
+
+    若 zip 是完整源码包，会优先抽取其中的 dashboard/dist 或 data/dist。
+    extract_path 为空时使用 get_astrbot_data_path()。
+    """
+    import tempfile
+
+    zip_path = Path(zip_path)
+    extract_root = Path(extract_path or get_astrbot_data_path()).resolve()
+    ensure_dir(extract_root)
+
+    if not zipfile.is_zipfile(zip_path):
+        raise RuntimeError(f"无效 WebUI 包: {zip_path}")
+
+    with tempfile.TemporaryDirectory(prefix="ldm-extract-dashboard-") as tmp:
+        tmp_root = Path(tmp)
+        with zipfile.ZipFile(zip_path, "r") as z:
+            from astrbot.core.utils.zip_fix import fix_zip_entry_names
+
+            fix_zip_entry_names(z)
+            z.extractall(tmp_root)
+
+        children = [p for p in tmp_root.iterdir() if p.is_dir()]
+        包根 = children[0] if children else tmp_root
+        候选 = [
+            包根 / "dashboard" / "dist",
+            包根 / "data" / "dist",
+            包根 / "dist",
+            tmp_root / "dist",
+        ]
+        dist_src = next((p for p in 候选 if (p / "index.html").is_file()), None)
+        if dist_src is None:
+            # 可能 zip 本身就是 dist 内容
+            if (tmp_root / "index.html").is_file():
+                dist_src = tmp_root
+            elif children and (children[0] / "index.html").is_file():
+                dist_src = children[0]
+
+        if dist_src is None:
+            raise RuntimeError("更新包中未找到可用的 WebUI dist（缺 index.html）。")
+
+        目标 = extract_root / "dist"
+        if 目标.exists():
+            shutil.rmtree(目标, onerror=on_error)
+        shutil.copytree(dist_src, 目标)
+        logger.info(f"WebUI 已解压到: {目标}")

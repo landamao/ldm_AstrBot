@@ -1,0 +1,18 @@
+# 运行数据与本地配置
+.env
+data/
+
+# 虚拟环境与缓存
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# dashboard 源码只保存在本地,主仓库仅跟踪 dist 构建产物
+dashboard/*
+!dashboard/dist/
+node_modules/
+
+# 日志与其他
+*.log
