@@ -23,7 +23,15 @@ from astrbot.core.astr_main_agent import (
     MainAgentBuildResult,
     build_main_agent,
 )
-from astrbot.core.message.components import File, Image, Record, Reply, Video
+from astrbot.core.message.components import (
+    At,
+    File,
+    Image,
+    Plain,
+    Record,
+    Reply,
+    Video,
+)
 from astrbot.core.message.message_event_result import (
     MessageChain,
     MessageEventResult,
@@ -63,6 +71,15 @@ from ...follow_up import (
 # 消息防抖 per-UMO 状态表：首条消息开窗等待静默期，窗口内后续消息被吸收
 # （文本与媒体组件并入赢家请求，被吸收消息不再触发打断、不请求 LLM）
 _DEBOUNCE_STATE: dict[str, dict] = {}
+
+# 空唤醒（仅 @ 机器人/全体成员或仅发唤醒前缀，无任何实质内容）时
+# 补进 message_str 的提示词。随 message_str 走，与历史落库内容一致，
+# 群聊上下文等 on_llm_request 注入机制照常生效。
+_BARE_WAKE_PROMPT = (
+    "<system_reminder>The user woke you up with an @ mention or wake prefix "
+    "but did not include any message content. Respond naturally based on the "
+    "conversation context.</system_reminder>"
+)
 
 
 def _safe_error_model(agent_runner) -> str | None:
@@ -218,6 +235,47 @@ class InternalAgentSubStage(Stage):
         platform_settings = conf.get("platform_settings", {}) if conf else {}
         debounce_cfg = platform_settings.get("message_debounce", {}) or {}
         return debounce_cfg if isinstance(debounce_cfg, dict) else {}
+
+    def _is_bare_wake(self, event: AstrMessageEvent) -> bool:
+        """空唤醒：仅 @ 了机器人/全体成员，或只发了唤醒前缀，无任何实质内容。
+
+        唤醒前缀已在唤醒阶段从 message_str 中移除，但消息组件原文仍在，
+        因此这里按组件原文判断。
+        """
+        self_id = str(event.get_self_id())
+        wake_prefixes = self.ctx.astrbot_config.get("wake_prefix", [])
+        has_wake_marker = False
+        for comp in event.message_obj.message:
+            if isinstance(comp, At):
+                # AtAll 继承自 At，其 qq 固定为 "all"
+                if str(comp.qq) == self_id or str(comp.qq) == "all":
+                    has_wake_marker = True
+                    continue
+                return False
+            if isinstance(comp, Plain):
+                text = comp.text.strip()
+                if not text or text in wake_prefixes:
+                    has_wake_marker = has_wake_marker or bool(text)
+                    continue
+                return False
+            # 图片/语音/文件/引用等任何其他组件都不视为空唤醒
+            return False
+        return has_wake_marker
+
+    def _fill_bare_wake_prompt(self, event: AstrMessageEvent) -> bool:
+        """空唤醒时向 message_str 补提示词并走正常 LLM 请求。
+
+        Returns:
+            True 表示已补提示词，应继续走 LLM 请求；False 表示维持跳过。
+        """
+        if not event.is_wake or not self._is_bare_wake(event):
+            return False
+        event.message_str = _BARE_WAKE_PROMPT
+        logger.info(
+            "空唤醒(仅 @/唤醒前缀): 补提示词后正常请求 LLM umo=%s",
+            event.unified_msg_origin,
+        )
+        return True
 
     async def _message_debounce_wait(self, event: AstrMessageEvent) -> bool:
         """消息防抖：私聊连发消息合并为一次 LLM 请求。
@@ -479,8 +537,11 @@ class InternalAgentSubStage(Stage):
                 and not has_media_content
                 and not has_reply
             ):
-                logger.debug("skip llm request: empty message and no provider_request")
-                return
+                if not self._fill_bare_wake_prompt(event):
+                    logger.debug(
+                        "skip llm request: empty message and no provider_request",
+                    )
+                    return
 
             logger.debug("ready to request llm provider")
             interrupt_cfg = self._get_interrupt_reply_config(event)

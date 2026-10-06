@@ -1,9 +1,7 @@
-import copy
 import traceback
 from collections.abc import Iterable
 from sys import maxsize
 
-import astrbot.api.message_components as Comp
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Json, Plain
@@ -11,13 +9,7 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.core import logger
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.message_type import MessageType
-from astrbot.core.utils.session_waiter import (
-    FILTERS,
-    USER_SESSIONS,
-    SessionController,
-    SessionWaiter,
-    session_waiter,
-)
+from astrbot.core.utils.session_waiter import FILTERS, USER_SESSIONS, SessionWaiter
 from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 from .group_chat_context import GroupChatContext
@@ -50,99 +42,6 @@ class Main(star.Star):
             if session_id in USER_SESSIONS:
                 await SessionWaiter.trigger(session_id, event)
                 event.stop_event()
-
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize - 1)
-    async def handle_empty_mention(self, event: AstrMessageEvent):
-        """处理只有一个 @ 或仅有唤醒前缀的消息，并等待用户下一条内容。"""
-        try:
-            messages = event.get_messages()
-            cfg = self.context.get_config(umo=event.unified_msg_origin)
-            p_settings = cfg["platform_settings"]
-            wake_prefix = cfg.get("wake_prefix", [])
-            if len(messages) != 1:
-                return
-
-            is_empty_mention = (
-                isinstance(messages[0], Comp.At)
-                and str(messages[0].qq) == str(event.get_self_id())
-                and p_settings.get("empty_mention_waiting", True)
-            )
-            is_wake_prefix_only = (
-                isinstance(messages[0], Comp.Plain)
-                and messages[0].text.strip() in wake_prefix
-            )
-
-            if not (is_empty_mention or is_wake_prefix_only):
-                return
-
-            if p_settings.get("empty_mention_waiting_need_reply", True):
-                try:
-                    curr_cid = await self.context.conversation_manager.get_curr_conversation_id(
-                        event.unified_msg_origin,
-                    )
-                    conversation = None
-
-                    if curr_cid:
-                        conversation = (
-                            await self.context.conversation_manager.get_conversation(
-                                event.unified_msg_origin,
-                                curr_cid,
-                            )
-                        )
-                    else:
-                        curr_cid = (
-                            await self.context.conversation_manager.new_conversation(
-                                event.unified_msg_origin,
-                                platform_id=event.get_platform_id(),
-                            )
-                        )
-
-                    self_name = ""
-                    if is_empty_mention and isinstance(messages[0], Comp.At):
-                        self_name = (messages[0].name or "").strip()
-                    if not self_name:
-                        self_name = event.get_self_id()
-
-                    yield event.request_llm(
-                        prompt=(
-                            f"@{self_name}\n"
-                            "<system_reminder>The user mentioned you but did not enter any content. Please reply based on the context.</system_reminder>"
-                        ),
-                        session_id=curr_cid,
-                        contexts=[],
-                        system_prompt="",
-                        conversation=conversation,
-                    )
-                except Exception as e:
-                    logger.error(f"LLM response failed: {e!s}")
-                    yield event.plain_result("想要问什么呢？😄")
-
-            @session_waiter(60)
-            async def empty_mention_waiter(
-                controller: SessionController,
-                event: AstrMessageEvent,
-            ) -> None:
-                if not event.message_str or not event.message_str.strip():
-                    return
-                event.message_obj.message.insert(
-                    0,
-                    Comp.At(qq=event.get_self_id(), name=event.get_self_id()),
-                )
-                new_event = copy.copy(event)
-                self.context.get_event_queue().put_nowait(new_event)
-                event.stop_event()
-                controller.stop()
-
-            try:
-                await empty_mention_waiter(event)
-            except TimeoutError:
-                pass
-            except Exception as e:
-                yield event.plain_result("发生错误，请联系管理员: " + str(e))
-            finally:
-                event.stop_event()
-        except Exception as e:
-            logger.error("handle_empty_mention error: " + str(e))
 
     def group_context_enabled(self, event: AstrMessageEvent):
         group_context_settings = self.context.get_config(umo=event.unified_msg_origin)[
