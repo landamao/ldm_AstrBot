@@ -565,8 +565,13 @@ class GroupChatContext:
         umo = event.unified_msg_origin
         record_id = event.get_extra("_group_context_record_id", None)
         prompt_idx = event.get_extra("_group_context_raw_idx", -1)
-        if not isinstance(record_id, str) and (
-            not isinstance(prompt_idx, int) or prompt_idx < 0
+        # 空唤醒（仅 @/唤醒前缀）不经过 handle_message，没有落位 extra，
+        # 但请求同样需要看到群聊历史：注入全部缓冲并清空
+        is_bare_wake = bool(event.get_extra("_bare_wake", False))
+        if (
+            not is_bare_wake
+            and not isinstance(record_id, str)
+            and (not isinstance(prompt_idx, int) or prompt_idx < 0)
         ):
             return
 
@@ -579,10 +584,12 @@ class GroupChatContext:
 
             raw_list = list(records)
             id_list = list(self._record_ids.get(umo, deque()))
-            if isinstance(record_id, str) and record_id in id_list:
+            if is_bare_wake:
+                prompt_idx = len(raw_list)
+            elif isinstance(record_id, str) and record_id in id_list:
                 prompt_idx = id_list.index(record_id)
 
-            if prompt_idx >= len(raw_list):
+            if not is_bare_wake and prompt_idx >= len(raw_list):
                 return
 
             records_to_inject = raw_list[:prompt_idx]

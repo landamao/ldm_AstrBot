@@ -271,6 +271,8 @@ class InternalAgentSubStage(Stage):
         if not event.is_wake or not self._is_bare_wake(event):
             return False
         event.message_str = _BARE_WAKE_PROMPT
+        # 供群聊上下文 on_req_llm 识别：本条不构成群聊记录，注入全部缓冲历史
+        event.set_extra("_bare_wake", True)
         logger.info(
             "空唤醒(仅 @/唤醒前缀): 补提示词后正常请求 LLM umo=%s",
             event.unified_msg_origin,
