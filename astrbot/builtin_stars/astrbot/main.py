@@ -106,7 +106,7 @@ class Main(star.Star):
                     yield event.request_llm(
                         prompt=(
                             f"@{self_name}\n"
-                            "<system_reminder>用户艾特了你，但并未输入任何内容</system_reminder>"
+                            "<system_reminder>The user mentioned you but did not enter any content. Please reply based on the context.</system_reminder>"
                         ),
                         session_id=curr_cid,
                         contexts=[],
