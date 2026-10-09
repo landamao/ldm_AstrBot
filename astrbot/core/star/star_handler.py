@@ -226,7 +226,7 @@ class EventType(enum.Enum):
     OnPlatformLoadedEvent = enum.auto()  # 平台加载完成
 
     AdapterMessageEvent = enum.auto()  # 收到适配器发来的消息
-    OnWaitingLLMRequestEvent = enum.auto()  # 等待调用 LLM（在获取锁之前，仅通知）
+    OnWaitingLLMRequestEvent = enum.auto()  # 等待调用 LLM（进入流程即通知，早于追补排队/打断收尾/获取锁）
     OnLLMRequestEvent = enum.auto()  # 收到 LLM 请求（可以是用户也可以是插件）
     OnLLMResponseEvent = enum.auto()  # LLM 响应后
     OnAgentBeginEvent = enum.auto()  # Agent 开始运行

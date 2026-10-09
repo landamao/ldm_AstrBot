@@ -80,7 +80,7 @@ async def run_astrbot(astrbot_root: Path) -> None:
 
     await check_dashboard(astrbot_root)
     ensure_plugin_module_importable()
-    logger.info("Data directory: %s", get_astrbot_data_path())
+    logger.info("数据目录： %s", get_astrbot_data_path())
 
     log_broker = LogBroker()
     LogManager.set_queue_handler(logger, log_broker)

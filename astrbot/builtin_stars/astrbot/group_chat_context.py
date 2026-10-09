@@ -38,15 +38,13 @@ Group chat context awareness.
 
 GROUP_HISTORY_HEADER = (
     "<system_reminder>"
-    "You are currently in a group chat.\n"
+    "You are in a group chat.\n"
     "--- BEGIN CONTEXT ---\n"
 )
 GROUP_HISTORY_FOOTER = (
     "\n--- END CONTEXT ---\n"
-    "Above is the group chat history before the current user message, "
-    "arranged in chronological order. "
-    "Below is the content of the current user message that immediately "
-    "follows the chat history and needs to be processed.\n"
+    "Above is the group chat history in chronological order. "
+    "Below is the current user message to be processed.\n"
     "</system_reminder>"
 )
 DEFAULT_GROUP_MESSAGE_MAX_CNT = 300
@@ -697,13 +695,10 @@ class GroupChatContext:
                 suffix = f": {'; '.join(fields)}" if fields else ""
                 parts.append(f" [Shared Card{suffix}]")
             elif isinstance(comp, At):
-                is_at_self = str(comp.qq) in (
-                    event.get_self_id(),
-                    "all",
-                )
-                if is_at_self:
-                    parts.insert(1, "⚠️[DIRECTED AT YOU] ")
-                parts.append(f" [At: {comp.name}]")
+                if str(comp.qq) == event.get_self_id():
+                    parts.append(f" [At: {comp.name}(myself)]")
+                else:
+                    parts.append(f" [At: {comp.name}]")
             elif isinstance(comp, Reply):
                 if comp.message_str:
                     parts.append(

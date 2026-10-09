@@ -76,9 +76,8 @@ _DEBOUNCE_STATE: dict[str, dict] = {}
 # 补进 message_str 的提示词。随 message_str 走，与历史落库内容一致，
 # 群聊上下文等 on_llm_request 注入机制照常生效。
 _BARE_WAKE_PROMPT = (
-    "<system_reminder>The user woke you up with an @ mention or wake prefix "
-    "but did not include any message content. Respond naturally based on the "
-    "conversation context.</system_reminder>"
+    "<system_reminder>The user woke you up with an @ mention but did not "
+    "include any content.</system_reminder>"
 )
 
 
@@ -565,6 +564,16 @@ class InternalAgentSubStage(Stage):
             if not has_provider_request and not await self._message_debounce_wait(event):
                 return
 
+            # on_waiting_llm_request 是「进入 LLM 流程」的通知，必须在打断收尾等待、
+            # 追补排队、会话锁之前发出；钩子终止事件则不进入任何排队。
+            try:
+                typing_requested = True
+                await event.send_typing()
+            except Exception:
+                logger.warning("send_typing failed", exc_info=True)
+            if await call_event_hook(event, EventType.OnWaitingLLMRequestEvent):
+                return
+
             # 防抖结束后等待旧任务收尾，但不重复发送停止提示或停止信号。
             if interrupt_started:
                 await active_event_registry.wait_until_idle(
@@ -591,14 +600,6 @@ class InternalAgentSubStage(Stage):
                         follow_up_capture.ticket.seq,
                     )
                     return
-
-            try:
-                typing_requested = True
-                await event.send_typing()
-            except Exception:
-                logger.warning("send_typing failed", exc_info=True)
-            if await call_event_hook(event, EventType.OnWaitingLLMRequestEvent):
-                return
 
             async with session_lock_manager.acquire_lock(event.unified_msg_origin):
                 logger.debug("acquired session lock for llm request")

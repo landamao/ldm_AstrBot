@@ -128,4 +128,4 @@ async def test_group_context_goes_leading():
     assert "[张三/10:00:00]: 早" in block
     assert "[李四/10:00:05]: 晚" in block
     assert "当前触发消息" not in block, "触发消息本身不注入"
-    assert "before the current user message" in block, "footer 应说明这是当前消息之前的历史"
+    assert "Below is the current user message to be processed" in block, "footer 应说明这是当前消息之前的历史"

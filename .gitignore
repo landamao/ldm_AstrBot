@@ -9,10 +9,15 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# dashboard 源码只保存在本地,主仓库仅跟踪 dist 构建产物
+# dashboard 源码只保存在本地,主仓库仅跟踪 dist 构建产物;预压缩 .gz 不跟踪
 dashboard/*
 !dashboard/dist/
+dashboard/dist/**/*.gz
 node_modules/
+
+# IDE 与本地工具
+.idea/
+.zcodeignore
 
 # 日志与其他
 *.log
