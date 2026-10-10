@@ -1,3 +1,4 @@
+import functools
 import inspect
 import traceback
 import typing as T
@@ -11,7 +12,11 @@ from astrbot.core.message.message_event_result import (
 )
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.star.star import StarMetadata, star_map
-from astrbot.core.star.star_handler import EventType, star_handlers_registry
+from astrbot.core.star.star_handler import (
+    EventType,
+    StarHandlerMetadata,
+    star_handlers_registry,
+)
 
 
 def plugin_display_name(md: StarMetadata | None) -> str:
@@ -22,32 +27,77 @@ def plugin_display_name(md: StarMetadata | None) -> str:
     return name or "未知"
 
 
-def format_event_stopped_message(
-    md: StarMetadata | None,
-    handler_name: str | None,
-) -> str:
-    """插件「xxx」（方法）终止了事件传播"""
-    method = (handler_name or "").strip() or "未知"
-    return f"插件「{plugin_display_name(md)}」（{method}）终止了事件传播"
+def _handler_code(handler: StarHandlerMetadata) -> T.Any | None:
+    """取 handler 可调对象底层的 code 对象，无法解析返回 None。
+
+    插件实例化后 handler 会被绑成 functools.partial(裸函数, 实例)（LLM 工具同样），
+    partial 没有 __code__，必须拆到最底层函数；bound method 则取 __func__。
+    """
+    func = handler.handler
+    while isinstance(func, functools.partial):
+        func = func.func
+    func = getattr(func, "__func__", func)
+    return getattr(func, "__code__", None)
 
 
-def log_event_stopped(md: StarMetadata | None, handler_name: str | None) -> None:
-    logger.info(f"{format_event_stopped_message(md, handler_name)}。")
-
-
-async def notify_event_stopped(
+def resolve_stop_source(
     event: AstrMessageEvent,
-    md: StarMetadata | None,
-    handler_name: str | None,
-) -> None:
-    """打日志；WebChat 再发一条结构化提示，ChatUI 原样显示。同一事件只通知一次。"""
+) -> tuple[StarMetadata | None, str | None]:
+    """从 stop_event() 留下的调用栈解析真实停止来源。
+
+    由内向外找第一个注册插件处理器帧；找不到返回 (None, None)，
+    由调用方输出「未找到调用点」，不做时序猜测。
+    """
+    frames = getattr(event, "_stopped_by_frames", None) or []
+    if not frames:
+        return None, None
+    code_map: dict[T.Any, tuple[str, str]] = {}
+    for handler in star_handlers_registry.star_handlers_map.values():
+        code = _handler_code(handler)
+        if code is not None:
+            code_map[code] = (handler.handler_module_path, handler.handler_name)
+    for code, _lineno in frames:
+        hit = code_map.get(code)
+        if hit is None:
+            continue
+        return star_map.get(hit[0]), hit[1]
+    return None, None
+
+
+def _stop_outline(event: AstrMessageEvent) -> str:
+    """停止日志附带的消息概要，空消息占位。"""
+    outline = (event.get_message_outline() or "").strip()
+    return outline or "（空）"
+
+
+def format_event_stopped_message(plugin_name: str, method: str, outline: str) -> str:
+    """插件「xxx」（方法）终止了事件传播。消息概要「xxx」"""
+    return f"插件「{plugin_name}」（{method}）终止了事件传播。消息概要「{outline}」"
+
+
+def format_unknown_stopped_message(outline: str) -> str:
+    """无法归因时的固定文案，不做时序猜测。"""
+    return f"事件被终止传播，未找到调用点。消息概要「{outline}」"
+
+
+async def notify_event_stopped(event: AstrMessageEvent) -> None:
+    """按 stop_event() 留痕归因真实来源后打日志；WebChat 再发一条结构化提示，ChatUI 原样显示。同一事件只通知一次。"""
     if event.get_extra("_event_stopped_notified"):
         return
     event.set_extra("_event_stopped_notified", True)
-    log_event_stopped(md, handler_name)
+    md, handler_name = resolve_stop_source(event)
+    outline = _stop_outline(event)
+    if md is not None or handler_name:
+        plugin = plugin_display_name(md)
+        method = (handler_name or "").strip() or "未知"
+        text = format_event_stopped_message(plugin, method, outline)
+    else:
+        plugin = ""
+        method = ""
+        text = format_unknown_stopped_message(outline)
+    logger.info(f"{text}。")
     if event.get_platform_name() != "webchat":
         return
-    text = format_event_stopped_message(md, handler_name)
     await event.send(
         MessageChain(
             type="event_stopped",
@@ -55,8 +105,8 @@ async def notify_event_stopped(
                 Json(
                     {
                         "text": text,
-                        "plugin": plugin_display_name(md),
-                        "method": (handler_name or "").strip(),
+                        "plugin": plugin,
+                        "method": method,
                     }
                 )
             ],
@@ -140,6 +190,11 @@ async def call_event_hook(
     #
 
     """
+    # 事件已死不再执行钩子（与指令链路 star_request 的预检一致），
+    # 只补一条真实来源的终止日志
+    if event.is_stopped():
+        await notify_event_stopped(event)
+        return True
     handlers = star_handlers_registry.get_handlers_by_event_type(
         hook_type,
         plugins_name=event.plugins_name,
@@ -159,11 +214,7 @@ async def call_event_hook(
             logger.error(traceback.format_exc())
 
         if event.is_stopped():
-            await notify_event_stopped(
-                event,
-                star_map.get(handler.handler_module_path),
-                handler.handler_name,
-            )
+            await notify_event_stopped(event)
             return True
 
     return event.is_stopped()

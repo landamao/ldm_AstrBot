@@ -20,6 +20,7 @@ from astrbot.core.desktop_runtime import (
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_path
 from astrbot.core.utils.github_proxy import normalize_ldm_mirror
 from astrbot.core.utils.io import ensure_dir, on_error
+from astrbot.core.utils.update_guard import is_update_disabled, 禁用提示
 from astrbot.core.utils.update_rollback import (
     backup_current_version,
     clear_dir_contents,
@@ -828,6 +829,8 @@ class AstrBotUpdator(RepoZipUpdator):
 
         mirror_url 非空时优先从 ldm 镜像服务器下载（直连国内服务器，不走 proxy）。
         """
+        if is_update_disabled():
+            raise Exception(禁用提示)
         if os.environ.get("LDMBOT_CLI") or os.environ.get("LDMBOT_LAUNCHER"):
             raise Exception(
                 "当前以 CLI/Launcher 方式运行，请改用源码目录方式更新 ldm_AstrBot。"
@@ -1068,6 +1071,8 @@ class AstrBotUpdator(RepoZipUpdator):
 
     def apply_update_package(self, zip_path: str | Path) -> None:
         """应用已下载的 ldm_AstrBot 更新包（核心 + 可选 WebUI）。"""
+        if is_update_disabled():
+            raise RuntimeError(禁用提示)
         zip_path = Path(zip_path)
         if not zipfile.is_zipfile(zip_path):
             raise RuntimeError(f"无效更新包: {zip_path}")

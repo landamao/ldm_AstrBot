@@ -27,11 +27,13 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_temp_path,
 )
 from astrbot.core.utils.update_rollback import (
+    backup_current_version,
     clear_dir_contents,
     get_rollback_dir,
     list_backups,
     rollback,
 )
+from astrbot.core.utils.update_guard import is_update_disabled, 禁用提示
 from astrbot.core.utils.github_proxy import (
     log_github_proxy_usage,
     resolve_github_proxy,
@@ -91,6 +93,8 @@ class UpdateService:
         # 核心更新互斥标记：更新后台任务执行期间为 True，
         # 防止前端状态复位后重复请求产生多个并发更新任务（多标签页/双击竞态兜底）
         self._core_update_running = False
+        if is_update_disabled():
+            logger.info(f"更新功能已禁用: {禁用提示}")
 
     def get_update_progress(self, progress_id: str) -> UpdateServiceResult:
         if not progress_id:
@@ -175,6 +179,8 @@ class UpdateService:
 
     async def update_project(self, data: object) -> UpdateServiceResult:
         """从 landamao/ldm_AstrBot 更新核心源码与 WebUI。"""
+        if is_update_disabled():
+            raise UpdateServiceError(禁用提示)
         if is_desktop_managed_backend():
             raise UpdateServiceError(
                 DESKTOP_MANAGED_RESTART_MESSAGE,
@@ -458,8 +464,48 @@ class UpdateService:
             }
         )
 
+    async def backup_current_state(self) -> UpdateServiceResult:
+        """立即备份当前版本源码到回滚目录（WebUI 回滚管理「立即备份」）。
+
+        备份只读打包、不改源码也不重启，故不受禁更环境变量 / 桌面托管 /
+        演示模式限制；仅在核心更新任务进行中拒绝——此时源码正被替换，
+        打包会得到新旧混杂的源码树。同版本已有备份会被覆盖（重名覆盖
+        是 backup_current_version 的既定行为）。
+        """
+        if self._core_update_running:
+            raise UpdateServiceError("已有更新任务正在进行中，请稍后再试。")
+
+        logger.info("WebUI 发起立即备份当前版本。")
+        try:
+            zip_path = await asyncio.to_thread(
+                backup_current_version,
+                project_root=self.astrbot_updator.MAIN_PATH,
+                version=VERSION,
+                webui_dir=self.astrbot_updator._resolve_webui_dir(),
+                data_dir=str(get_astrbot_data_path()),
+            )
+        except UpdateServiceError:
+            raise
+        except Exception as exc:
+            # backup_current_version 抛的 RuntimeError 文案已面向用户，原样透传
+            raise UpdateServiceError(str(exc) or "备份失败，请查看服务端日志。") from exc
+
+        stat = zip_path.stat()
+        logger.info(f"立即备份完成: {zip_path.name}（{stat.st_size} 字节）")
+        return UpdateServiceResult(
+            message=f"已备份当前版本 {VERSION}，文件：{zip_path.name}。",
+            data={
+                "version": VERSION,
+                "filename": zip_path.name,
+                "size": stat.st_size,
+                "mtime": int(stat.st_mtime),
+            },
+        )
+
     async def rollback_to_version(self, data: object) -> UpdateServiceResult:
         """回滚到指定版本备份（默认最近一次），成功后自动全量重启。"""
+        if is_update_disabled():
+            raise UpdateServiceError(禁用提示)
         if is_desktop_managed_backend():
             raise UpdateServiceError(
                 DESKTOP_MANAGED_RESTART_MESSAGE,
@@ -486,7 +532,7 @@ class UpdateService:
                 "回滚失败，请查看服务端日志（常见原因：找不到备份或备份文件损坏）。"
             )
 
-        message = "回滚成功，ldm 将在 2 秒内全量重启以应用旧版本代码。"
+        message = "回滚成功（仅恢复程序代码与 WebUI，运行数据不受影响），ldm 将在 2 秒内全量重启。"
         logger.info(f"版本回滚完成: {version or '最近一次备份'}，准备重启。")
         self._schedule_restart()
         return UpdateServiceResult(
@@ -545,6 +591,8 @@ class UpdateService:
         用户通过 WebUI 手动上传从 ldm 官方下载的更新包，
         后端校验 zip 完整性后复用 apply_update_package 应用。
         """
+        if is_update_disabled():
+            raise UpdateServiceError(禁用提示)
         if is_desktop_managed_backend():
             raise UpdateServiceError(
                 DESKTOP_MANAGED_RESTART_MESSAGE,
@@ -716,6 +764,8 @@ class UpdateService:
         reboot: bool = True,
     ) -> UpdateServiceResult:
         """应用已校验通过的上传压缩包。"""
+        if is_update_disabled():
+            raise UpdateServiceError(禁用提示)
         if is_desktop_managed_backend():
             raise UpdateServiceError(
                 DESKTOP_MANAGED_RESTART_MESSAGE,

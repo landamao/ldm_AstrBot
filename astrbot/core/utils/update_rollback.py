@@ -19,6 +19,26 @@ from pathlib import Path
 回滚目录名 = "ldmbot_rollback"
 备份文件名模板 = "ldmbot_{version}.zip"
 
+# 更新前一并备份、回滚时同步恢复的根目录文件。
+# 这些文件会被更新包直接覆盖（更新策略：包内除受保护目录外全部覆盖），
+# 不备份则回滚后出现「旧源码 + 新依赖清单」的新旧混杂状态。
+# 只列文件不列目录（astrbot/、dist/ 由专门逻辑整目录处理）；
+# .env 等运行态文件更新永不触碰，故不在清单内。
+根目录备份文件 = (
+    "main.py",
+    "runtime_bootstrap.py",
+    "requirements.txt",
+    "pyproject.toml",
+    "uv.lock",
+    ".env.example",
+    ".gitignore",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "CHANGELOG.md",
+    "从官方迁移教程.txt",
+)
+
 
 def _修复压缩包文件名(zf: zipfile.ZipFile) -> None:
     """就地修补无 UTF-8 标志位条目的文件名（cp437 还原字节 → utf-8/gbk 重解码）。
@@ -49,6 +69,8 @@ def _修复压缩包文件名(zf: zipfile.ZipFile) -> None:
     "  cd ~/ldmbot && ./.venv/bin/python main.py --rollback           回滚到最近一次备份\n"
     "  cd ~/ldmbot && ./.venv/bin/python main.py --rollback 4.26.26   回滚到指定版本备份\n"
     "此命令仅供参考，请根据实际情况调整。\n"
+    "注意：备份只包含程序代码（astrbot/ 源码、WebUI、main.py 等根目录文件），\n"
+    "不包含运行数据（data/ 目录）；回滚只覆盖代码，运行数据不受影响。\n"
     "若新版本正常运行，可安全删除本目录所有文件。\n"
 )
 
@@ -206,7 +228,9 @@ def backup_current_version(
 ) -> Path:
     """更新前备份当前版本到 data/ldmbot_rollback/ldmbot_<版本>.zip。
 
-    包内含三样：astrbot/ 目录 + dist/ 目录 + 根目录 main.py
+    备份范围仅程序代码：astrbot/ 目录 + dist/ 目录 + 根目录文件（main.py、
+    requirements.txt 等，见 根目录备份文件；当前项目缺失的跳过），
+    不包含运行数据（data/ 目录）。
     （dist = 实际生效 WebUI 目录：显式 --webui-dir/LDMBOT_WEBUI_DIR →
     项目根 dashboard/dist → 历史遗留 data/dist）。
     多个版本可同时保留，重名则覆盖。备份失败抛出异常，由调用方中断更新
@@ -231,10 +255,11 @@ def backup_current_version(
             _zip_tree(zf, 源码目录, "astrbot")
             if dist目录 is not None:
                 _zip_tree(zf, dist目录, "dist")
-            # 根目录 main.py 也备份（入口脚本，回滚时一并恢复）
-            main_py = project_root / "main.py"
-            if main_py.is_file():
-                zf.write(main_py, "main.py")
+            # 根目录文件一并备份（更新会覆盖它们，回滚时须同步恢复）
+            for 名字 in 根目录备份文件:
+                根文件 = project_root / 名字
+                if 根文件.is_file():
+                    zf.write(根文件, 名字)
     except OSError as exc:
         raise RuntimeError(f"备份失败: 写入备份文件出错: {exc}") from exc
 
@@ -276,13 +301,25 @@ def rollback(
 ) -> bool:
     """回滚到指定版本备份（默认最近一次备份）。
 
+    恢复范围仅程序代码与 WebUI，不包含运行数据（data/ 目录不受影响）。
     流程：解压备份 zip 到临时目录 → 清空当前 astrbot/、dist/ 内容
     （保留目录节点，软链接安全）→ 把包内内容复制回去（复制而非重命名）→
-    根目录 main.py 备份中有则一并恢复 → 清理临时目录 → 继续正常启动
-    （用旧版代码跑起来）。
+    根目录文件（main.py、requirements.txt 等）备份中有则一并恢复 →
+    清理临时目录 → 继续正常启动（用旧版代码跑起来）。
     备份目录保留不删，用户确认新版没问题后手动删。
     找不到备份 / 指定版本不存在 → 打印中文提示并返回 False，继续正常启动。
     """
+    # LDMBOT_DISABLE_UPDATE 禁用更新时同样禁止回滚（回滚会覆盖源码）。
+    # 本模块不得 import astrbot 包，判定与 astrbot.core.utils.update_guard
+    # 保持同步（真值：true/1/t）。
+    if os.environ.get("LDMBOT_DISABLE_UPDATE", "").strip().lower() in ("true", "1", "t"):
+        print(
+            f"{_红}回滚被拒绝: 更新已被环境变量 LDMBOT_DISABLE_UPDATE 禁用，"
+            f"本次启动禁止回滚（回滚同样会更改源码）。"
+            f"如需回滚，请移除该环境变量后重启。{_重置}"
+        )
+        return False
+
     project_root = Path(project_root or _默认项目根())
     rollback_dir = get_rollback_dir(data_dir)
     if version and Path(version).expanduser().is_file():
@@ -305,6 +342,11 @@ def rollback(
 
     备份版本 = 目标zip.stem.removeprefix("ldmbot_")
     print(f"{_绿}开始回滚: 使用备份 {目标zip.name}（版本 {备份版本}）...{_重置}")
+    # 红色醒目提醒：备份/恢复范围仅程序代码，与运行数据无关（用户高频误解点）
+    print(
+        f"{_红}注意: 回滚只恢复程序代码与 WebUI，不包含运行数据"
+        f"（data/ 目录的数据库、配置、会话记录等不受影响，也不会被回滚）。{_重置}"
+    )
 
     with tempfile.TemporaryDirectory(prefix="ldmbot-rollback-") as tmp:
         tmp_root = Path(tmp)
@@ -335,13 +377,16 @@ def rollback(
         clear_dir_contents(当前astrbot)
         shutil.copytree(包astrbot, 当前astrbot, dirs_exist_ok=True)
 
-        # 2. 恢复根目录 main.py（备份中有才恢复；无则保持现状并提示）
-        包main = tmp_root / "main.py"
-        if 包main.is_file():
-            当前main = project_root / "main.py"
-            shutil.copy2(包main, 当前main)
-        else:
-            print(f"{_黄}备份中无 main.py（旧备份），入口脚本保持现状。{_重置}")
+        # 2. 恢复根目录文件（清单见 根目录备份文件；备份中有才恢复，
+        #    清单外的根文件不碰，包内一个都没有则视为旧备份保持现状）
+        恢复文件数 = 0
+        for 名字 in 根目录备份文件:
+            包文件 = tmp_root / 名字
+            if 包文件.is_file():
+                shutil.copy2(包文件, project_root / 名字)
+                恢复文件数 += 1
+        if 恢复文件数 == 0:
+            print(f"{_黄}备份中无根目录文件（旧备份），根目录文件保持现状。{_重置}")
 
         # 3. 恢复 dist/（备份中有才恢复；无则保持现状并提示）
         包dist = tmp_root / "dist"

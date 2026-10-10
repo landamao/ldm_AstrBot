@@ -1,3 +1,5 @@
+import sys
+
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.core.star.filter.command import GreedyStr
@@ -63,10 +65,10 @@ class Main(star.Star):
         finally:
             event.should_call_llm(True)
 
-    @filter.on_llm_request()
-    async def _llm_request_gate(self, event: AstrMessageEvent, req) -> None:
-        """LLM 请求前拦截被关闭会话的请求。"""
-        await self.llm_c.on_llm_request(event, req)
+    @filter.on_waiting_llm_request(priority=sys.maxsize)
+    async def _llm_request_gate(self, event: AstrMessageEvent) -> None:
+        """进入LLM队列时拦截被关闭会话的请求。"""
+        await self.llm_c.on_llm_request(event)
 
     @filter.command_group("plugin")
     def plugin(self) -> None:

@@ -50,7 +50,7 @@ class StarRequestSubStage(Stage):
                 async for ret in wrapper:
                     yield ret
                 if event.is_stopped():
-                    await notify_event_stopped(event, md, handler.handler_name)
+                    await notify_event_stopped(event)
                     break
                 event.clear_result()  # 清除上一个 handler 的结果
             except Exception as e:

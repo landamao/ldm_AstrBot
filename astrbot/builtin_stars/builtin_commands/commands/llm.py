@@ -43,7 +43,7 @@ class LLMCommands:
         self.关闭的私聊 = set(self.config["关闭的私聊"])
         self.全局关闭 = self.config["全局关闭"]
 
-    async def on_llm_request(self, event: AstrMessageEvent, _) -> None:
+    async def on_llm_request(self, event: AstrMessageEvent) -> None:
         """LLM 请求前拦截：全局关闭 > 群组 > 私聊。"""
         if self.config is None:
             return

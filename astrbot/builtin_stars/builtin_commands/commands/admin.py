@@ -13,6 +13,7 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_temp_path,
 )
 from astrbot.core.utils.github_proxy import normalize_ldm_mirror
+from astrbot.core.utils.update_guard import is_update_disabled, 禁用提示
 from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 
@@ -138,6 +139,10 @@ class AdminCommands:
         消息节奏：正在更新 → 更新成功 v旧 → v新，正在重启（或无更新/失败提示）。
         重启复用 restart() 的带写入重启记录链路（core_lifecycle.restart()）。
         """
+        if is_update_disabled():
+            await event.send(MessageChain().message(禁用提示))
+            return
+
         from astrbot.core import pip_installer
         from astrbot.core.config.default import VERSION
         from astrbot.core.updator import AstrBotUpdator

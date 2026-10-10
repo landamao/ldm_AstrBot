@@ -201,6 +201,24 @@ async def list_rollback_backups_legacy(
     return await _run(lambda: service.list_rollback_backups())
 
 
+@router.post("/updates/rollback-backups/backup")
+async def backup_current_state(
+    _auth: AuthContext = Depends(require_system_scope),
+    service: UpdateService = Depends(get_service),
+):
+    """立即备份当前版本源码到回滚目录（只读打包，不影响运行）。"""
+    return await _run(lambda: service.backup_current_state())
+
+
+@legacy_router.post("/rollback-backups/backup")
+async def backup_current_state_legacy(
+    _username: str = Depends(require_dashboard_user),
+    service: UpdateService = Depends(get_service),
+):
+    """立即备份当前版本源码到回滚目录（legacy 路由）。"""
+    return await _run(lambda: service.backup_current_state())
+
+
 @router.post("/updates/rollback")
 async def rollback_to_backup(
     payload: dict,

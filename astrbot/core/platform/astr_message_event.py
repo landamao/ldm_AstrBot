@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import os
 import re
+import sys
 import uuid
 from collections.abc import AsyncGenerator
 from time import time
@@ -54,6 +55,8 @@ class AstrMessageEvent(abc.ABC):
         self._extras: dict[str, Any] = {}
         self._force_stopped: bool = False
         """独立的停止标志，不依赖 _result，不会被 clear_result() 重置"""
+        self._stopped_by_frames: list[tuple[Any, int]] | None = None
+        """首次 stop_event() 的调用栈（code 对象 + 行号，由内向外），供日志归因真实停止来源"""
         message_type = getattr(message_obj, "type", None)
         if not isinstance(message_type, MessageType):
             try:
@@ -341,6 +344,14 @@ class AstrMessageEvent(abc.ABC):
 
     def stop_event(self) -> None:
         """终止事件传播。"""
+        if self._stopped_by_frames is None:
+            # 首次停止时留痕调用栈：只存 code 对象与行号；frame 对象会钉住整条调用链的局部变量，不入列
+            frames = []
+            frame = sys._getframe(1)
+            while frame is not None:
+                frames.append((frame.f_code, frame.f_lineno))
+                frame = frame.f_back
+            self._stopped_by_frames = frames
         self._force_stopped = True
         if self._result is None:
             self.set_result(MessageEventResult().stop_event())
@@ -350,6 +361,7 @@ class AstrMessageEvent(abc.ABC):
     def continue_event(self) -> None:
         """继续事件传播。"""
         self._force_stopped = False
+        self._stopped_by_frames = None
         if self._result is None:
             self.set_result(MessageEventResult().continue_event())
         else:

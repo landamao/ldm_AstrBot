@@ -6,6 +6,7 @@ import yaml
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core import DEMO_MODE, logger
+from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.star_handler import StarHandlerMetadata, star_handlers_registry
@@ -284,7 +285,10 @@ class PluginCommands:
                 ),
             )
             return
-        logger.info(f"准备从 {plugin_repo} 安装插件。")
+        logger.info(f"准备从「{plugin_repo}」安装插件。")
+        await event.send(
+            MessageChain().message(f"准备从「{plugin_repo}」安装插件。")
+        )
         if self.context._star_manager:
             star_mgr: PluginManager = self.context._star_manager
             try:

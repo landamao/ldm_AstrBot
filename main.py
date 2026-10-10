@@ -13,9 +13,6 @@ bootstrap_env(os.path.dirname(os.path.abspath(__file__)))
 # 横幅动画在 daemon 线程里隐藏光标（\033[?25l），程序退出时 daemon 线程被强杀，
 # finally 里的 \033[?25h 可能来不及执行，导致终端光标永久消失。
 # 注册 atexit + signal 兜底，确保无论怎么退出都恢复光标。
-_ORIG_CURSOR_HANDLER = None
-
-
 def _restore_terminal_cursor(*_args: object) -> None:
     try:
         sys.stdout.write("\033[?25h")
@@ -26,12 +23,18 @@ def _restore_terminal_cursor(*_args: object) -> None:
 
 atexit.register(_restore_terminal_cursor)
 
+def _terminate_after_cursor_restore(sig, _frame) -> None:
+    # SIGTERM 的默认终止不执行 atexit，光标只能在处理器里恢复；
+    # 恢复后必须交还默认终止行为，否则停止请求（systemd SIGTERM）会被吞掉、进程永不退出。
+    _restore_terminal_cursor()
+    signal.signal(sig, signal.SIG_DFL)
+    os.kill(os.getpid(), sig)
+
+
 def _install_cursor_signal_handler() -> None:
-    global _ORIG_CURSOR_HANDLER
     for sig in (signal.SIGTERM,):
         try:
-            _ORIG_CURSOR_HANDLER = signal.getsignal(sig)
-            signal.signal(sig, _restore_terminal_cursor)
+            signal.signal(sig, _terminate_after_cursor_restore)
         except (ValueError, OSError):
             pass  # 非主线程或信号不可用
 
@@ -383,6 +386,7 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
   --webui-dir <路径>       指定 WebUI 静态文件目录路径（默认 data/dist）
   --restore-backup [路径]      交互式恢复数据备份；不填路径时从备份目录选择
   --rollback, --回滚 [版本号]  回滚到旧版本备份；不填版本号时进入交互式选择
+                               （只恢复程序代码，不包含运行数据）
   --reset-password,  --重置密码  交互式重置管理面板密码
   -h, --help               显示本帮助信息
 
@@ -429,6 +433,7 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
     LDMBOT_UPDATE_CACHE_TTL=<秒>      远端信息缓存秒数（默认 300）
     LDMBOT_GITHUB_TOKEN=<token>       GitHub API Token，提高限流配额
     LDMBOT_CORE_PACKAGE_BASE_URL=<URL>  核心包下载基础 URL
+    LDMBOT_DISABLE_UPDATE=1          禁用主程序更新（本次启动拒绝源码/WebUI 更新与回滚）
 
   Provider / 代理:
     LDMBOT_DASHSCOPE_API_KEY=<key>    阿里云百炼 API Key（Embedding/Rerank 回退）
@@ -486,7 +491,8 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
         nargs="?",
         const="",
         default=None,
-        help="回滚到旧版本备份（不带版本号=最近一次备份，如 --rollback 4.26.26）",
+        help="回滚到旧版本备份（不带版本号=最近一次备份，如 --rollback 4.26.26）。"
+        "只恢复程序代码与 WebUI，不包含运行数据（data/ 目录不受影响）",
     )
     _parser.parse_args()
     sys.exit(0)
@@ -524,12 +530,23 @@ def _apply_startup_env_flags(argv: list[str]) -> None:
 
 
 def _do_rollback(version: str | None, webui_dir: str | None = None) -> None:
-    """执行启动参数 --rollback：解压备份 zip → 清空 astrbot/dist → 复制回去。
+    """执行启动参数 --rollback：解压备份 zip → 清空 astrbot/dist → 复制回去，
+    根目录文件（main.py、requirements.txt 等）一并恢复。
 
     在本阶段不能 import astrbot 包（会加载重模块），因此用 importlib
     按文件路径加载纯标准库的回滚模块。回滚无论成功或失败都直接退出，
     不继续启动服务：成功时提示重启生效，失败时提示检查后重启。
     """
+    # LDMBOT_DISABLE_UPDATE 禁用更新时同样禁止 --rollback 回滚（回滚会覆盖源码）。
+    # 本阶段不能 import astrbot 包，判定与 astrbot/core/utils/update_guard.py
+    # 保持同步（真值：true/1/t）。
+    if os.environ.get("LDMBOT_DISABLE_UPDATE", "").strip().lower() in ("true", "1", "t"):
+        print(
+            f"{red}回滚被拒绝：环境变量 LDMBOT_DISABLE_UPDATE 已禁用更新，"
+            f"回滚同样会更改源码；如需回滚，请移除该环境变量后重启。{reset}"
+        )
+        sys.exit(1)
+
     try:
         import importlib.util
 
@@ -551,6 +568,10 @@ def _do_rollback(version: str | None, webui_dir: str | None = None) -> None:
             if not 备份列表:
                 print(f"{red}回滚失败：没有找到可用的回滚备份。{reset}")
                 sys.exit(1)
+            print(
+                f"{red}注意：回滚只恢复程序代码与 WebUI，不包含运行数据"
+                f"（data/ 目录的数据库、配置、会话记录等不受影响）。{reset}"
+            )
             print("可回滚的备份包：")
             for index, 备份路径 in enumerate(备份列表, 1):
                 print(f"  {index}. {备份路径.name}")
@@ -823,7 +844,8 @@ if __name__ == "__main__":
         nargs="?",
         const="",
         default=None,
-        help="回滚到旧版本备份（不带版本号=最近一次备份，如 --rollback 4.26.26）",
+        help="回滚到旧版本备份（不带版本号=最近一次备份，如 --rollback 4.26.26）。"
+        "只恢复程序代码与 WebUI，不包含运行数据（data/ 目录不受影响）",
     )
     _parser.add_argument(
         "--restore-backup",

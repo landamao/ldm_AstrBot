@@ -19,6 +19,7 @@ from astrbot.core.utils.segmented_reply import (
 )
 
 from ..context import PipelineContext
+from ..context_utils import notify_event_stopped
 from ..stage import Stage, register_stage, registered_stages
 
 
@@ -125,6 +126,10 @@ class ResultDecorateStage(Stage):
         self,
         event: AstrMessageEvent,
     ) -> None | AsyncGenerator[None, None]:
+        # 事件已被终止：不再执行装饰钩子（回复阶段不看停止标志，已 yield 的结果仍会发出）
+        if event.is_stopped():
+            await notify_event_stopped(event)
+            return
         result = event.get_result()
         if result is None or not result.chain:
             return
@@ -183,13 +188,7 @@ class ResultDecorateStage(Stage):
                 logger.error(traceback.format_exc())
 
             if event.is_stopped():
-                from ..context_utils import notify_event_stopped
-
-                await notify_event_stopped(
-                    event,
-                    star_map.get(handler.handler_module_path),
-                    handler.handler_name,
-                )
+                await notify_event_stopped(event)
                 return
 
         # 流式输出不执行下面的逻辑
