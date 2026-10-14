@@ -23,6 +23,7 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_plugin_path,
 )
 from astrbot.core.utils.io import get_dashboard_version
+from astrbot.core.utils.update_guard import is_update_disabled
 from astrbot.core.utils.update_rollback import get_rollback_dir
 
 PROJECT_URL = "https://github.com/landamao/ldm_AstrBot"
@@ -176,6 +177,7 @@ async def get_about_info(
             "plugin_data_dir": get_astrbot_plugin_data_path(),
             "backup_dir": get_astrbot_backups_path(),
             "rollback_dir": str(get_rollback_dir()),
+            "update_disabled": is_update_disabled(),
         },
         "project_url": PROJECT_URL,
         "author_url": AUTHOR_URL,

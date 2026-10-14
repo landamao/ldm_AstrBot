@@ -69,6 +69,17 @@ def test_unset_means_enabled():
     assert not is_update_disabled()
 
 
+def test_about_info_reports_update_disabled(monkeypatch):
+    """关于信息要如实上报禁更状态：启用时 True，未启用时 False。"""
+    from astrbot.core.utils.about_info import get_about_info
+
+    monkeypatch.setenv(ENV, "1")
+    assert asyncio.run(get_about_info())["ldm"]["update_disabled"] is True
+
+    monkeypatch.delenv(ENV)
+    assert asyncio.run(get_about_info())["ldm"]["update_disabled"] is False
+
+
 def test_download_update_package_refused(updator, monkeypatch):
     monkeypatch.setenv(ENV, "1")
     with pytest.raises(Exception, match="LDMBOT_DISABLE_UPDATE"):

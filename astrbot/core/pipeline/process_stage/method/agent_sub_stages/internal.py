@@ -1149,6 +1149,14 @@ class InternalAgentSubStage(Stage):
         if not req or not req.conversation:
             return
 
+        # /reset 强制停止：上下文已被清空，本轮不再写回，防止覆盖刚清空的历史
+        if event.get_extra("_discard_history_write"):
+            logger.info(
+                "任务已被 reset 停止，丢弃本轮历史写回: umo=%s",
+                event.unified_msg_origin,
+            )
+            return
+
         # /stop 或 Dashboard 停止：保存已发送内容并标记用户主动停止
         force_stopped = bool(event.get_extra("agent_force_stop"))
         interrupted = bool(

@@ -190,7 +190,29 @@ class ConversationCommands(SessionTargetResolver):
             )
             return
 
-        active_event_registry.stop_all(umo, exclude=message)
+        # reset 语义下当前上下文已不需要：强制停止运行中的 Agent，并让其落库丢弃，
+        # 避免停止收尾的写回把刚清空的历史又覆盖回去
+        stopped_count = active_event_registry.request_agent_stop_all(
+            umo,
+            exclude=message,
+            extra_updates={
+                "agent_force_stop": True,
+                "_discard_history_write": True,
+            },
+        )
+        # 立即打断活跃 runner，避免仅靠 0.5s 轮询 watcher 才停
+        try:
+            from astrbot.core.pipeline.process_stage.follow_up import (
+                get_active_runner,
+            )
+
+            active_runner = get_active_runner(umo)
+            if active_runner is not None:
+                active_runner.request_stop()
+        except Exception:
+            logger.warning("获取或停止活跃 runner 失败", exc_info=True)
+        if stopped_count > 0:
+            logger.info("reset 强制停止运行中任务: umo=%s, 数量=%s", umo, stopped_count)
 
         await self.context.conversation_manager.update_conversation(
             umo,
@@ -652,6 +674,38 @@ class ConversationCommands(SessionTargetResolver):
         message.set_result(MessageEventResult().message(ret).use_t2i(False))
         return
 
+    def _reject_if_agent_running(
+        self, message: AstrMessageEvent, umo: str | None = None
+    ) -> bool:
+        """会话有 Agent 运行中时拒绝执行，避免旧任务在后台偷偷续跑。
+
+        Args:
+            umo: 要检查的会话；缺省为当前会话。
+
+        Returns:
+            True 表示已拒绝（调用方应直接 return）；False 表示无运行中任务，可继续。
+        """
+        target_umo = umo or message.unified_msg_origin
+        running = False
+        try:
+            from astrbot.core.pipeline.process_stage.follow_up import (
+                has_active_runner,
+            )
+
+            running = has_active_runner(target_umo)
+        except Exception:
+            running = False
+        if not running:
+            running = active_event_registry.has_active(target_umo, exclude=message)
+        if running:
+            message.set_result(
+                MessageEventResult().message(
+                    f"⚠️ 当前会话有Agent正在运行，请等待结束或发送{获取第一个唤醒词()}stop停止后重试",
+                ),
+            )
+            return True
+        return False
+
     async def new_conv(self, message: AstrMessageEvent) -> None:
         """创建新对话"""
         cfg = self.context.get_config(umo=message.unified_msg_origin)
@@ -666,7 +720,9 @@ class ConversationCommands(SessionTargetResolver):
             message.set_result(MessageEventResult().message("已创建新对话。"))
             return
 
-        active_event_registry.stop_all(message.unified_msg_origin, exclude=message)
+        if self._reject_if_agent_running(message):
+            return
+
         cpersona = await self._get_current_persona_id(message.unified_msg_origin)
         cid = await self.context.conversation_manager.new_conversation(
             message.unified_msg_origin,
@@ -697,6 +753,9 @@ class ConversationCommands(SessionTargetResolver):
                 session_id=sid,
             ),
         )
+
+        if self._reject_if_agent_running(message, umo=session):
+            return
 
         cpersona = await self._get_current_persona_id(session)
         cid = await self.context.conversation_manager.new_conversation(
@@ -731,6 +790,8 @@ class ConversationCommands(SessionTargetResolver):
                     f"请输入对话序号。{获取第一个唤醒词()}switch 对话序号。{获取第一个唤醒词()}ls 查看对话 {获取第一个唤醒词()}new 新建对话"
                 ),
             )
+            return
+        if self._reject_if_agent_running(message):
             return
         conversations = await self.context.conversation_manager.get_conversations(
             message.unified_msg_origin,

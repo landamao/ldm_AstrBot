@@ -24,6 +24,7 @@ from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
 from astrbot.core.dashboard_assets import resolve_dashboard_dist
 from astrbot.core.db import BaseDatabase
 from astrbot.core.utils.io import get_local_ip_addresses
+from astrbot.core.utils.update_guard import is_update_disabled, 禁用提示
 from astrbot.dashboard.asgi_runtime import (
     DashboardRequestState,
     FastAPIAppAdapter,
@@ -770,6 +771,10 @@ class AstrBotDashboard:
 
         # WebUI 就绪后补打一次废弃环境变量警告：配置加载期那条容易被启动日志刷掉
         warn_deprecated_reset_env_vars("dashboard_ready")
+
+        # 同理，禁更环境变量也在 WebUI 就绪后补打一次，方便确认其处于生效状态
+        if is_update_disabled():
+            logger.warning(禁用提示)
 
         # 配置 Hypercorn
         config = HyperConfig()
