@@ -5,8 +5,6 @@
 
 import io
 
-from pypdf import PdfReader
-
 from astrbot.core.knowledge_base.parsers.base import (
     BaseParser,
     MediaItem,
@@ -31,6 +29,10 @@ class PDFParser(BaseParser):
             ParseResult: 包含文本和图片的解析结果
 
         """
+        # 延后到真正解析 PDF 时才导入 pypdf：启动期加载它会白占约 11 MB，
+        # 而多数实例并不建知识库。
+        from pypdf import PdfReader
+
         pdf_file = io.BytesIO(file_content)
         reader = PdfReader(pdf_file)
 

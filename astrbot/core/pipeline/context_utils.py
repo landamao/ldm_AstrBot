@@ -151,14 +151,10 @@ async def call_handler(
         try:
             async for ret in ready_to_call:
                 # 这里逐步执行异步生成器, 对于每个 yield 返回的 ret, 执行下面的代码
-                # 返回值只能是 MessageEventResult、裸字符串（视作纯文本）或者 None（无返回值）
+                # 返回值只能是 MessageEventResult 或者 None（无返回值）
                 _has_yielded = True
                 if isinstance(ret, MessageEventResult | CommandResult):
                     # 如果返回值是 MessageEventResult, 设置结果并继续
-                    event.set_result(ret)
-                    yield
-                elif isinstance(ret, str):
-                    # 裸字符串视作纯文本结果，等价于 event.plain_result(ret)
                     event.set_result(ret)
                     yield
                 else:
@@ -175,10 +171,6 @@ async def call_handler(
         # 如果只是一个协程, 直接执行
         ret = await ready_to_call
         if isinstance(ret, MessageEventResult | CommandResult):
-            event.set_result(ret)
-            yield
-        elif isinstance(ret, str):
-            # 裸字符串视作纯文本结果，等价于 event.plain_result(ret)
             event.set_result(ret)
             yield
         else:

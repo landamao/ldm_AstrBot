@@ -93,6 +93,14 @@ _ENV_EXAMPLE_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
         ],
     ),
     (
+        "性能与内存",
+        [
+            ("OMP_NUM_THREADS=<线程数>", "数值库线程数（默认 1；调大可提速重计算，但会显著增加提交内存）"),
+            ("OPENBLAS_NUM_THREADS=<线程数>", "OpenBLAS 线程数（默认 1，同上）"),
+            ("MKL_NUM_THREADS=<线程数>", "MKL 线程数（默认 1，同上）"),
+        ],
+    ),
+    (
         "其他",
         [
             ("LDMBOT_DEMO_MODE=true", "演示模式"),

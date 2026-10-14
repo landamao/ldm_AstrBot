@@ -9,10 +9,15 @@ import threading
 import time
 
 from astrbot.utils.env_file import bootstrap_env
+from astrbot.utils.runtime_env import apply_thread_env_defaults
 
 # 任何模块读取环境变量之前加载 .env（示例模板缺失时自动生成 .env.example）。
 # astrbot.core 在导入期就会读取 LDMBOT_DATA_DIR 等变量，因此必须先于其导入执行。
 bootstrap_env(os.path.dirname(os.path.abspath(__file__)))
+
+# 数值库线程池默认值必须在 numpy / faiss 首次导入前落地（含插件导入的），
+# 且放在 .env 加载之后，用户显式配置可覆盖。
+apply_thread_env_defaults()
 
 # ========== 终端光标兜底恢复 ==========
 # 横幅动画在 daemon 线程里隐藏光标（\033[?25l），程序退出时 daemon 线程被强杀，
@@ -449,6 +454,11 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
     LDMBOT_COZE_BOT_ID=<id>           Coze Bot ID
     LDMBOT_DINGTALK_REGISTRATION_BASE_URL=<URL>  钉钉注册基础 URL
     LDMBOT_DINGTALK_REGISTRATION_SOURCE=<来源>    钉钉注册来源标识
+
+  性能与内存:
+    OMP_NUM_THREADS=<线程数>          数值库线程数（默认 1；调大可提速重计算，但会显著增加提交内存）
+    OPENBLAS_NUM_THREADS=<线程数>     OpenBLAS 线程数（默认 1，同上）
+    MKL_NUM_THREADS=<线程数>          MKL 线程数（默认 1，同上）
 
   其他:
     LDMBOT_DEMO_MODE=true             演示模式

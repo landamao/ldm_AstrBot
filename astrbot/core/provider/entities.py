@@ -3,11 +3,16 @@ from __future__ import annotations
 import enum
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from anthropic.types import Message as AnthropicMessage
-from google.genai.types import GenerateContentResponse
-from openai.types.chat.chat_completion import ChatCompletion
+if TYPE_CHECKING:
+    # 这三家 SDK 的响应类型只出现在本模块的注解里（本文件已启用
+    # `from __future__ import annotations`，注解不求值），因此放到类型检查期导入。
+    # 若在此处真导入，启动时会白白加载约 86 MB（openai/anthropic/google.genai
+    # 及其依赖），而用户往往只用到其中一家的兼容接口。
+    from anthropic.types import Message as AnthropicMessage
+    from google.genai.types import GenerateContentResponse
+    from openai.types.chat.chat_completion import ChatCompletion
 
 import astrbot.core.message.components as Comp
 from astrbot import logger

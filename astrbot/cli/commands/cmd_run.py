@@ -8,6 +8,7 @@ import click
 from filelock import FileLock, Timeout
 
 from ...utils.env_file import bootstrap_env
+from ...utils.runtime_env import apply_thread_env_defaults
 from ..utils import check_astrbot_root, check_dashboard, get_astrbot_root
 
 
@@ -115,6 +116,8 @@ def run(reload: bool, port: str | None, reset_password: bool) -> None:
 
         # 与 main.py 启动路径保持一致：加载 .env（示例模板缺失时自动生成 .env.example）
         bootstrap_env(astrbot_root)
+        # 与 main.py 启动路径保持一致：数值库线程池默认值须早于 numpy / faiss 导入
+        apply_thread_env_defaults()
         if not os.environ.get("LDMBOT_DATA_DIR") and not os.environ.get("LDMBOT_ROOT"):
             os.environ["LDMBOT_ROOT"] = str(astrbot_root)
         sys.path.insert(0, str(astrbot_root))

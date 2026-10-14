@@ -4,8 +4,6 @@ import re
 from pathlib import Path
 from re import Pattern
 
-import jieba
-
 _TERM_PATTERN: Pattern[str] = re.compile(r"\w", re.UNICODE)
 
 
@@ -15,6 +13,10 @@ def load_stopwords(path: Path | str) -> set[str]:
 
 
 def tokenize_text(text: str, stopwords: set[str]) -> list[str]:
+    # 延后到真正分词时才导入 jieba：它会在首次使用时构建词典，
+    # 启动期加载纯属浪费（未建知识库的实例用不到）。
+    import jieba
+
     tokens = []
     for token in jieba.cut(text or ""):
         token = token.strip()
