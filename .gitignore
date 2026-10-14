@@ -18,6 +18,7 @@ node_modules/
 # IDE 与本地工具
 .idea/
 .zcodeignore
+.workbuddy/
 
 # 日志与其他
 *.log

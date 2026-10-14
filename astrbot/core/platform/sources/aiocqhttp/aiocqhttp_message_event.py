@@ -1,6 +1,7 @@
 import asyncio
 import re
 from collections.abc import AsyncGenerator
+from typing import Any
 
 from aiocqhttp import CQHttp, Event
 
@@ -16,7 +17,7 @@ from astrbot.api.message_components import (
     Record,
     Video,
 )
-from astrbot.api.platform import Group, MessageMember
+from astrbot.api.platform import Group, MessageMember, MessageSendResult
 
 
 class AiocqhttpMessageEvent(AstrMessageEvent):
@@ -94,7 +95,7 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
         is_group: bool,
         session_id: str | None,
         messages: list[dict],
-    ) -> None:
+    ) -> Any:
         # session_id 必须是纯数字字符串
         session_id_int = (
             int(session_id) if session_id and session_id.isdigit() else None
@@ -104,19 +105,19 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
             routing_params["self_id"] = event["self_id"]
 
         if is_group and isinstance(session_id_int, int):
-            await bot.send_group_msg(
+            return await bot.send_group_msg(
                 group_id=session_id_int,
                 message=messages,
                 **routing_params,
             )
         elif not is_group and isinstance(session_id_int, int):
-            await bot.send_private_msg(
+            return await bot.send_private_msg(
                 user_id=session_id_int,
                 message=messages,
                 **routing_params,
             )
         elif isinstance(event, Event):  # 最后兜底
-            await bot.send(event=event, message=messages)
+            return await bot.send(event=event, message=messages)
         else:
             raise ValueError(
                 f"无法发送消息：缺少有效的数字 session_id({session_id}) 或 event({event})",
@@ -130,7 +131,7 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
         event: Event | None = None,
         is_group: bool = False,
         session_id: str | None = None,
-    ) -> None:
+    ) -> Any:
         """发送消息至 QQ 协议端（aiocqhttp）。
 
         Args:
@@ -140,6 +141,11 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
             is_group (bool, optional): 是否为群消息.
             session_id (str | None, optional): 会话 ID（群号或 QQ 号
 
+        Returns:
+            Any: 协议端的原生响应（通常为含 message_id 的 dict）。
+                消息链被拆分为多次发送时（合并转发/文件与普通消息混排），
+                返回最后一次发送的响应；未发送任何消息时为 None。
+
         """
         # 转发消息、文件消息不能和普通消息混在一起发送
         send_one_by_one = any(
@@ -148,9 +154,9 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
         if not send_one_by_one:
             ret = await cls._parse_onebot_json(message_chain)
             if not ret:
-                return
-            await cls._dispatch_send(bot, event, is_group, session_id, ret)
-            return
+                return None
+            return await cls._dispatch_send(bot, event, is_group, session_id, ret)
+        last_result = None
         for seg in message_chain.chain:
             if isinstance(seg, Node | Nodes):
                 # 合并转发消息
@@ -164,30 +170,55 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
                     payload["group_id"] = session_id
                     if isinstance(event, Event) and event.get("self_id"):
                         payload["self_id"] = event["self_id"]
-                    await bot.call_action("send_group_forward_msg", **payload)
+                    last_result = await bot.call_action(
+                        "send_group_forward_msg", **payload
+                    )
                 else:
                     payload["user_id"] = session_id
                     if isinstance(event, Event) and event.get("self_id"):
                         payload["self_id"] = event["self_id"]
-                    await bot.call_action("send_private_forward_msg", **payload)
+                    last_result = await bot.call_action(
+                        "send_private_forward_msg", **payload
+                    )
             elif isinstance(seg, File):
                 d = await cls._from_segment_to_dict(seg)
-                await cls._dispatch_send(bot, event, is_group, session_id, [d])
+                last_result = await cls._dispatch_send(
+                    bot, event, is_group, session_id, [d]
+                )
             else:
                 messages = await cls._parse_onebot_json(MessageChain([seg]))
                 if not messages:
                     continue
-                await cls._dispatch_send(bot, event, is_group, session_id, messages)
+                last_result = await cls._dispatch_send(
+                    bot, event, is_group, session_id, messages
+                )
                 await asyncio.sleep(0.5)
+        return last_result
 
-    async def send(self, message: MessageChain) -> None:
-        """发送消息"""
+    @staticmethod
+    def _to_send_result(raw: Any) -> MessageSendResult | None:
+        """将协议端原生响应包装为统一的发送结果。"""
+        if raw is None:
+            return None
+        message_id = None
+        if isinstance(raw, dict) and raw.get("message_id") is not None:
+            message_id = str(raw["message_id"])
+        return MessageSendResult(message_id=message_id, raw=raw)
+
+    async def send(self, message: MessageChain) -> MessageSendResult | None:
+        """发送消息
+
+        Returns:
+            MessageSendResult: 发送结果，`message_id` 为协议端返回的消息 ID；
+                消息链为空未发送时为 None。
+
+        """
         event = getattr(self.message_obj, "raw_message", None)
 
         is_group = bool(self.get_group_id())
         session_id = self.get_group_id() if is_group else self.get_sender_id()
 
-        await self.send_message(
+        raw = await self.send_message(
             bot=self.bot,
             message_chain=message,
             event=event,  # 不强制要求一定是 Event
@@ -195,6 +226,7 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
             session_id=session_id,
         )
         await super().send(message)
+        return self._to_send_result(raw)
 
     def _should_stop_sending(self) -> bool:
         # 仅响应打断/用户中止；stop_event() 只停传播，不拦截已 yield 的发送

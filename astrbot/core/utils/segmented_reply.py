@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import random
 import re
-from typing import Iterable
+from collections.abc import Iterable
 
 from astrbot.core.message.components import BaseMessageComponent, Plain, Reply
 

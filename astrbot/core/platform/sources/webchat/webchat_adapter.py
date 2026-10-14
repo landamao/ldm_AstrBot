@@ -24,9 +24,9 @@ from .message_parts_helper import (
     message_chain_to_storage_message_parts,
     parse_webchat_message_parts,
 )
+from .request_flags import resolve_webchat_request_flags
 from .webchat_event import WebChatMessageEvent
 from .webchat_queue_mgr import WebChatQueueMgr, webchat_queue_mgr
-from .request_flags import resolve_webchat_request_flags
 
 
 def _extract_conversation_id(session_id: str) -> str:

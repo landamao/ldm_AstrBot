@@ -1,7 +1,12 @@
 print("正在加载...")
 import atexit
+import os
+import random
+import secrets
 import signal
-import os, sys, time, random, secrets, threading
+import sys
+import threading
+import time
 
 from astrbot.utils.env_file import bootstrap_env
 
@@ -46,10 +51,10 @@ if os.getenv("LDMBOT_SET_TITLE"):
 
 # ========== 原始艺术字与颜色定义 ==========
 ldmnb = r"""
-     __          ______       __    __     __    __     _______ 
+     __          ______       __    __     __    __     _______
     |  |        |       \    |  \  /  |   |  \  |  |   |   _   \
     |  |        |  .--.  |   |   \/   |   |   \ |  |   |  |_)  |
-    |  |        |  |  |  |   |        |   |    \|  |   |   _  < 
+    |  |        |  |  |  |   |        |   |    \|  |   |   _  <
     |  `----.   |  '--'  |   |  |\/|  |   |  |\    |   |  |_)  |
     |_______|   |_______/    |__|  |__|   |__| \___|   |_______/
 """
@@ -497,10 +502,12 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
     _parser.parse_args()
     sys.exit(0)
 
-import runtime_bootstrap  # noqa: E402
 import asyncio
 import mimetypes
 from pathlib import Path
+
+import runtime_bootstrap  # noqa: E402
+
 runtime_bootstrap.initialize_runtime_bootstrap()
 
 
@@ -614,14 +621,16 @@ def _prompt_and_set_reset_password() -> None:
         if raw:
             password = raw
 
-    # 直接写入配置文件
+    # 直接写入配置文件。本函数在模块级 astrbot 导入之前执行（早期 CLI 路径），
+    # 路径与哈希工具必须局部导入。
+    import json
+
     from astrbot.core.utils.astrbot_path import get_astrbot_data_path
     from astrbot.core.utils.auth_password import (
         generate_dashboard_password,
         hash_dashboard_password,
         hash_md5_dashboard_password,
     )
-    import json
 
     data_path = get_astrbot_data_path()
     config_path = os.path.join(data_path, "cmd_config.json")
@@ -658,18 +667,17 @@ def _prompt_and_set_reset_password() -> None:
 _apply_startup_env_flags(sys.argv[1:])
 
 from astrbot.core import LogBroker, LogManager, db_helper, logger  # noqa: E402
+from astrbot.core.dashboard_assets import resolve_dashboard_dist  # noqa: E402
 from astrbot.core.initial_loader import InitialLoader  # noqa: E402
 from astrbot.core.utils.astrbot_path import (  # noqa: E402
     ensure_plugin_module_importable,
     get_astrbot_config_path,
-    get_astrbot_data_path,
     get_astrbot_knowledge_base_path,
     get_astrbot_plugin_path,
     get_astrbot_root,
     get_astrbot_site_packages_path,
     get_astrbot_temp_path,
 )
-from astrbot.core.dashboard_assets import resolve_dashboard_dist  # noqa: E402
 from astrbot.core.utils.runtime_env import is_packaged_desktop_runtime  # noqa: E402
 
 # 日志系统已就绪：若横幅还在播，立刻挂起控制台，避免 import 后续日志打穿动画
@@ -759,7 +767,10 @@ async def main_async(webui_dir_arg: str | None) -> None:
 async def restore_backup_interactive(backup_path: str | None) -> None:
     """启动前交互式恢复数据备份。"""
     from astrbot.core.backup.importer import AstrBotImporter
-    from astrbot.core.utils.astrbot_path import get_astrbot_backups_path, get_astrbot_data_path
+    from astrbot.core.utils.astrbot_path import (
+        get_astrbot_backups_path,
+        get_astrbot_data_path,
+    )
 
     if not backup_path:
         backup_dir = Path(get_astrbot_backups_path())

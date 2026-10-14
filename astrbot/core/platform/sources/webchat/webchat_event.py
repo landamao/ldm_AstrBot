@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import File, Image, Json, Plain, Record
+from astrbot.api.platform import MessageSendResult
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.media_utils import (
     MEDIA_MIME_EXTENSIONS,
@@ -159,10 +160,23 @@ class WebChatMessageEvent(AstrMessageEvent):
 
         return data
 
-    async def send(self, message: MessageChain | None) -> None:
+    async def send(self, message: MessageChain | None) -> MessageSendResult | None:
+        """发送消息。
+
+        Returns:
+            MessageSendResult: `message_id` 为 WebChat 前端侧消息 ID，`raw` 为
+                入队负载；WebChat 无平台侧响应，ID 由本地生成。
+
+        """
         message_id = self.message_obj.message_id
-        await WebChatMessageEvent._send(message_id, message, session_id=self.session_id)
+        data = await WebChatMessageEvent._send(
+            message_id, message, session_id=self.session_id
+        )
         await super().send(MessageChain([]))
+        return MessageSendResult(
+            message_id=str(message_id) if message_id is not None else None,
+            raw=data,
+        )
 
     async def send_streaming(self, generator, use_fallback: bool = False) -> None:
         final_data = ""

@@ -22,12 +22,12 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from astrbot.core import (
+    NO_PLUGINS_MODE,
     DependencyConflictError,
     logger,
     pip_installer,
     sp,
 )
-from astrbot.core import NO_PLUGINS_MODE
 from astrbot.core.agent.handoff import FunctionTool, HandoffTool
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.config.default import VERSION

@@ -7,12 +7,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from astrbot.builtin_stars.builtin_commands.commands.image import (  # noqa: E402
     ImageCommands,
     _截断提示词,
 )
+
+
+@pytest.fixture(autouse=True)
+def _pin_wake_prefix(monkeypatch):
+    """钉住唤醒词为「/」，断言不随本机 data/cmd_config.json 漂移。"""
+    from astrbot.core import astrbot_config
+
+    monkeypatch.setitem(astrbot_config, "wake_prefix", ["/"])
 
 
 class FakeEvent:

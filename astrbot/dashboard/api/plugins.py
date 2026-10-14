@@ -1,26 +1,24 @@
 from __future__ import annotations
 
+import mimetypes
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
-
-import mimetypes
-from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from astrbot.api.web import PluginRequest, bind_request_context
-from astrbot.core import logger
-from astrbot.core import NO_PLUGINS_MODE
+from astrbot.core import NO_PLUGINS_MODE, logger
 from astrbot.core.log import LogManager
 from astrbot.dashboard.asgi_runtime import (
     DashboardRequestState,
     call_request_view,
 )
 from astrbot.dashboard.async_utils import run_maybe_async
-from astrbot.dashboard.responses import ok, error
+from astrbot.dashboard.responses import error, ok
 from astrbot.dashboard.schemas import (
     EnabledPatch,
     PluginByIdRequest,

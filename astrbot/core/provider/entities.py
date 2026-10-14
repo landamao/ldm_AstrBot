@@ -491,7 +491,7 @@ class LLMResponse:
 
 
 def log_llm_response(
-    llm_response: "LLMResponse",
+    llm_response: LLMResponse,
     *,
     elapsed_s: float | None = None,
     model: str | None = None,

@@ -259,6 +259,24 @@ async def list_commands() -> list[dict[str, Any]]:
     return result
 
 
+def collect_commands(only_enabled: bool = False) -> list[CommandDescriptor]:
+    """收集注册表中所有指令的描述符（含指令组与子指令，平铺返回）。
+
+    仅包含已启用插件注册的指令。指令的启停、重命名、别名以运行时注册表
+    当前状态为准（指令管理中的变更会实时同步到注册表）。
+
+    Args:
+        only_enabled: 为 True 时仅返回已启用的指令。
+
+    Returns:
+        CommandDescriptor 列表。
+    """
+    descriptors = _collect_descriptors(include_sub_commands=True)
+    if only_enabled:
+        descriptors = [d for d in descriptors if d.enabled]
+    return descriptors
+
+
 async def list_command_conflicts() -> list[dict[str, Any]]:
     """列出所有冲突的指令组。"""
     descriptors = _collect_descriptors(include_sub_commands=False)

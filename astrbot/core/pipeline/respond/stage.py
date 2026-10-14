@@ -118,7 +118,8 @@ class RespondStage(Stage):
             "random": "随机",
             "fixed": "固定",
         }.get(method, method)
-        on_off = lambda v: "开" if v else "关"
+        def on_off(v):
+            return "开" if v else "关"
 
         # 简易/进阶：用户侧只有「发送节奏」；内部映射后的实际延迟只打印生效那一项
         if mode in ("simple", "advanced"):

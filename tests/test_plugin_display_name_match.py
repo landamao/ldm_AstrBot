@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import functools
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,26 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from astrbot.builtin_stars.builtin_commands.commands.plugin import PluginCommands  # noqa: E402
+
+
+def pin_wake_prefix(fn):
+    """钉住唤醒词为「/」，断言不随本机 data/cmd_config.json 漂移。"""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from astrbot.core import astrbot_config
+
+        原值 = astrbot_config.get("wake_prefix")
+        astrbot_config["wake_prefix"] = ["/"]
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if 原值 is None:
+                astrbot_config.pop("wake_prefix", None)
+            else:
+                astrbot_config["wake_prefix"] = 原值
+
+    return wrapper
 
 
 def make_plugin(name, display_name=None):
@@ -106,6 +127,7 @@ def test_restart_by_name_still_works():
     assert result_text(event) == "插件「astrbot_plugin_stealer」已重启。"
 
 
+@pin_wake_prefix
 def test_fuzzy_unique_hit_returns_hint_without_executing():
     plugins = [
         make_plugin("astrbot_plugin_stealer", "表情包小偷"),
@@ -129,6 +151,7 @@ def test_fuzzy_unique_hit_returns_hint_without_executing():
     )
 
 
+@pin_wake_prefix
 def test_fuzzy_multiple_hits_return_numbered_list():
     plugins = [
         make_plugin("astrbot_plugin_stealer", "表情包小偷"),
@@ -171,6 +194,7 @@ def test_exact_display_hit_multiple_returns_numbered_list():
     assert text.startswith("匹配到多个结果："), text
 
 
+@pin_wake_prefix
 def test_no_hit_returns_not_found():
     plugins = [make_plugin("astrbot_plugin_stealer", "表情包小偷")]
 
@@ -203,6 +227,7 @@ def test_name_takes_priority_over_same_display():
     assert manager.reloaded == ["stealer"], "插件名精确命中应优先于显示名"
 
 
+@pin_wake_prefix
 def test_label_always_shows_name_in_parens():
     """无显示名的插件在候选里也用「插件名（插件名）」格式，保持整齐。"""
     plugins = [
@@ -227,6 +252,7 @@ def test_label_always_shows_name_in_parens():
     )
 
 
+@pin_wake_prefix
 def test_help_multi_hit_tail_reads_naturally():
     plugins = [
         make_plugin("astrbot_plugin_a", "小偷一号"),

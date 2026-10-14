@@ -53,7 +53,8 @@ async def test_生图测试实际请求猫并保存图片和记录回复(tmp_pat
     assert len(文件列表) == 1
     assert 文件列表[0].read_bytes() == 图片数据
     日志文本 = str(日志.info.call_args_list)
-    assert str(文件列表[0].resolve()) in 日志文本
+    # 日志参数是 Path 对象，str(call_args) 按 repr 渲染，Windows 下为 POSIX 分隔符
+    assert 文件列表[0].resolve().as_posix() in 日志文本
     assert "一只可爱的猫" in 日志文本
     assert base64.b64encode(图片数据).decode() not in 日志文本
     assert "提供商: 「测试生图」" in 日志文本

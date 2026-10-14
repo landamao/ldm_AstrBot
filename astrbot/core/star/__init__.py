@@ -2,12 +2,14 @@
 from astrbot.core.provider import Provider
 
 from .base import Star
+from .command_management import CommandDescriptor
 from .context import Context
 from .star import StarMetadata, star_map, star_registry
 from .star_manager import PluginManager
 from .star_tools import StarTools
 
 __all__ = [
+    "CommandDescriptor",
     "Context",
     "PluginManager",
     "Provider",

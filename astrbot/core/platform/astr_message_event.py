@@ -1,10 +1,8 @@
 import abc
 import asyncio
-import hashlib
 import os
 import re
 import sys
-import uuid
 from collections.abc import AsyncGenerator
 from time import time
 from typing import Any
@@ -28,6 +26,7 @@ from astrbot.core.provider.entities import ProviderRequest
 from astrbot.core.utils.trace import TraceSpan
 
 from .astrbot_message import AstrBotMessage, Group
+from .message_send_result import MessageSendResult
 from .message_session import MessageSesion, MessageSession  # noqa
 from .platform_metadata import PlatformMetadata
 
@@ -486,16 +485,18 @@ class AstrMessageEvent(abc.ABC):
 
     """平台适配器"""
 
-    async def send(self, message: MessageChain) -> None:
+    async def send(self, message: MessageChain) -> MessageSendResult | None:
         """发送消息到消息平台。
 
         Args:
             message (MessageChain): 消息链，具体使用方式请参考文档。
 
+        Returns:
+            MessageSendResult | None: 发送结果。是否透传取决于平台适配器的实现，
+                未透传结果的平台返回 None。透传的平台中，`message_id`
+                为平台侧消息 ID（统一字符串），`raw` 为平台原生返回值。
+
         """
-        # Leverage BLAKE2 hash function to generate a non-reversible hash of the sender ID for privacy.
-        hash_obj = hashlib.blake2b(self.get_sender_id().encode("utf-8"), digest_size=16)
-        sid = str(uuid.UUID(bytes=hash_obj.digest()))
         self._has_send_oper = True
 
         # 实时 INFO 日志 + 累计本事件实际发出的纯文本（供打断后历史对齐）

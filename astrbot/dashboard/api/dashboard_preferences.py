@@ -7,11 +7,11 @@ from fastapi.responses import FileResponse
 
 from astrbot.dashboard.responses import ApiError, ok
 from astrbot.dashboard.services.dashboard_preference_service import (
-    DashboardPreferenceService,
     LOGO_FILES_URL_PREFIX,
     LOGO_MAX_SIZE,
     WALLPAPER_FILES_URL_PREFIX,
     WALLPAPER_MAX_SIZE,
+    DashboardPreferenceService,
 )
 
 from .auth import require_dashboard_user

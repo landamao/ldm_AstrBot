@@ -8,17 +8,17 @@ import ssl
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
 import aiohttp
 import certifi
+import jwt
 
 from astrbot.api import sp
 from astrbot.core import DEMO_MODE, file_token_service, logger
-from astrbot.core import NO_PLUGINS_MODE
 from astrbot.core.computer.computer_client import sync_skills_to_active_sandboxes
 from astrbot.core.repository import (
     GitUnavailableError,
@@ -36,11 +36,8 @@ from astrbot.core.star.star_manager import (
     PluginManager,
     PluginVersionUnsupportedError,
 )
-from astrbot.core.utils.github_proxy import log_github_proxy_usage, resolve_github_proxy
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_temp_path
-
-import jwt
-from datetime import datetime, timedelta, timezone
+from astrbot.core.utils.github_proxy import log_github_proxy_usage, resolve_github_proxy
 
 PLUGIN_MARKDOWN_ASSET_TOKEN_TYPE = "plugin_markdown_asset"
 PLUGIN_MARKDOWN_ASSET_TOKEN_TTL_SECONDS = 30 * 60

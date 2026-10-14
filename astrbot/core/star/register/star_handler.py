@@ -75,9 +75,14 @@ def register_command(
     command_name: str | None = None,
     sub_command: str | None = None,
     alias: set | None = None,
+    priority: int = 0,
     **kwargs,
 ):
-    """注册一个 Command."""
+    """注册一个 Command
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
+    """
     new_command = None
     add_to_event_filters = False
     if isinstance(command_name, RegisteringCommandable):
@@ -115,6 +120,7 @@ def register_command(
         handler_md = get_handler_or_create(
             awaitable,
             EventType.AdapterMessageEvent,
+            priority=priority,
             **kwargs,
         )
         if new_command:
@@ -125,13 +131,14 @@ def register_command(
     return decorator
 
 
-def register_custom_filter(custom_type_filter, *args, **kwargs):
+def register_custom_filter(custom_type_filter, *args, priority: int = 0, **kwargs):
     """注册一个自定义的 CustomFilter
 
     Args:
         custom_type_filter: 在裸指令时为CustomFilter对象
                                         在指令组时为父指令的RegisteringCommandable对象，即self或者command_group的返回
         raise_error: 如果没有权限，是否抛出错误到消息平台，并且停止事件传播。默认为 True
+        priority: 处理优先级，数值越大越先执行，默认为 0。
 
     """
     add_to_event_filters = False
@@ -165,6 +172,7 @@ def register_custom_filter(custom_type_filter, *args, **kwargs):
             handler_md = get_handler_or_create(
                 awaitable,
                 EventType.AdapterMessageEvent,
+                priority=priority,
                 **kwargs,
             )
 
@@ -195,6 +203,7 @@ def register_custom_filter(custom_type_filter, *args, **kwargs):
                 handler_md = get_handler_or_create(
                     awaitable,
                     EventType.AdapterMessageEvent,
+                    priority=priority,
                     **kwargs,
                 )
                 handler_md.event_filters.append(custom_filter)
@@ -208,9 +217,14 @@ def register_command_group(
     command_group_name: str | None = None,
     sub_command: str | None = None,
     alias: set | None = None,
+    priority: int = 0,
     **kwargs,
 ):
-    """注册一个 CommandGroup"""
+    """注册一个 CommandGroup
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
+    """
     new_group = None
     if isinstance(command_group_name, RegisteringCommandable):
         # 子指令组
@@ -238,6 +252,7 @@ def register_command_group(
             handler_md = get_handler_or_create(
                 obj,
                 EventType.AdapterMessageEvent,
+                priority=priority,
                 **kwargs,
             )
             handler_md.event_filters.append(new_group)
@@ -259,13 +274,22 @@ class RegisteringCommandable:
         self.parent_group = parent_group
 
 
-def register_event_message_type(event_message_type: EventMessageType, **kwargs):
-    """注册一个 EventMessageType"""
+def register_event_message_type(
+    event_message_type: EventMessageType,
+    priority: int = 0,
+    **kwargs,
+):
+    """注册一个 EventMessageType
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
+    """
 
     def decorator(awaitable):
         handler_md = get_handler_or_create(
             awaitable,
             EventType.AdapterMessageEvent,
+            priority=priority,
             **kwargs,
         )
         handler_md.event_filters.append(EventMessageTypeFilter(event_message_type))
@@ -276,14 +300,20 @@ def register_event_message_type(event_message_type: EventMessageType, **kwargs):
 
 def register_platform_adapter_type(
     platform_adapter_type: PlatformAdapterType,
+    priority: int = 0,
     **kwargs,
 ):
-    """注册一个 PlatformAdapterType"""
+    """注册一个 PlatformAdapterType
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
+    """
 
     def decorator(awaitable):
         handler_md = get_handler_or_create(
             awaitable,
             EventType.AdapterMessageEvent,
+            priority=priority,
             **kwargs,
         )
         handler_md.event_filters.append(
@@ -294,13 +324,18 @@ def register_platform_adapter_type(
     return decorator
 
 
-def register_regex(regex: str | re.Pattern, **kwargs):
-    """注册一个 Regex"""
+def register_regex(regex: str | re.Pattern, priority: int = 0, **kwargs):
+    """注册一个 Regex
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
+    """
 
     def decorator(awaitable):
         handler_md = get_handler_or_create(
             awaitable,
             EventType.AdapterMessageEvent,
+            priority=priority,
             **kwargs,
         )
         handler_md.event_filters.append(RegexFilter(regex))
@@ -310,13 +345,17 @@ def register_regex(regex: str | re.Pattern, **kwargs):
 
 
 def register_permission_type(
-    permission_type: PermissionType, raise_error: bool = True, **kwargs
+    permission_type: PermissionType,
+    raise_error: bool = True,
+    priority: int = 0,
+    **kwargs,
 ):
     """注册一个 PermissionType
 
     Args:
         permission_type: PermissionType
         raise_error: 如果没有权限，是否抛出错误到消息平台，并且停止事件传播。默认为 True
+        priority: 处理优先级，数值越大越先执行，默认为 0。
 
     """
 
@@ -324,6 +363,7 @@ def register_permission_type(
         handler_md = get_handler_or_create(
             awaitable,
             EventType.AdapterMessageEvent,
+            priority=priority,
             **kwargs,
         )
         handler_md.event_filters.append(
@@ -334,27 +374,45 @@ def register_permission_type(
     return decorator
 
 
-def register_on_astrbot_loaded(**kwargs):
-    """当 AstrBot 加载完成时"""
+def register_on_astrbot_loaded(priority: int = 0, **kwargs):
+    """当 AstrBot 加载完成时
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
+    """
 
     def decorator(awaitable):
-        _ = get_handler_or_create(awaitable, EventType.OnAstrBotLoadedEvent, **kwargs)
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnAstrBotLoadedEvent,
+            priority=priority,
+            **kwargs,
+        )
         return awaitable
 
     return decorator
 
 
-def register_on_platform_loaded(**kwargs):
-    """当平台加载完成时"""
+def register_on_platform_loaded(priority: int = 0, **kwargs):
+    """当平台加载完成时
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
+    """
 
     def decorator(awaitable):
-        _ = get_handler_or_create(awaitable, EventType.OnPlatformLoadedEvent, **kwargs)
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnPlatformLoadedEvent,
+            priority=priority,
+            **kwargs,
+        )
         return awaitable
 
     return decorator
 
 
-def register_on_plugin_error(**kwargs):
+def register_on_plugin_error(priority: int = 0, **kwargs):
     """当插件处理消息异常时触发。
 
     Hook 参数:
@@ -363,16 +421,24 @@ def register_on_plugin_error(**kwargs):
     说明:
         在 hook 中调用 `event.stop_event()` 可屏蔽默认报错回显，
         并由插件自行决定是否转发到其他会话。
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
     """
 
     def decorator(awaitable):
-        _ = get_handler_or_create(awaitable, EventType.OnPluginErrorEvent, **kwargs)
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnPluginErrorEvent,
+            priority=priority,
+            **kwargs,
+        )
         return awaitable
 
     return decorator
 
 
-def register_on_plugin_loaded(**kwargs):
+def register_on_plugin_loaded(priority: int = 0, **kwargs):
     """当有插件加载完成时
 
     Hook 参数:
@@ -380,16 +446,24 @@ def register_on_plugin_loaded(**kwargs):
 
     说明:
         当有插件加载完成时，触发该事件并获取到该插件的元数据
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
     """
 
     def decorator(awaitable):
-        _ = get_handler_or_create(awaitable, EventType.OnPluginLoadedEvent, **kwargs)
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnPluginLoadedEvent,
+            priority=priority,
+            **kwargs,
+        )
         return awaitable
 
     return decorator
 
 
-def register_on_plugin_unloaded(**kwargs):
+def register_on_plugin_unloaded(priority: int = 0, **kwargs):
     """当有插件卸载完成时
 
     Hook 参数:
@@ -397,20 +471,31 @@ def register_on_plugin_unloaded(**kwargs):
 
     说明:
         当有插件卸载完成时，触发该事件并获取到该插件的元数据
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
     """
 
     def decorator(awaitable):
-        _ = get_handler_or_create(awaitable, EventType.OnPluginUnloadedEvent, **kwargs)
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnPluginUnloadedEvent,
+            priority=priority,
+            **kwargs,
+        )
         return awaitable
 
     return decorator
 
 
-def register_on_waiting_llm_request(**kwargs):
+def register_on_waiting_llm_request(priority: int = 0, **kwargs):
     """当等待调用 LLM 时的通知事件（在获取锁之前）
 
     此钩子在消息确定要调用 LLM 但还未开始排队等锁时触发，
     适合用于发送"正在思考中..."等用户反馈提示。
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
 
     Examples:
     ```py
@@ -423,15 +508,21 @@ def register_on_waiting_llm_request(**kwargs):
 
     def decorator(awaitable):
         _ = get_handler_or_create(
-            awaitable, EventType.OnWaitingLLMRequestEvent, **kwargs
+            awaitable,
+            EventType.OnWaitingLLMRequestEvent,
+            priority=priority,
+            **kwargs,
         )
         return awaitable
 
     return decorator
 
 
-def register_on_llm_request(**kwargs):
+def register_on_llm_request(priority: int = 0, **kwargs):
     """当有 LLM 请求时的事件
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
 
     Examples:
     ```py
@@ -447,14 +538,22 @@ def register_on_llm_request(**kwargs):
     """
 
     def decorator(awaitable):
-        _ = get_handler_or_create(awaitable, EventType.OnLLMRequestEvent, **kwargs)
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnLLMRequestEvent,
+            priority=priority,
+            **kwargs,
+        )
         return awaitable
 
     return decorator
 
 
-def register_on_llm_response(**kwargs):
+def register_on_llm_response(priority: int = 0, **kwargs):
     """当有 LLM 请求后的事件
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
 
     Examples:
     ```py
@@ -470,14 +569,22 @@ def register_on_llm_response(**kwargs):
     """
 
     def decorator(awaitable):
-        _ = get_handler_or_create(awaitable, EventType.OnLLMResponseEvent, **kwargs)
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnLLMResponseEvent,
+            priority=priority,
+            **kwargs,
+        )
         return awaitable
 
     return decorator
 
 
-def register_on_agent_begin(**kwargs):
+def register_on_agent_begin(priority: int = 0, **kwargs):
     """当 Agent 开始运行时的事件
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
 
     Examples:
     ```py
@@ -498,14 +605,22 @@ def register_on_agent_begin(**kwargs):
     """
 
     def decorator(awaitable):
-        _ = get_handler_or_create(awaitable, EventType.OnAgentBeginEvent, **kwargs)
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnAgentBeginEvent,
+            priority=priority,
+            **kwargs,
+        )
         return awaitable
 
     return decorator
 
 
-def register_on_agent_done(**kwargs):
+def register_on_agent_done(priority: int = 0, **kwargs):
     """当 Agent 运行完成后的事件
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
 
     Examples:
     ```py
@@ -528,15 +643,23 @@ def register_on_agent_done(**kwargs):
     """
 
     def decorator(awaitable):
-        _ = get_handler_or_create(awaitable, EventType.OnAgentDoneEvent, **kwargs)
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnAgentDoneEvent,
+            priority=priority,
+            **kwargs,
+        )
         return awaitable
 
     return decorator
 
 
-def register_on_using_llm_tool(**kwargs):
+def register_on_using_llm_tool(priority: int = 0, **kwargs):
     """当调用函数工具前的事件。
     会传入 tool 和 tool_args 参数。
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
 
     Examples:
     ```py
@@ -552,15 +675,23 @@ def register_on_using_llm_tool(**kwargs):
     """
 
     def decorator(awaitable):
-        _ = get_handler_or_create(awaitable, EventType.OnUsingLLMToolEvent, **kwargs)
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnUsingLLMToolEvent,
+            priority=priority,
+            **kwargs,
+        )
         return awaitable
 
     return decorator
 
 
-def register_on_llm_tool_respond(**kwargs):
+def register_on_llm_tool_respond(priority: int = 0, **kwargs):
     """当调用函数工具后的事件。
     会传入 tool、tool_args 和 tool 的调用结果 tool_result 参数。
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
 
     Examples:
     ```py
@@ -577,7 +708,12 @@ def register_on_llm_tool_respond(**kwargs):
     """
 
     def decorator(awaitable):
-        _ = get_handler_or_create(awaitable, EventType.OnLLMToolRespondEvent, **kwargs)
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnLLMToolRespondEvent,
+            priority=priority,
+            **kwargs,
+        )
         return awaitable
 
     return decorator
@@ -727,13 +863,18 @@ def register_agent(
     return decorator
 
 
-def register_on_decorating_result(**kwargs):
-    """在发送消息前的事件"""
+def register_on_decorating_result(priority: int = 0, **kwargs):
+    """在发送消息前的事件
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
+    """
 
     def decorator(awaitable):
         _ = get_handler_or_create(
             awaitable,
             EventType.OnDecoratingResultEvent,
+            priority=priority,
             **kwargs,
         )
         return awaitable
@@ -741,13 +882,18 @@ def register_on_decorating_result(**kwargs):
     return decorator
 
 
-def register_after_message_sent(**kwargs):
-    """在消息发送后的事件"""
+def register_after_message_sent(priority: int = 0, **kwargs):
+    """在消息发送后的事件
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
+    """
 
     def decorator(awaitable):
         _ = get_handler_or_create(
             awaitable,
             EventType.OnAfterMessageSentEvent,
+            priority=priority,
             **kwargs,
         )
         return awaitable

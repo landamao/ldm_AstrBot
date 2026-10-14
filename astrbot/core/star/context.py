@@ -22,6 +22,8 @@ from astrbot.core.persona_mgr import PersonaManager
 if TYPE_CHECKING:
     from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
 
+    from .command_management import CommandDescriptor
+
 from astrbot.core.platform import Platform
 from astrbot.core.platform.astr_message_event import AstrMessageEvent, MessageSesion
 from astrbot.core.platform.message_type import MessageType
@@ -357,6 +359,24 @@ class Context:
     def get_all_stars(self) -> list[StarMetadata]:
         """获取当前载入的所有插件 Metadata 的列表"""
         return star_registry
+
+    def get_all_commands(self, only_enabled: bool = False) -> list[CommandDescriptor]:
+        """获取所有已注册的指令（含指令组与子指令）。
+
+        Args:
+            only_enabled: 为 True 时仅返回已启用的指令。
+
+        Returns:
+            CommandDescriptor 列表，包含指令的生效名称、别名、描述、所属插件、
+            权限要求与启用状态。已禁用插件注册的指令不会出现在结果中。
+
+        Note:
+            指令的名称、别名与启停状态以指令管理中的当前配置为准，
+            重命名后的生效名反映在 effective_command 字段。
+        """
+        from .command_management import collect_commands
+
+        return collect_commands(only_enabled)
 
     def get_llm_tool_manager(self) -> FunctionToolManager:
         """获取 LLM Tool Manager，其用于管理注册的所有的 Function-calling tools"""

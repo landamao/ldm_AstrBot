@@ -1,6 +1,6 @@
 [project]
 name = "ldmbot"
-version = "4.27.45"
+version = "4.27.46"
 description = "Easy-to-use multi-platform LLM chatbot and development framework"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
@@ -108,6 +108,11 @@ ignore = [
   "ASYNC230", # TODO: handle ASYNC230 in AstrBot
   "ASYNC240", # TODO: handle ASYNC240 in AstrBot
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# main.py 是 CLI 入口：.env 引导与早退参数处理要求 import 穿插在启动逻辑之间；
+# 交互式备份恢复流程有意使用阻塞式 input()。
+"main.py" = ["E402", "ASYNC250"]
 
 [tool.pyright]
 typeCheckingMode = "basic"

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import os
 import tempfile
 import traceback
@@ -26,21 +25,20 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_data_path,
     get_astrbot_temp_path,
 )
-from astrbot.core.utils.update_rollback import (
-    backup_current_version,
-    clear_dir_contents,
-    get_rollback_dir,
-    list_backups,
-    rollback,
-)
-from astrbot.core.utils.update_guard import is_update_disabled, 禁用提示
 from astrbot.core.utils.github_proxy import (
     log_github_proxy_usage,
-    resolve_github_proxy,
     normalize_ldm_mirror,
+    resolve_github_proxy,
 )
 from astrbot.core.utils.io import (
     get_dashboard_version as _get_dashboard_version,
+)
+from astrbot.core.utils.update_guard import is_update_disabled, 禁用提示
+from astrbot.core.utils.update_rollback import (
+    backup_current_version,
+    get_rollback_dir,
+    list_backups,
+    rollback,
 )
 
 DEMO_MODE = _DEMO_MODE
