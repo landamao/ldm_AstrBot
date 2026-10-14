@@ -4,7 +4,7 @@
 
 > 文化自信是中国特色社会主义四个自信之一，我们保持中文使用体验，保持文化自信
 
-更多特性请看更新文档：[CHANGELOG.md](./CHANGELOG.md)
+### **更多特性请看更新文档：[CHANGELOG.md](./CHANGELOG.md)**
 
 ---
 
@@ -73,8 +73,9 @@
 ### 10. 去除了astrbot、webui更新，改为ldmbot更新
 ### 11. 日志颜色改为亮色，info日志改为绿色，黑色背景下观感更好，原来黑色背景加暗色字体，看日志极费眼力
 
-更多特性请看更新文档：[CHANGELOG.md](./CHANGELOG.md)
+## 更多特性请看更新文档：[CHANGELOG.md](./CHANGELOG.md)
 
+---
 ## 📄 手动安装教程
 
 适合希望完全掌控每个环节的用户。
