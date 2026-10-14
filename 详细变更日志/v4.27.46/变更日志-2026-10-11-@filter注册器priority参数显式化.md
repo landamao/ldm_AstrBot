@@ -1,4 +1,4 @@
-# [2026-10-11] @filter 注册器 priority 参数显式化
+# [2026-10-11] `@filter` 注册器 priority 参数显式化
 
 > 本文件为独立变更日志，记录 StarHandler 注册器 priority 参数从 **kwargs 隐式透传改为显式签名参数的改动范围、排序语义与兼容性。
 
