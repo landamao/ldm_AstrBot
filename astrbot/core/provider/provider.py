@@ -39,6 +39,18 @@ class AbstractProvider(abc.ABC):
         """Set the current model name"""
         self.model_name = model_name
 
+    def get_wire_key(self, key: str | None) -> str | bytes | None:
+        """把配置里的 API Key 归一化成能放进 HTTP 头的值。
+
+        非 ASCII 密钥（如含中文的第三方网关密钥）按 UTF-8 编码成 bytes 返回：
+        httpx 要求头值必须是 ASCII 或 bytes，直接传中文 str 会在构造请求时抛
+        UnicodeEncodeError；主流 SDK（openai/anthropic/genai）的 default_headers
+        均接受 bytes 并原样上线。ASCII 密钥原样返回，行为不变。
+        """
+        if not isinstance(key, str) or key.isascii():
+            return key
+        return key.encode("utf-8")
+
     def get_model(self) -> str:
         """Get the current model name"""
         return self.model_name

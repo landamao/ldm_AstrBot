@@ -107,13 +107,25 @@ class ProviderAnthropic(Provider):
         self.chosen_api_key: str = ""
         self.api_keys: list = super().get_keys()
         self.chosen_api_key = self.api_keys[0] if len(self.api_keys) > 0 else ""
-        self.client = AsyncAnthropic(
-            api_key=self.chosen_api_key,
-            timeout=self.timeout,
-            base_url=self.base_url,
-            default_headers=self.custom_headers,
-            http_client=self._create_http_client(provider_config),
-        )
+        # 非 ASCII 密钥(httpx 要求头值为 ASCII)转成 UTF-8 bytes 头透传,
+        # 同时把 api_key 置 None 避免 SDK 自己再输出 str 版中文头
+        wire_key = self.get_wire_key(self.chosen_api_key)
+        if isinstance(wire_key, bytes):
+            self.client = AsyncAnthropic(
+                api_key=None,
+                timeout=self.timeout,
+                base_url=self.base_url,
+                default_headers={"X-Api-Key": wire_key} | (self.custom_headers or {}),
+                http_client=self._create_http_client(provider_config),
+            )
+        else:
+            self.client = AsyncAnthropic(
+                api_key=self.chosen_api_key,
+                timeout=self.timeout,
+                base_url=self.base_url,
+                default_headers=self.custom_headers,
+                http_client=self._create_http_client(provider_config),
+            )
 
     def _create_http_client(self, provider_config: dict) -> httpx.AsyncClient | None:
         """Create an HTTP client with optional proxy and system SSL trust store.
@@ -1030,7 +1042,7 @@ class ProviderAnthropic(Provider):
             return models_str
         except Exception as e:
             logger.error(
-                "获取模型列表失败({}, {})：{}",
+                "获取模型列表失败(%s, %s)：%s",
                 self.display_provider_id(),
                 self.provider_config.get("api_base", ""),
                 e,
@@ -1039,6 +1051,14 @@ class ProviderAnthropic(Provider):
 
     def set_key(self, key: str) -> None:
         self.chosen_api_key = key
+        # 非 ASCII 密钥走 UTF-8 bytes 头透传；键须用 SDK 校验认可的大写 X-Api-Key
+        wire_key = self.get_wire_key(key)
+        if isinstance(wire_key, bytes):
+            self.client.api_key = None
+            self.client._custom_headers["X-Api-Key"] = wire_key
+        else:
+            self.client._custom_headers.pop("X-Api-Key", None)
+            self.client.api_key = key
 
     async def terminate(self):
         if self.client:

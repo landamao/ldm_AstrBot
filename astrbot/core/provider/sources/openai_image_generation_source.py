@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -79,9 +80,12 @@ class ProviderOpenAIImageGeneration(Provider):
     def _build_url(self, path: str) -> str:
         return f"{self.api_base}{path}"
 
-    def _headers(self) -> dict[str, str]:
-        headers = {"Authorization": f"Bearer {self.chosen_api_key}"}
-        return headers
+    def _headers(self) -> dict[str, Any]:
+        # 非 ASCII 密钥转 UTF-8 bytes, httpx 头值要求 ASCII 或 bytes
+        wire_key = self.get_wire_key(self.chosen_api_key)
+        return {"Authorization": b"Bearer " + wire_key} if isinstance(wire_key, bytes) else {
+            "Authorization": f"Bearer {wire_key}"
+        }
 
     @staticmethod
     def _mime_from_response(response: httpx.Response, default: str) -> str:

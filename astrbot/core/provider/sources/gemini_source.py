@@ -90,6 +90,12 @@ class ProviderGoogleGenAI(Provider):
             timeout=self.timeout * 1000,  # 毫秒
         )
 
+        # 非 ASCII 密钥(httpx 要求头值为 ASCII)转成 UTF-8 bytes 头透传,
+        # 覆盖 SDK 自己写入的 str 版 x-goog-api-key
+        wire_key = self.get_wire_key(self.chosen_api_key)
+        if isinstance(wire_key, bytes):
+            http_options.headers = {"x-goog-api-key": wire_key}
+
         # 强制使用 httpx 作为异步 HTTP 后端，避免 aiohttp 响应类型兼容问题 (#7564)
         # httpx.AsyncClient 的 timeout 单位为秒（与 HttpOptions 的毫秒不同）
         async_client_kwargs: dict = {
@@ -993,7 +999,7 @@ class ProviderGoogleGenAI(Provider):
             ]
         except APIError as e:
             logger.error(
-                "获取模型列表失败({}, {})：{}",
+                "获取模型列表失败(%s, %s)：%s",
                 self.display_provider_id(),
                 self.provider_config.get("api_base", ""),
                 e.message,

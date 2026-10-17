@@ -38,6 +38,11 @@ class ProviderGeminiTTSAPI(TTSProvider):
             http_options.async_client_args = {"proxy": proxy}
             logger.info(f"[Gemini TTS] 使用代理: {proxy}")
 
+        # 非 ASCII 密钥(httpx 要求头值为 ASCII)转成 UTF-8 bytes 头透传
+        wire_key = self.get_wire_key(api_key)
+        if isinstance(wire_key, bytes):
+            http_options.headers = {"x-goog-api-key": wire_key}
+
         self.client = genai.Client(api_key=api_key, http_options=http_options).aio
         self.model: str = provider_config.get(
             "gemini_tts_model",

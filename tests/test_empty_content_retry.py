@@ -12,6 +12,7 @@
 """
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
@@ -261,6 +262,21 @@ def test_exception_no_fallback_yields_chinese_error():
     print("test_exception_no_fallback_yields_chinese_error: PASS")
 
 
+class _LogCapture(logging.Handler):
+    """捕获 astrbot logger 的记录。
+
+    emit 里调用 getMessage()，占位符与参数个数不匹配时它会抛错，
+    该记录就不会进入 messages，从而暴露「日志实际没落盘」的问题。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
 def test_tool_call_output_not_treated_as_reasoning_only():
     """带工具调用的响应（无正文）是正常输出，不应触发无正文重试。"""
     provider = MockProvider("main")
@@ -288,6 +304,43 @@ def test_tool_call_output_not_treated_as_reasoning_only():
     print("test_tool_call_output_not_treated_as_reasoning_only: PASS")
 
 
+def test_fallback_switch_warning_names_primary_model():
+    """回退切换告警应正常落日志，且每次点名的都是「刚刚失败的那个模型」。"""
+    main = MockProvider("main")
+    main.responses = [reasoning_only_response()]
+    fb1 = MockProvider("fallback1")
+    fb1.responses = [reasoning_only_response()]
+    fb2 = MockProvider("fallback2")
+    fb2.responses = [text_response("回退二成功")]
+
+    capture = _LogCapture()
+    log = logging.getLogger("astrbot")
+    log.addHandler(capture)
+    try:
+        runner = make_runner(
+            main,
+            fallback_providers=[fb1, fb2],
+            empty_content_retry_enabled=True,
+            empty_content_retry_mode="fallback",
+        )
+        responses = asyncio.run(run_one_step(runner))
+    finally:
+        log.removeHandler(capture)
+
+    assert "回退二成功" in final_text(responses)
+    switches = [m for m in capture.messages if "已切换到回退对话模型" in m]
+    assert len(switches) == 2, f"应记录两次回退切换，实际：{switches}"
+    # 第一次切换：失败的确实是主模型
+    assert switches[0] == "主模型「main」请求失败，已切换到回退对话模型：fallback1", (
+        switches[0]
+    )
+    # 第二次切换：失败的是上一个回退模型，不应再挂到主模型名下
+    assert switches[1] == (
+        "回退对话模型「fallback1」请求失败，已切换到回退对话模型：fallback2"
+    ), switches[1]
+    print("test_fallback_switch_warning_names_primary_model: PASS")
+
+
 if __name__ == "__main__":
     test_reasoning_only_retries_current_model_until_content()
     test_reasoning_only_fallback_mode_switches_immediately()
@@ -296,4 +349,5 @@ if __name__ == "__main__":
     test_reasoning_only_exhausted_no_fallback_yields_chinese_error()
     test_exception_no_fallback_yields_chinese_error()
     test_tool_call_output_not_treated_as_reasoning_only()
+    test_fallback_switch_warning_names_primary_model()
     print("\n全部通过 ✓")

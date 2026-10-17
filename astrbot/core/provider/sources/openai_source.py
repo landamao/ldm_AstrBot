@@ -374,12 +374,19 @@ class ProviderOpenAIOfficial(Provider):
             for key in self.custom_headers:
                 self.custom_headers[key] = str(self.custom_headers[key])
 
+        # 非 ASCII 密钥(httpx 要求头值为 ASCII)转成 UTF-8 bytes 头透传
+        wire_key = self.get_wire_key(self.chosen_api_key)
+        auth_default_headers = (
+            {"Authorization": b"Bearer " + wire_key} if isinstance(wire_key, bytes) else None
+        )
+        default_headers = auth_default_headers or self.custom_headers
+
         if "api_version" in provider_config:
             # Using Azure OpenAI API
             self.client = AsyncAzureOpenAI(
                 api_key=self.chosen_api_key,
                 api_version=provider_config.get("api_version", None),
-                default_headers=self.custom_headers,
+                default_headers=default_headers,
                 base_url=provider_config.get("api_base", ""),
                 timeout=self.timeout,
                 http_client=self._create_http_client(provider_config),
@@ -389,7 +396,7 @@ class ProviderOpenAIOfficial(Provider):
             self.client = AsyncOpenAI(
                 api_key=self.chosen_api_key,
                 base_url=provider_config.get("api_base", None),
-                default_headers=self.custom_headers,
+                default_headers=default_headers,
                 timeout=self.timeout,
                 http_client=self._create_http_client(provider_config),
             )
@@ -458,7 +465,7 @@ class ProviderOpenAIOfficial(Provider):
             return models_str
         except Exception as e:
             logger.error(
-                "获取模型列表失败({}, {})：{}",
+                "获取模型列表失败(%s, %s)：%s",
                 self.display_provider_id(),
                 self.provider_config.get("api_base", ""),
                 e,
@@ -1473,7 +1480,13 @@ class ProviderOpenAIOfficial(Provider):
         return self.api_keys
 
     def set_key(self, key) -> None:
-        self.client.api_key = key
+        wire_key = self.get_wire_key(key)
+        self.client._custom_headers.pop("Authorization", None)
+        if isinstance(wire_key, bytes):
+            self.client.api_key = None
+            self.client._custom_headers["Authorization"] = b"Bearer " + wire_key
+        else:
+            self.client.api_key = wire_key
 
     async def assemble_context(
         self,

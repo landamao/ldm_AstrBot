@@ -791,10 +791,13 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             candidate_id = candidate.provider_config.get("id", "<unknown>")
             is_last_candidate = idx == total_candidates - 1
             if idx > 0:
+                failed_id = candidates[idx - 1].provider_config.get("id", "<unknown>")
+                failed_label = "主模型" if idx == 1 else "回退对话模型"
                 logger.warning(
-                    "主模型请求失败，已切换到回退对话模型：%s（原模型：%s）",
+                    "%s「%s」请求失败，已切换到回退对话模型：%s",
+                    failed_label,
+                    failed_id,
                     candidate_id,
-                    self.provider.provider_config.get("id", "<unknown>"),
                 )
             self.provider = candidate
             self.stats.provider_id = str(
