@@ -77,6 +77,8 @@ class RespondStage(Stage):
         self.log_base = float(seg_cfg.get("log_base", 2.6) or 2.6)
         self.linear_base = float(seg_cfg.get("linear_base", 0.5) or 0.5)
         self.linear_factor = float(seg_cfg.get("linear_factor", 0.08) or 0.08)
+        self.linear_min_delay = float(seg_cfg.get("linear_min_delay", 0.0) or 0.0)
+        self.linear_max_delay = float(seg_cfg.get("linear_max_delay", 4.0) or 4.0)
         self.fixed_delay = float(seg_cfg.get("fixed_delay", 1.5) or 1.5)
         self.enable_smart_reply = bool(seg_cfg.get("enable_smart_reply", True))
         self.enable_keep_reply = bool(seg_cfg.get("enable_keep_reply", True))
@@ -93,6 +95,18 @@ class RespondStage(Stage):
                 logger.error(f"解析分段回复的间隔时间失败。{e}")
             logger.info(self._format_segmented_reply_rhythm_log())
 
+
+    def _format_linear_delay_desc(self) -> str:
+        """线性模式的延迟描述，带最短/最长钳制区间（未配置的维度省略）。"""
+        desc = f"线性: {self.linear_base}+{self.linear_factor}*字数"
+        bounds = []
+        if self.linear_min_delay > 0:
+            bounds.append(f"最短{self.linear_min_delay}s")
+        if self.linear_max_delay > 0:
+            bounds.append(f"最长{self.linear_max_delay}s")
+        if bounds:
+            desc += f"（{'，'.join(bounds)}）"
+        return desc
 
     def _format_segmented_reply_rhythm_log(self) -> str:
         """按当前配置模式只打印实际生效的节奏字段（避免简易/进阶混入专业残留项）。"""
@@ -126,7 +140,7 @@ class RespondStage(Stage):
             if method == "fixed":
                 delay_desc = f"固定延迟: {self.fixed_delay}s"
             elif method == "linear":
-                delay_desc = f"线性: {self.linear_base}+{self.linear_factor}*字数"
+                delay_desc = self._format_linear_delay_desc()
             elif method == "log":
                 delay_desc = f"对数底: {self.log_base}"
             elif method == "random":
@@ -147,7 +161,7 @@ class RespondStage(Stage):
 
         # 专业：打印专业模式实际使用的间隔字段
         if method == "linear":
-            delay_desc = f"线性: {self.linear_base}+{self.linear_factor}*字数"
+            delay_desc = self._format_linear_delay_desc()
         elif method == "log":
             delay_desc = f"对数底: {self.log_base}"
         elif method == "random":
@@ -186,6 +200,8 @@ class RespondStage(Stage):
             log_base=self.log_base,
             linear_base=self.linear_base,
             linear_factor=self.linear_factor,
+            linear_min_delay=self.linear_min_delay,
+            linear_max_delay=self.linear_max_delay,
             fixed_delay=self.fixed_delay,
         )
 

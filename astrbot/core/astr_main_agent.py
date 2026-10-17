@@ -44,6 +44,7 @@ from astrbot.core.provider.modalities import (
     provider_supports_modality as _provider_supports_modality,
 )
 from astrbot.core.provider.register import llm_tools
+from astrbot.core.provider.upstream_model_limits import get_model_limits
 from astrbot.core.skills.skill_manager import (
     SkillInfo,
     SkillManager,
@@ -1850,7 +1851,13 @@ async def build_main_agent(
 
     if provider.provider_config.get("max_context_tokens", 0) <= 0:
         model = provider.get_model()
-        if model_info := LLM_METADATAS.get(model):
+        # 优先上游返回的限额，其次内置静态表，最后兜底值
+        upstream_limit = get_model_limits(
+            provider.provider_config.get("id", ""), model
+        )
+        if upstream_limit and upstream_limit.get("context"):
+            provider.provider_config["max_context_tokens"] = upstream_limit["context"]
+        elif model_info := LLM_METADATAS.get(model):
             provider.provider_config["max_context_tokens"] = model_info["limit"][
                 "context"
             ]

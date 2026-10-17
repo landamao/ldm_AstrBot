@@ -34,6 +34,7 @@ from astrbot.core.provider.entities import (
     ToolCallsResult,
     log_llm_response,
 )
+from astrbot.core.provider.upstream_model_limits import record_model_limits
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
     resolve_media_ref_to_base64_data,
@@ -460,8 +461,13 @@ class ProviderOpenAIOfficial(Provider):
                 lambda: self.client.models.list(),
             )
             models = sorted(models.data, key=lambda x: x.id)
+            limits: dict[str, tuple[int | None, int | None]] = {}
             for model in models:
                 models_str.append(model.id)
+                limit = self._extract_upstream_limit(model)
+                if limit is not None:
+                    limits[model.id] = limit
+            record_model_limits(self.provider_config.get("id", ""), limits)
             return models_str
         except Exception as e:
             logger.error(
@@ -471,6 +477,41 @@ class ProviderOpenAIOfficial(Provider):
                 e,
             )
             raise Exception(f"获取模型列表失败：{e}") from e
+
+    @staticmethod
+    def _extract_upstream_limit(model: Any) -> tuple[int | None, int | None] | None:
+        """从上游模型条目提取上下文/输出限额，上游未给出时返回 None。
+
+        /v1/models 标准响应只有 id 等基础字段；部分兼容网关（SiliconFlow
+        等）会额外携带 context_length / max_output_len 之类的扩展字段，
+        落在 pydantic model_extra 里。这里把已知扩展字段名逐一探测。
+        """
+        candidates: list[Any] = [model]
+        extra = getattr(model, "model_extra", None)
+        if isinstance(extra, dict):
+            candidates.append(extra)
+
+        def _pick(names: tuple[str, ...]) -> int | None:
+            for candidate in candidates:
+                if not isinstance(candidate, dict) and not hasattr(candidate, names[0]):
+                    continue
+                for name in names:
+                    if isinstance(candidate, dict):
+                        if name in candidate and candidate[name] is not None:
+                            return candidate[name]
+                    elif hasattr(candidate, name):
+                        value = getattr(candidate, name)
+                        if value is not None:
+                            return value
+            return None
+
+        context = _pick(
+            ("context_length", "context_size", "max_context_length", "context_window")
+        )
+        output = _pick(("max_output_tokens", "max_output_len", "max_tokens_limit"))
+        if context is None and output is None:
+            return None
+        return (context, output)
 
     @staticmethod
     def _sanitize_assistant_messages(payloads: dict) -> None:

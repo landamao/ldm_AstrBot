@@ -164,6 +164,8 @@ def calculate_segment_delay(
     log_base: float = 2.6,
     linear_base: float = 0.5,
     linear_factor: float = 0.1,
+    linear_min_delay: float = 0.0,
+    linear_max_delay: float = 4.0,
     log_offset: float = 0.5,
     log_factor: float = 0.8,
     fixed_delay: float = 1.5,
@@ -194,7 +196,12 @@ def calculate_segment_delay(
         except ValueError:
             return 1.0
     # linear (default, plugin-like natural typing)
-    return max(0.0, float(linear_base) + length * float(linear_factor))
+    delay = float(linear_base) + length * float(linear_factor)
+    if linear_min_delay and linear_min_delay > 0:
+        delay = max(delay, float(linear_min_delay))
+    if linear_max_delay and linear_max_delay > 0:
+        delay = min(delay, float(linear_max_delay))
+    return max(0.0, delay)
 
 
 class SegmentedReplySplitter:
@@ -599,6 +606,8 @@ def _segmented_reply_template() -> dict:
         "log_base": 2.6,
         "linear_base": 0.5,
         "linear_factor": 0.08,
+        "linear_min_delay": 0.0,
+        "linear_max_delay": 4.0,
         "fixed_delay": 1.5,
         "words_count_threshold": 400,
         "max_length_to_disable": 0,
@@ -708,6 +717,8 @@ def resolve_segmented_reply_config(raw: dict | None) -> dict:
         "log_base": pick("log_base", cast=float, default=2.6),
         "linear_base": pick("linear_base", cast=float, default=0.5),
         "linear_factor": pick("linear_factor", cast=float, default=0.08),
+        "linear_min_delay": pick("linear_min_delay", cast=float, default=0.0),
+        "linear_max_delay": pick("linear_max_delay", cast=float, default=4.0),
         "fixed_delay": pick("fixed_delay", cast=float, default=1.5),
         "words_count_threshold": pick("words_count_threshold", cast=int, default=400),
         "max_length_to_disable": pick("max_length_to_disable", cast=int, default=0),

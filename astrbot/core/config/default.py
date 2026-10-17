@@ -86,6 +86,9 @@ DEFAULT_CONFIG = {
             "log_base": 2.6,
             "linear_base": 0.5,
             "linear_factor": 0.08,
+            # 线性模式延迟钳制：0 表示对应维度不限制
+            "linear_min_delay": 0.0,
+            "linear_max_delay": 4.0,
             "fixed_delay": 1.5,
             # 超过该字数则不分段（0 表示不限制；兼容旧 words_count_threshold 语义）
             "words_count_threshold": 400,
@@ -3101,7 +3104,7 @@ CONFIG_METADATA_2 = {
                     "max_context_tokens": {
                         "description": "模型上下文窗口大小",
                         "type": "int",
-                        "hint": "模型最大上下文 Token 大小。如果为 0，则会自动从模型元数据填充（如有）",
+                        "hint": "模型最大上下文 Token 大小。如果为 0，则自动填充：优先使用获取模型列表时上游返回的上下文窗口（如有），其次内置模型元数据（如有）",
                     },
                     "dify_api_key": {
                         "description": "API Key",
@@ -4137,7 +4140,7 @@ CONFIG_METADATA_3 = {
                     "provider_settings.fallback_max_context_tokens": {
                         "description": "上下文窗口兜底值",
                         "type": "int",
-                        "hint": "当 max_context_tokens 为 0 且模型不在内置元数据中时，使用此值作为上下文窗口大小。默认 128000。",
+                        "hint": "当 max_context_tokens 为 0，且上游与内置元数据均未给出上下文窗口时，使用此值作为上下文窗口大小。默认 128000。",
                         "condition": {
                             "provider_settings.agent_runner_type": "local",
                         },
@@ -4850,6 +4853,26 @@ CONFIG_METADATA_3 = {
                         "description": "线性字数系数",
                         "type": "float",
                         "hint": "每字增加的延迟秒数，建议 0.05~0.15。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                            "platform_settings.segmented_reply.interval_method": "linear",
+                        },
+                    },
+                    "platform_settings.segmented_reply.linear_min_delay": {
+                        "description": "线性最短间隔（秒）",
+                        "type": "float",
+                        "hint": "线性模式下每段至少等待的秒数，0 表示不设下限。",
+                        "condition": {
+                            "platform_settings.segmented_reply.enable": True,
+                            "platform_settings.segmented_reply.config_mode": "pro",
+                            "platform_settings.segmented_reply.interval_method": "linear",
+                        },
+                    },
+                    "platform_settings.segmented_reply.linear_max_delay": {
+                        "description": "线性最长间隔（秒）",
+                        "type": "float",
+                        "hint": "线性模式下每段最多等待的秒数，防止长段（如整块代码）等太久，0 表示不设上限。默认 4 秒。",
                         "condition": {
                             "platform_settings.segmented_reply.enable": True,
                             "platform_settings.segmented_reply.config_mode": "pro",

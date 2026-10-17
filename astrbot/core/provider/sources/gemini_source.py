@@ -20,6 +20,7 @@ from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.provider.entities import LLMResponse, TokenUsage, log_llm_response
 from astrbot.core.provider.func_tool_manager import ToolSet
+from astrbot.core.provider.upstream_model_limits import record_model_limits
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
     resolve_media_ref_to_base64_data,
@@ -990,13 +991,22 @@ class ProviderGoogleGenAI(Provider):
                 f"Gemini/{self.display_provider_id()}",
                 lambda: self.client.models.list(),
             )
-            return [
-                m.name.replace("models/", "")
-                for m in models
-                if m.supported_actions
-                and "generateContent" in m.supported_actions
-                and m.name
-            ]
+            model_ids = []
+            limits: dict[str, tuple[int | None, int | None]] = {}
+            for m in models:
+                if not (
+                    m.supported_actions
+                    and "generateContent" in m.supported_actions
+                    and m.name
+                ):
+                    continue
+                model_id = m.name.replace("models/", "")
+                model_ids.append(model_id)
+                info = m.input_token_limit or m.output_token_limit
+                if info:
+                    limits[model_id] = (m.input_token_limit, m.output_token_limit)
+            record_model_limits(self.provider_config.get("id", ""), limits)
+            return model_ids
         except APIError as e:
             logger.error(
                 "获取模型列表失败(%s, %s)：%s",

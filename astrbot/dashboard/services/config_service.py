@@ -1563,14 +1563,16 @@ class ProviderConfigService:
                 continue
             provider_default_tmpl[provider.type] = provider.default_config_tmpl
         providers = copy.deepcopy(self.config.get("provider", []))
-        from astrbot.core.utils.llm_metadata import LLM_METADATAS
-
-        model_metadata = {}
         for provider in providers:
             self._strip_legacy_reasoning_metadata(provider)
-            model_id = provider.get("model")
-            if isinstance(model_id, str) and model_id in LLM_METADATAS:
-                model_metadata[model_id] = LLM_METADATAS[model_id]
+        from astrbot.dashboard.services.model_metadata_builder import (
+            build_model_metadata,
+        )
+
+        model_metadata = build_model_metadata(
+            [provider.get("model") for provider in providers],
+            source_id=None,
+        )
         return {
             "config_schema": config_schema,
             "providers": providers,
@@ -1679,7 +1681,9 @@ class ProviderConfigService:
 
         from astrbot.core.provider import Provider
         from astrbot.core.provider.register import provider_cls_map
-        from astrbot.core.utils.llm_metadata import LLM_METADATAS
+        from astrbot.core.provider.upstream_model_limits import (
+            clear_limits_for_source,
+        )
 
         provider_type = source.get("type")
         if not provider_type:
@@ -1699,6 +1703,8 @@ class ProviderConfigService:
             await run_maybe_async(init_fn)
         try:
             try:
+                # 拉取前清掉该源旧的上游限额记录，避免上游已下线的模型残留
+                clear_limits_for_source(source_id)
                 models = await inst.get_models()
             except Exception as exc:
                 logger.error(
@@ -1709,14 +1715,14 @@ class ProviderConfigService:
             logger.info(
                 f"获取模型列表: 提供商源「{source_id}」获取到 {len(models)} 个模型"
             )
+            from astrbot.dashboard.services.model_metadata_builder import (
+                build_model_metadata,
+            )
+
             return {
                 "models": models,
                 "provider_source_id": source_id,
-                "model_metadata": {
-                    model_id: LLM_METADATAS[model_id]
-                    for model_id in models
-                    if model_id in LLM_METADATAS
-                },
+                "model_metadata": build_model_metadata(models, source_id=source_id),
             }
         finally:
             terminate_fn = getattr(inst, "terminate", None)
@@ -1735,7 +1741,9 @@ class ProviderConfigService:
 
     async def list_provider_models(self, provider_id: str) -> dict:
         from astrbot.core.provider import Provider
-        from astrbot.core.utils.llm_metadata import LLM_METADATAS
+        from astrbot.core.provider.upstream_model_limits import (
+            clear_limits_for_source,
+        )
 
         provider = self.provider_manager.inst_map.get(provider_id)
         if not provider:
@@ -1744,6 +1752,7 @@ class ProviderConfigService:
             raise ValueError(f"提供商 {provider_id} 类型不支持获取模型列表")
 
         try:
+            clear_limits_for_source(provider_id)
             models = await provider.get_models()
         except Exception as exc:
             logger.error(f"获取模型列表失败: 提供商「{provider_id}」- {exc}")
@@ -1752,14 +1761,14 @@ class ProviderConfigService:
         logger.info(
             f"获取模型列表: 提供商「{provider_id}」获取到 {len(models)} 个模型"
         )
+        from astrbot.dashboard.services.model_metadata_builder import (
+            build_model_metadata,
+        )
+
         return {
             "models": models,
             "provider_id": provider_id,
-            "model_metadata": {
-                model_id: LLM_METADATAS[model_id]
-                for model_id in models
-                if model_id in LLM_METADATAS
-            },
+            "model_metadata": build_model_metadata(models, source_id=provider_id),
         }
 
     async def list_provider_models_for_dashboard(
@@ -1840,11 +1849,14 @@ class ProviderConfigService:
         source_id: str | None = None,
         enabled: bool | None = None,
     ) -> dict:
-        from astrbot.core.utils.llm_metadata import LLM_METADATAS
+        from astrbot.dashboard.services.model_metadata_builder import (
+            build_model_metadata,
+        )
 
         provider_type = self._resolve_provider_type(capability)
         providers = []
-        model_metadata = {}
+        metadata_model_ids: list[str | None] = []
+        metadata_source_ids: list[str | None] = []
         source_provider_type = {
             source["id"]: source.get("provider_type", "chat_completion")
             for source in self.provider_manager.provider_sources_config
@@ -1869,9 +1881,20 @@ class ProviderConfigService:
                 provider_response = copy.deepcopy(provider)
             self._strip_legacy_reasoning_metadata(provider_response)
             model_id = provider_response.get("model")
-            if isinstance(model_id, str) and model_id in LLM_METADATAS:
-                model_metadata[model_id] = LLM_METADATAS[model_id]
+            metadata_model_ids.append(model_id if isinstance(model_id, str) else None)
+            metadata_source_ids.append(
+                provider.get("provider_source_id") or provider.get("id")
+            )
             providers.append(provider_response)
+        model_metadata = {}
+        for model_id, meta_source_id in zip(
+            metadata_model_ids, metadata_source_ids, strict=False
+        ):
+            merged = build_model_metadata(
+                [model_id], source_id=meta_source_id if model_id else None
+            )
+            if model_id in merged:
+                model_metadata.setdefault(model_id, merged[model_id])
         return {"providers": providers, "model_metadata": model_metadata}
 
     def list_providers_for_dashboard_types(
@@ -1904,12 +1927,17 @@ class ProviderConfigService:
             raise ValueError(f"Provider {provider_id} not found")
         provider_response = copy.deepcopy(provider)
         self._strip_legacy_reasoning_metadata(provider_response)
-        from astrbot.core.utils.llm_metadata import LLM_METADATAS
+
+        from astrbot.dashboard.services.model_metadata_builder import (
+            build_model_metadata,
+        )
 
         model_id = provider_response.get("model")
-        model_metadata = {}
-        if isinstance(model_id, str) and model_id in LLM_METADATAS:
-            model_metadata[model_id] = LLM_METADATAS[model_id]
+        metadata_source_id = provider_response.get("provider_source_id") or provider_id
+        model_metadata = build_model_metadata(
+            [model_id if isinstance(model_id, str) else None],
+            source_id=metadata_source_id if isinstance(model_id, str) else None,
+        )
         return {"provider": provider_response, "model_metadata": model_metadata}
 
     async def create_provider(self, config: dict, source_id: str | None = None) -> None:
