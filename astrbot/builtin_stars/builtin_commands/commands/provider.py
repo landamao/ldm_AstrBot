@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -10,7 +11,20 @@ from astrbot import logger
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core.provider.entities import ProviderType
+from astrbot.core.provider.provider_ids import (
+    expected_provider_id,
+    is_auto_generated_provider_id,
+)
 from astrbot.core.utils.error_redaction import safe_error
+from astrbot.core.utils.session_selection import (
+    clear_session_provider,
+    has_session_rule,
+    resolve_session_model,
+    set_rule_provider,
+    set_rule_selection,
+    set_session_provider,
+    set_session_selection,
+)
 from astrbot.core.utils.wake_prefix import 获取第一个唤醒词
 
 from .utils.param_utils import 校验非空, 转整数
@@ -25,6 +39,50 @@ MODEL_LOOKUP_MAX_CONCURRENCY_UPPER_BOUND = 16
 MODEL_LIST_CACHE_TTL_KEY = "model_list_cache_ttl_seconds"
 MODEL_LOOKUP_MAX_CONCURRENCY_KEY = "model_lookup_max_concurrency"
 MODEL_CACHE_MAX_ENTRIES = 512
+
+_FLAG_SAVE = "save"
+_FLAG_GLOBAL = "global"
+_SWITCH_FLAGS = {
+    "-save": _FLAG_SAVE,
+    "--save": _FLAG_SAVE,
+    "-global": _FLAG_GLOBAL,
+    "--global": _FLAG_GLOBAL,
+}
+_MODEL_SOURCE_LABELS = {
+    "rule": "自定义规则",
+    "session": "当前会话",
+    "none": "全局配置",
+}
+
+
+def _split_switch_args(
+    raw_args: Sequence[object], *, max_positional: int
+) -> tuple[list[str], str, str]:
+    """拆分位置参数与 -save/-global 开关。
+
+    Returns:
+        (位置参数列表, 模式, 错误提示)。模式为空字符串表示未指定开关。
+    """
+    positional: list[str] = []
+    modes: list[str] = []
+    for raw in raw_args:
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        flag = _SWITCH_FLAGS.get(text.lower())
+        if flag:
+            modes.append(flag)
+        elif text.startswith("-"):
+            return [], "", f"未知参数「{text}」。"
+        else:
+            positional.append(text)
+    if len(modes) > 1:
+        return [], "", "参数 -save 与 -global 不能同时使用。"
+    if len(positional) > max_positional:
+        return [], "", "参数过多，请检查指令格式。"
+    return positional, (modes[0] if modes else ""), ""
 
 
 @dataclass(frozen=True)
@@ -207,15 +265,78 @@ class ProviderCommands:
 
         return None
 
-    def _apply_model(
-        self, prov: Provider, model_name: str, *, umo: str | None = None
-    ) -> str:
-        prov.set_model(model_name)
-        self.invalidate_provider_models_cache(prov.meta().id, umo=umo)
-        return (
-            f"切换模型成功。当前提供商: [{prov.display_provider_id()}] "
-            f"当前模型: [{prov.get_model()}]"
+    def _provider_entry_label(self, provider: Provider) -> str:
+        """用户可见的提供商配置项名：完整 ID，来源不同时附注来源。"""
+        entry_id = str(provider.meta().id or "")
+        provider_config = getattr(provider, "provider_config", {}) or {}
+        return self._provider_label_for_config(entry_id, provider_config)
+
+    def _provider_label_for_id(self, provider_id: str) -> str:
+        provider_config = (
+            self.context.provider_manager.get_provider_config_by_id(provider_id)
+            or {}
         )
+        return self._provider_label_for_config(provider_id, provider_config)
+
+    @staticmethod
+    def _provider_label_for_config(
+        provider_id: str, provider_config: dict
+    ) -> str:
+        source_id = str(provider_config.get("provider_source_id", "") or "")
+        if source_id and source_id != provider_id:
+            return f"{provider_id}（来源 {source_id}）"
+        return provider_id
+
+    async def _sync_provider_entry_id(self, provider_id: str) -> str:
+        """把自动生成但已与 model 失配的配置项 ID 修正回来。
+
+        修好后返回新 ID；不需要修或不是自动命名的配置项返回原 ID。
+        """
+        provider_manager = self.context.provider_manager
+        provider_config = provider_manager.get_provider_config_by_id(provider_id)
+        if not provider_config or not is_auto_generated_provider_id(
+            provider_config
+        ):
+            return provider_id
+        expected_id = expected_provider_id(provider_config)
+        if not expected_id or expected_id == provider_id:
+            return provider_id
+        return await provider_manager.update_provider(
+            provider_id, copy.deepcopy(provider_config)
+        )
+
+    def _find_provider_entry_by_id(self, raw: str) -> Provider | None:
+        """按提供商配置项 ID 精确匹配，例如 /model ldmapi/glm-5.3。"""
+        target = raw.strip()
+        if not target:
+            return None
+        for provider in self.context.get_all_providers():
+            if str(provider.meta().id or "") == target:
+                return provider
+        target_lower = target.casefold()
+        for provider in self.context.get_all_providers():
+            if str(provider.meta().id or "").casefold() == target_lower:
+                return provider
+        return None
+
+    def _find_provider_entry_by_configured_model(
+        self, model_name: str, current_provider_id: str
+    ) -> Provider | None:
+        """按配置项里的 model 字段精确匹配，优先当前配置项。"""
+        target = model_name.strip().casefold()
+        if not target:
+            return None
+        matches: list[Provider] = []
+        for provider in self.context.get_all_providers():
+            configured = str(provider.get_model() or "").strip().casefold()
+            if configured and configured == target:
+                matches.append(provider)
+        if not matches:
+            return None
+        for provider in matches:
+            if str(provider.meta().id or "") == current_provider_id:
+                return provider
+        return matches[0]
 
     async def _get_provider_models(
         self,
@@ -386,13 +507,49 @@ class ProviderCommands:
         event: AstrMessageEvent,
         idx: str | int | None = None,
         idx2: int | None = None,
+        flag: str | None = None,
     ) -> None:
         """查看或者切换 LLM Provider"""
+        positional, mode, arg_err = _split_switch_args(
+            (idx, idx2, flag),
+            max_positional=2,
+        )
+        if arg_err:
+            event.set_result(
+                MessageEventResult().message(
+                    f"{arg_err}\n用法: {获取第一个唤醒词()}provider "
+                    "[序号|tts|stt <序号>] [-save|-global]"
+                ).use_t2i(False)
+            )
+            return
+
         umo = event.unified_msg_origin
         # /provider test 时进行可达性检测，/provider 无参数时不检测
-        reachability_check_enabled = idx == "test"
+        reachability_check_enabled = bool(positional) and positional[0] == "test"
 
-        if idx is None or idx == "test":
+        if not positional or reachability_check_enabled:
+            if mode:
+                if reachability_check_enabled:
+                    event.set_result(
+                        MessageEventResult().message(
+                            "test 不支持 -save/-global 参数。"
+                        ).use_t2i(False)
+                    )
+                    return
+                provider_using = self.context.get_using_provider(umo=umo)
+                if provider_using is None:
+                    event.set_result(
+                        MessageEventResult().message("未找到任何 LLM 提供商。请先配置。")
+                    )
+                    return
+                await self._apply_provider_choice(
+                    event,
+                    ProviderType.CHAT_COMPLETION,
+                    provider_using,
+                    mode,
+                )
+                return
+
             parts = ["## 载入的 LLM 提供商\n"]
 
             # 获取所有类型的提供商
@@ -426,7 +583,6 @@ class ProviderCommands:
             display_data = []
             for (p, p_type), reachable in zip(all_providers, check_results):
                 meta = p.meta()
-                id_ = meta.id
                 error_code = None
 
                 if isinstance(reachable, asyncio.CancelledError):
@@ -446,14 +602,14 @@ class ProviderCommands:
                 else:
                     reachable_flag = reachable
 
-                # 根据类型构建显示名称：提供商取 id 第一个 / 前缀
+                # 显示完整配置项 ID，避免同来源多模型都显示成同一个前缀
                 if p_type == "llm":
-                    info = f"{p.display_provider_id()} · {meta.model or id_}"
+                    info = (
+                        f"{self._provider_entry_label(p)} · "
+                        f"模型 {meta.model or '未设置'}"
+                    )
                 else:
-                    info = f"{p.display_provider_id()}"
-                    if id_ and "/" in str(id_):
-                        # 同前缀多实例时附上完整 id 便于区分
-                        info = f"{info} ({id_})"
+                    info = self._provider_entry_label(p)
 
                 # 确定状态标记
                 if reachable_flag is True:
@@ -510,7 +666,11 @@ class ProviderCommands:
                         line += " (当前使用)"
                     parts.append(line + "\n")
 
-            parts.append(f"\n使用 {获取第一个唤醒词()}provider <序号> 切换 LLM 提供商。")
+            parts.append(
+                f"\n使用 {获取第一个唤醒词()}provider <序号|配置项ID> "
+                "切换当前会话的 LLM 提供商；"
+                "加 -save 保存到自定义规则，加 -global 保存为全局默认。"
+            )
             ret = "".join(parts)
 
             if ttss:
@@ -521,13 +681,13 @@ class ProviderCommands:
                 ret += f"\n已跳过提供商可达性检测，如需检测请使用 {获取第一个唤醒词()}provider test。"
 
             event.set_result(MessageEventResult().message(ret))
-        elif idx == "tts":
-            if idx2 is None:
+        elif positional[0] == "tts":
+            if len(positional) < 2:
                 event.set_result(MessageEventResult().message(
-                    f"使用方法：{获取第一个唤醒词()}provider tts <序号> 切换 TTS 提供商。"
+                    f"使用方法：{获取第一个唤醒词()}provider tts <序号> [-save|-global]"
                 ))
                 return
-            num, err = 转整数(idx2, "TTS 提供商序号", 最小值=1)
+            num, err = 转整数(positional[1], "TTS 提供商序号", 最小值=1)
             if err:
                 event.set_result(MessageEventResult().message(err))
                 return
@@ -537,25 +697,19 @@ class ProviderCommands:
                     f"TTS 提供商序号超出范围，共 {len(tts_providers)} 个。"
                 ))
                 return
-            provider = tts_providers[num - 1]
-            id_ = provider.meta().id
-            await self.context.provider_manager.set_provider(
-                provider_id=id_,
-                provider_type=ProviderType.TEXT_TO_SPEECH,
-                umo=umo,
+            await self._apply_provider_choice(
+                event,
+                ProviderType.TEXT_TO_SPEECH,
+                tts_providers[num - 1],
+                mode,
             )
-            event.set_result(
-                MessageEventResult().message(
-                    f"成功切换到提供商 [{provider.display_provider_id()}]。"
-                )
-            )
-        elif idx == "stt":
-            if idx2 is None:
+        elif positional[0] == "stt":
+            if len(positional) < 2:
                 event.set_result(MessageEventResult().message(
-                    f"使用方法：{获取第一个唤醒词()}provider stt <序号> 切换 STT 提供商。"
+                    f"使用方法：{获取第一个唤醒词()}provider stt <序号> [-save|-global]"
                 ))
                 return
-            num, err = 转整数(idx2, "STT 提供商序号", 最小值=1)
+            num, err = 转整数(positional[1], "STT 提供商序号", 最小值=1)
             if err:
                 event.set_result(MessageEventResult().message(err))
                 return
@@ -565,25 +719,37 @@ class ProviderCommands:
                     f"STT 提供商序号超出范围，共 {len(stt_providers)} 个。"
                 ))
                 return
-            provider = stt_providers[num - 1]
-            id_ = provider.meta().id
-            await self.context.provider_manager.set_provider(
-                provider_id=id_,
-                provider_type=ProviderType.SPEECH_TO_TEXT,
-                umo=umo,
-            )
-            event.set_result(
-                MessageEventResult().message(
-                    f"成功切换到提供商 [{provider.display_provider_id()}]。"
-                )
+            await self._apply_provider_choice(
+                event,
+                ProviderType.SPEECH_TO_TEXT,
+                stt_providers[num - 1],
+                mode,
             )
         else:
-            # 尝试将 idx 转为整数（兼容框架传入 str "3" 或 int 3）
-            num, err = 转整数(idx, "提供商序号", 最小值=1)
+            if len(positional) > 1:
+                event.set_result(
+                    MessageEventResult().message(
+                        "参数过多，请检查指令格式。"
+                    ).use_t2i(False)
+                )
+                return
+            # 先按配置项 ID 精确匹配：/provider ldmapi/glm-5.3
+            entry = self._find_provider_entry_by_id(positional[0])
+            if entry is not None:
+                await self._apply_provider_choice(
+                    event,
+                    ProviderType.CHAT_COMPLETION,
+                    entry,
+                    mode,
+                )
+                return
+            # 再尝试将位置参数转为整数（兼容框架传入 str "3" 或 int 3）
+            num, err = 转整数(positional[0], "提供商序号", 最小值=1)
             if err:
                 event.set_result(MessageEventResult().message(
-                    f"无效的参数「{idx}」。\n"
-                    f"使用方法：{获取第一个唤醒词()}provider <序号> 切换 LLM 提供商，"
+                    f"无效的参数「{positional[0]}」。\n"
+                    f"使用方法：{获取第一个唤醒词()}provider <序号|配置项ID> [-save|-global] "
+                    "切换 LLM 提供商，"
                     f"{获取第一个唤醒词()}provider test 测试连通性，"
                     f"{获取第一个唤醒词()}provider tts/stt <序号> 切换 TTS/STT 提供商。"
                 ))
@@ -594,30 +760,252 @@ class ProviderCommands:
                     f"LLM 提供商序号超出范围，共 {len(llm_providers)} 个。"
                 ))
                 return
-            provider = llm_providers[num - 1]
-            id_ = provider.meta().id
-            await self.context.provider_manager.set_provider(
-                provider_id=id_,
-                provider_type=ProviderType.CHAT_COMPLETION,
-                umo=umo,
+            await self._apply_provider_choice(
+                event,
+                ProviderType.CHAT_COMPLETION,
+                llm_providers[num - 1],
+                mode,
             )
+
+    async def _apply_provider_choice(
+        self,
+        event: AstrMessageEvent,
+        provider_type: ProviderType,
+        provider: Provider,
+        mode: str,
+    ) -> None:
+        """按模式落盘提供商选择：规则 / 会话 / 全局。"""
+        umo = event.unified_msg_origin
+        prefix = 获取第一个唤醒词()
+        original_id = str(provider.meta().id or "")
+        try:
+            provider_id = await self._sync_provider_entry_id(original_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
             event.set_result(
                 MessageEventResult().message(
-                    f"成功切换到提供商 [{provider.display_provider_id()}] · 模型 [{provider.get_model()}]。"
+                    safe_error("同步提供商配置项 ID 失败: ", e)
                 )
             )
-
-    async def _switch_model_by_name(
-        self, message: AstrMessageEvent, model_name: str, prov: Provider
-    ) -> None:
-        model_name = model_name.strip()
-        if not model_name:
-            message.set_result(MessageEventResult().message("模型名不能为空。"))
             return
+        display = self._provider_label_for_id(provider_id)
+        sync_note = ""
+        if provider_id != original_id:
+            sync_note = f"\n已同步配置项 ID: {original_id} -> {provider_id}"
 
-        umo = message.unified_msg_origin
-        config = self._get_model_lookup_config(umo)
-        curr_provider_id = prov.meta().id
+        if mode == _FLAG_GLOBAL:
+            try:
+                await self._save_global_provider(provider_type, provider_id, umo)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                event.set_result(
+                    MessageEventResult().message(
+                        safe_error("保存全局提供商失败: ", e)
+                    )
+                )
+                return
+            msg = (
+                f"已将配置项 [{display}] 设为全局默认。\n"
+                "该会话若配置了自定义规则，规则仍然优先。"
+            )
+        else:
+            try:
+                if mode == _FLAG_SAVE or await has_session_rule(umo):
+                    await set_rule_provider(umo, provider_type, provider_id)
+                    msg = (
+                        "已将提供商写入当前会话的自定义规则并立即生效。\n"
+                        f"当前提供商: [{display}]"
+                    )
+                else:
+                    await set_session_provider(umo, provider_type, provider_id)
+                    msg = (
+                        "已切换当前会话的提供商（仅本会话生效，不影响其他会话）。\n"
+                        f"当前提供商: [{display}]\n"
+                        f"如需持久化为自定义规则请使用 {prefix}provider <序号> -save；"
+                        "如需设为全局默认请使用 -global。"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                event.set_result(
+                    MessageEventResult().message(
+                        safe_error("切换提供商失败: ", e)
+                    )
+                )
+                return
+
+        if provider_type == ProviderType.CHAT_COMPLETION:
+            effective_model, _source = await resolve_session_model(
+                umo, provider_id
+            )
+            effective_model = provider.get_model() or effective_model
+            if effective_model:
+                msg += f"\n当前模型: [{effective_model}]"
+        msg += sync_note
+        event.set_result(MessageEventResult().message(msg).use_t2i(False))
+
+    async def _save_global_provider(
+        self,
+        provider_type: ProviderType,
+        provider_id: str,
+        umo: str,
+    ) -> None:
+        """把提供商写进全局配置，并清除本会话的会话级覆盖。"""
+        config = self.context.get_config()
+        if provider_type == ProviderType.CHAT_COMPLETION:
+            config.setdefault("provider_settings", {})[
+                "default_provider_id"
+            ] = provider_id
+        elif provider_type == ProviderType.TEXT_TO_SPEECH:
+            config.setdefault("provider_tts_settings", {})[
+                "provider_id"
+            ] = provider_id
+        elif provider_type == ProviderType.SPEECH_TO_TEXT:
+            config.setdefault("provider_stt_settings", {})[
+                "provider_id"
+            ] = provider_id
+        else:
+            raise ValueError(f"不支持的提供商类型: {provider_type}")
+        await config.save_config_async()
+        await self.context.provider_manager.set_provider(
+            provider_id=provider_id,
+            provider_type=provider_type,
+            umo=None,
+        )
+        await clear_session_provider(umo, provider_type)
+
+    async def _save_global_model(
+        self, provider_id: str, model: str, umo: str
+    ) -> tuple[bool, str]:
+        """把配置项设为全局默认对话模型；不修改配置项的 model。
+
+        Returns:
+            (该配置项是否本来就是全局默认, 配置项里的模型)
+        """
+        provider_manager = self.context.provider_manager
+        provider_config = provider_manager.get_provider_config_by_id(provider_id)
+        if not provider_config:
+            raise ValueError(f"未找到提供商 [{provider_id}] 的配置")
+
+        configured_model = str(provider_config.get("model", "") or "").strip()
+        if configured_model != model:
+            raise ValueError(
+                f"配置项 [{provider_id}] 的模型是 [{configured_model}]，"
+                f"与目标模型 [{model}] 不一致。"
+            )
+        config = self.context.get_config()
+        settings = config.setdefault("provider_settings", {})
+        provider_already = settings.get("default_provider_id") == provider_id
+
+        if not provider_already:
+            settings["default_provider_id"] = provider_id
+            await config.save_config_async()
+            await provider_manager.set_provider(
+                provider_id=provider_id,
+                provider_type=ProviderType.CHAT_COMPLETION,
+                umo=None,
+            )
+        await clear_session_provider(umo, ProviderType.CHAT_COMPLETION)
+        return provider_already, configured_model
+
+    async def _show_model_list(
+        self,
+        message: AstrMessageEvent,
+        prov: Provider,
+        config: _ModelLookupConfig,
+    ) -> None:
+        models = await self._get_models_or_reply_error(
+            message,
+            prov,
+            config,
+            error_prefix="获取模型列表失败: ",
+            disable_t2i=True,
+        )
+        if models is None:
+            return
+        parts = [
+            f"当前提供商配置项: 「{self._provider_entry_label(prov)}」",
+            "\n下面列出了此配置项可用模型:",
+        ]
+        for i, model in enumerate(models, 1):
+            parts.append(f"\n{i}. {model}")
+
+        curr_model, source = await resolve_session_model(
+            message.unified_msg_origin, prov.meta().id
+        )
+        curr_model = prov.get_model() or curr_model or "无"
+        parts.append(
+            f"\n当前模型: 「{curr_model}」"
+            f"（来源: {_MODEL_SOURCE_LABELS.get(source, source)}）"
+        )
+        prefix = 获取第一个唤醒词()
+        parts.append(
+            f"\n提示: 按编号只改当前配置项的模型；输入模型名会优先匹配"
+            f"ID 或 model 相同的配置项。\n"
+            f"使用 {prefix}model <模型名/编号> 切换当前会话；"
+            "加 -save 保存到自定义规则，加 -global 保存为全局默认。"
+        )
+        message.set_result(
+            MessageEventResult().message("".join(parts)).use_t2i(False)
+        )
+
+    async def _resolve_model_target(
+        self,
+        message: AstrMessageEvent,
+        prov: Provider,
+        config: _ModelLookupConfig,
+        raw_target: str,
+    ) -> tuple[Provider | None, str | None]:
+        """把用户输入解析成 (目标提供商, 目标模型)。失败时已回执。"""
+        num, err = 转整数(raw_target, "模型编号", 最小值=1)
+        if not err:
+            models = await self._get_models_or_reply_error(
+                message,
+                prov,
+                config,
+                error_prefix="获取模型列表失败: ",
+            )
+            if models is None:
+                return None, None
+            if num > len(models):
+                message.set_result(
+                    MessageEventResult().message(
+                        f"模型序号超出范围，共 {len(models)} 个。"
+                    )
+                )
+                return None, None
+            return await self._ensure_target_entry(
+                message, prov, models[num - 1]
+            )
+
+        model_name, name_err = 校验非空(raw_target, "模型名")
+        if name_err:
+            message.set_result(MessageEventResult().message(name_err))
+            return None, None
+
+        # 1) 先按提供商配置项 ID 精确匹配：/model ldmapi/glm-5.3
+        entry = self._find_provider_entry_by_id(model_name)
+        if entry is not None:
+            configured_model = str(entry.get_model() or "").strip()
+            if not configured_model:
+                message.set_result(
+                    MessageEventResult().message(
+                        f"配置项 [{self._provider_entry_label(entry)}] "
+                        "没有设置模型，无法切换。"
+                    )
+                )
+                return None, None
+            return entry, configured_model
+
+        # 2) 再按配置项里配置的 model 精确匹配：/model glm-5.3
+        #    这样“一个模型一个配置项”的场景会切到对应配置项，而不是改当前项的 model。
+        entry = self._find_provider_entry_by_configured_model(
+            model_name, str(prov.meta().id or "")
+        )
+        if entry is not None:
+            return entry, str(entry.get_model()).strip()
 
         models = await self._get_models_or_reply_error(
             message,
@@ -627,133 +1015,210 @@ class ProviderCommands:
             warning_log="获取当前提供商 %s 模型列表失败，停止跨提供商查找: %s",
         )
         if models is None:
-            return
+            return None, None
 
         matched_model_name = self._resolve_model_name(model_name, models)
         if matched_model_name is not None:
-            message.set_result(
-                MessageEventResult().message(
-                    self._apply_model(prov, matched_model_name, umo=umo)
-                ),
+            return await self._ensure_target_entry(
+                message, prov, matched_model_name
             )
-            return
 
         target_prov, matched_target_model_name = await self._find_provider_for_model(
             model_name,
-            exclude_provider_id=curr_provider_id,
+            exclude_provider_id=prov.meta().id,
             config=config,
         )
-
         if target_prov is None or matched_target_model_name is None:
             message.set_result(
                 MessageEventResult().message(
-                    f"模型 [{model_name}] 未在任何已配置的提供商中找到，或所有提供商模型列表获取失败，请检查配置或网络后重试。",
-                ),
+                    f"模型 [{model_name}] 未在任何已配置的提供商中找到，"
+                    "或所有提供商模型列表获取失败，请检查配置或网络后重试。"
+                )
             )
-            return
+            return None, None
+        return await self._ensure_target_entry(
+            message, target_prov, matched_target_model_name
+        )
 
-        target_id = target_prov.meta().id
+    async def _ensure_target_entry(
+        self,
+        message: AstrMessageEvent,
+        template_prov: Provider,
+        model: str,
+    ) -> tuple[Provider | None, str | None]:
+        """确保目标模型有对应的 ``{来源}/{模型}`` 配置项。
+
+        上游模型列表里的模型不一定已经添加成配置项；没有就按来源模板
+        创建一个，保证配置项 ID 始终等于 ``来源/模型``。
+        """
+        template_id = str(template_prov.meta().id or "")
+        configured_model = str(template_prov.get_model() or "").strip()
+        if configured_model == model:
+            return template_prov, model
+
+        provider_manager = self.context.provider_manager
         try:
-            await self.context.provider_manager.set_provider(
-                provider_id=target_id,
-                provider_type=ProviderType.CHAT_COMPLETION,
-                umo=umo,
-            )
-            self._apply_model(target_prov, matched_target_model_name, umo=umo)
-            message.set_result(
-                MessageEventResult().message(
-                    f"检测到模型 [{matched_target_model_name}] 属于提供商 [{target_prov.display_provider_id()}]，已自动切换提供商并设置模型。",
-                ),
+            new_id, created = await provider_manager.ensure_provider_entry(
+                template_id, model
             )
         except asyncio.CancelledError:
             raise
         except Exception as e:
             message.set_result(
                 MessageEventResult().message(
-                    safe_error("跨提供商切换并设置模型失败: ", e)
-                ),
+                    safe_error("创建模型配置项失败: ", e)
+                )
             )
+            return None, None
+
+        new_prov = provider_manager.inst_map.get(new_id)
+        if new_prov is None:
+            message.set_result(
+                MessageEventResult().message(
+                    f"已创建配置项 [{new_id}]，但未加载到提供商实例，"
+                    "请检查配置后重试。"
+                )
+            )
+            return None, None
+        if created:
+            logger.info("已自动创建提供商配置项: %s", new_id)
+        return new_prov, model
+
+    async def _apply_model_choice(
+        self,
+        message: AstrMessageEvent,
+        target_prov: Provider,
+        model: str,
+        mode: str,
+    ) -> None:
+        """按模式落盘模型选择：自定义规则 / 当前会话 / 全局。"""
+        umo = message.unified_msg_origin
+        prefix = 获取第一个唤醒词()
+        original_id = str(target_prov.meta().id or "")
+        try:
+            provider_id = await self._sync_provider_entry_id(original_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            message.set_result(
+                MessageEventResult().message(
+                    safe_error("同步提供商配置项 ID 失败: ", e)
+                )
+            )
+            return
+        display = self._provider_label_for_id(provider_id)
+        sync_note = ""
+        if provider_id != original_id:
+            sync_note = f"\n已同步配置项 ID: {original_id} -> {provider_id}"
+
+        if mode == _FLAG_GLOBAL:
+            try:
+                provider_already, entry_model = await self._save_global_model(
+                    provider_id, model, umo
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                message.set_result(
+                    MessageEventResult().message(
+                        safe_error("保存全局模型失败: ", e)
+                    )
+                )
+                return
+            if provider_already:
+                msg = (
+                    f"配置项 [{display}]（模型 [{entry_model}]）"
+                    "已经是全局默认对话模型，配置没有变化。\n"
+                    "该会话的会话级覆盖已清除。"
+                )
+            else:
+                msg = (
+                    f"已将配置项 [{display}]（模型 [{entry_model}]）"
+                    "设为全局默认对话模型。"
+                )
+            msg += "\n该会话若配置了自定义规则，规则仍然优先。"
+        else:
+            try:
+                if mode == _FLAG_SAVE or await has_session_rule(umo):
+                    await set_rule_selection(umo, provider_id, model)
+                    msg = (
+                        "已将模型写入当前会话的自定义规则并立即生效。\n"
+                        f"当前提供商: [{display}] 当前模型: [{model}]"
+                    )
+                else:
+                    await set_session_selection(umo, provider_id, model)
+                    msg = (
+                        "已切换当前会话的模型（仅本会话生效，不影响其他会话）。\n"
+                        f"当前提供商: [{display}] 当前模型: [{model}]\n"
+                        f"如需持久化为自定义规则请使用 {prefix}model <模型> -save；"
+                        "如需设为全局默认请使用 -global。"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                message.set_result(
+                    MessageEventResult().message(
+                        safe_error("切换模型失败: ", e)
+                    )
+                )
+                return
+        msg += sync_note
+        message.set_result(MessageEventResult().message(msg).use_t2i(False))
 
     async def model_ls(
         self,
         message: AstrMessageEvent,
         idx_or_name: int | str | None = None,
+        flag: str | None = None,
     ) -> None:
         """查看或者切换模型"""
-        prov = self.context.get_using_provider(message.unified_msg_origin)
+        positional, mode, arg_err = _split_switch_args(
+            (idx_or_name, flag),
+            max_positional=1,
+        )
+        if arg_err:
+            message.set_result(
+                MessageEventResult().message(
+                    f"{arg_err}\n用法: {获取第一个唤醒词()}model "
+                    "[模型名/编号] [-save|-global]"
+                ).use_t2i(False)
+            )
+            return
+
+        umo = message.unified_msg_origin
+        prov = self.context.get_using_provider(umo)
         if not prov:
             message.set_result(
                 MessageEventResult().message("未找到任何 LLM 提供商。请先配置。"),
             )
             return
-        config = self._get_model_lookup_config(message.unified_msg_origin)
+        config = self._get_model_lookup_config(umo)
 
-        if idx_or_name is None:
-            models = await self._get_models_or_reply_error(
-                message,
-                prov,
-                config,
-                error_prefix="获取模型列表失败: ",
-                disable_t2i=True,
-            )
-            if models is None:
-                return
-            parts = ["下面列出了此模型提供商可用模型:"]
-            for i, model in enumerate(models, 1):
-                parts.append(f"\n{i}. {model}")
-
-            curr_model = prov.get_model() or "无"
-            parts.append(f"\n当前模型: 「{curr_model}」")
-            parts.append(
-                f"\n提示: 使用 {获取第一个唤醒词()}model <模型名/编号> 切换模型。输入模型名时可自动跨提供商查找并切换；跨提供商也可使用 {获取第一个唤醒词()}provider 切换。"
-            )
-
-            ret = "".join(parts)
-            message.set_result(MessageEventResult().message(ret).use_t2i(False))
-        else:
-            # 尝试转为整数编号（兼容框架传入 int 3 或 str "3"）
-            num, err = 转整数(idx_or_name, "模型编号", 最小值=1)
-            if not err:
-                models = await self._get_models_or_reply_error(
-                    message,
-                    prov,
-                    config,
-                    error_prefix="获取模型列表失败: ",
+        if not positional:
+            if mode:
+                # 无目标时把当前生效的模型保存到规则/全局
+                curr_model, _source = await resolve_session_model(
+                    umo, prov.meta().id
                 )
-                if models is None:
-                    return
-                if num > len(models):
+                curr_model = curr_model or prov.get_model()
+                if not curr_model:
                     message.set_result(
                         MessageEventResult().message(
-                            f"模型序号超出范围，共 {len(models)} 个。"
+                            "当前提供商没有可用模型，无法保存。"
                         )
                     )
                     return
-                try:
-                    new_model = models[num - 1]
-                    message.set_result(
-                        MessageEventResult().message(
-                            self._apply_model(
-                                prov,
-                                new_model,
-                                umo=message.unified_msg_origin,
-                            )
-                        ),
-                    )
-                except Exception as e:
-                    message.set_result(
-                        MessageEventResult().message(
-                            safe_error("切换模型未知错误: ", e)
-                        ),
-                    )
-                    return
-            else:
-                # 不是数字 → 按模型名处理
-                model_name, name_err = 校验非空(idx_or_name, "模型名")
-                if name_err:
-                    message.set_result(MessageEventResult().message(name_err))
-                    return
-                await self._switch_model_by_name(message, model_name, prov)
+                await self._apply_model_choice(message, prov, curr_model, mode)
+                return
+            await self._show_model_list(message, prov, config)
+            return
+
+        target_prov, target_model = await self._resolve_model_target(
+            message, prov, config, positional[0]
+        )
+        if target_prov is None or target_model is None:
+            return
+        await self._apply_model_choice(message, target_prov, target_model, mode)
 
     async def key(self, message: AstrMessageEvent, index: int | None = None) -> None:
         prov = self.context.get_using_provider(message.unified_msg_origin)
@@ -771,7 +1236,10 @@ class ProviderCommands:
                 parts.append(f"\n{i}. {k[:8]}")
 
             parts.append(f"\n当前 Key: {curr_key[:8]}")
-            parts.append("\n当前模型: " + prov.get_model())
+            curr_model, _source = await resolve_session_model(
+                message.unified_msg_origin, prov.meta().id
+            )
+            parts.append("\n当前模型: " + (curr_model or prov.get_model()))
             parts.append(f"\n使用 {获取第一个唤醒词()}key <序号> 切换 Key。")
 
             ret = "".join(parts)

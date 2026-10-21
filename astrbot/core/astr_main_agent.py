@@ -130,6 +130,7 @@ from astrbot.core.utils.quoted_message_parser import (
     extract_quoted_message_images,
     extract_quoted_message_text,
 )
+from astrbot.core.utils.session_selection import resolve_session_model
 from astrbot.core.utils.string_utils import normalize_and_dedupe_strings
 from astrbot.core.workspace import (
     normalize_umo_for_workspace,
@@ -1539,6 +1540,24 @@ async def build_main_agent(
             req.audio_urls = []
             if sel_model := event.get_extra("selected_model"):
                 req.model = sel_model
+            else:
+                # 会话/自定义规则里保存的模型优先于提供商实例的全局模型，
+                # 通过请求级 model 传入，避免改动共享的 provider 实例。
+                try:
+                    session_model, _source = await resolve_session_model(
+                        event.unified_msg_origin,
+                        str(
+                            provider.provider_config.get("id", "")
+                            or provider.meta().id
+                        ),
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("解析会话模型覆盖失败: %s", e)
+                    session_model = None
+                if session_model:
+                    # 配置项 ID 是唯一事实来源：规则/会话选中配置项后，
+                    # 模型取该配置项当前的 model，避免存下来的模型名漂移。
+                    req.model = provider.get_model() or session_model
             if config.provider_wake_prefix and not event.message_str.startswith(
                 config.provider_wake_prefix
             ):
@@ -1849,23 +1868,27 @@ async def build_main_agent(
             req.model = None
         fallback_providers = [p for p in fallback_providers if p is not provider]
 
-    if provider.provider_config.get("max_context_tokens", 0) <= 0:
-        model = provider.get_model()
+    # 上下文窗口按本次实际生效的模型计算：会话/规则模型可能与提供商配置的
+    # 全局模型不同，不能把结果缓存在共享的 provider_config 上。
+    effective_model = req.model or provider.get_model()
+    try:
+        effective_max_context_tokens = int(
+            provider.provider_config.get("max_context_tokens", 0) or 0
+        )
+    except (TypeError, ValueError):
+        effective_max_context_tokens = 0
+    if effective_max_context_tokens <= 0:
         # 优先上游返回的限额，其次内置静态表，最后兜底值
         upstream_limit = get_model_limits(
-            provider.provider_config.get("id", ""), model
+            provider.provider_config.get("id", ""), effective_model
         )
         if upstream_limit and upstream_limit.get("context"):
-            provider.provider_config["max_context_tokens"] = upstream_limit["context"]
-        elif model_info := LLM_METADATAS.get(model):
-            provider.provider_config["max_context_tokens"] = model_info["limit"][
-                "context"
-            ]
+            effective_max_context_tokens = int(upstream_limit["context"])
+        elif model_info := LLM_METADATAS.get(effective_model):
+            effective_max_context_tokens = int(model_info["limit"]["context"])
         else:
             # fallback: default to configured fallback value
-            provider.provider_config["max_context_tokens"] = (
-                config.fallback_max_context_tokens
-            )
+            effective_max_context_tokens = config.fallback_max_context_tokens
 
     if event.get_platform_name() == "webchat":
         asyncio.create_task(
@@ -1915,6 +1938,7 @@ async def build_main_agent(
         agent_hooks=MAIN_AGENT_HOOKS,
         streaming=config.streaming_response,
         context_compress_threshold=config.context_compress_threshold,
+        max_context_tokens=effective_max_context_tokens,
         llm_compress_instruction=config.llm_compress_instruction,
         llm_compress_keep_recent_ratio=config.llm_compress_keep_recent_ratio,
         llm_compress_keep_recent_rounds=config.llm_compress_keep_recent_rounds,

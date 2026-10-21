@@ -297,6 +297,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         enforce_max_turns: int = -1,
         # compression trigger threshold: context tokens / window above which compression kicks in
         context_compress_threshold: float = 0.82,
+        # explicit context window for this request; None falls back to provider config
+        max_context_tokens: int | None = None,
         # llm compressor
         llm_compress_instruction: str | None = None,
         llm_compress_keep_recent_ratio: float = 0.15,
@@ -337,7 +339,11 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self._tool_result_token_counter = EstimateTokenCounter()
         self.request_context_manager_config = ContextConfig(
             # <=0 disables token-based guarding.
-            max_context_tokens=provider.provider_config.get("max_context_tokens", 0),
+            max_context_tokens=(
+                max_context_tokens
+                if max_context_tokens is not None
+                else provider.provider_config.get("max_context_tokens", 0)
+            ),
             # Enforce max turns before token-based guarding.
             enforce_max_turns=self.enforce_max_turns,
             truncate_turns=self.truncate_turns,
@@ -427,7 +433,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             self.provider.provider_config.get("id", "")
         )
         self.stats.model_name = str(
-            self.provider.provider_config.get("model", "")
+            self.req.model or self.provider.provider_config.get("model", "")
         )
 
     def _provider_supports_image_input(self) -> bool:
@@ -804,7 +810,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 candidate.provider_config.get("id", "")
             )
             self.stats.model_name = str(
-                candidate.provider_config.get("model", "")
+                (self.req.model if idx == 0 else None)
+                or candidate.provider_config.get("model", "")
             )
             try:
                 retrying = AsyncRetrying(

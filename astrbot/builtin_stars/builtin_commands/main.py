@@ -298,10 +298,11 @@ class Main(star.Star):
         event: AstrMessageEvent,
         idx: str | int | None = None,
         idx2: int | None = None,
+        flag: str | None = None,
     ) -> None:
-        """查看或者切换 LLM 提供商"""
+        """查看或切换 LLM 提供商：默认只对当前会话生效；-save 保存到自定义规则；-global 保存为全局默认"""
         try:
-            await self.provider_c.provider(event, idx, idx2)
+            await self.provider_c.provider(event, idx, idx2, flag)
         finally:
             event.should_call_llm(True)
 
@@ -341,10 +342,11 @@ class Main(star.Star):
         self,
         event: AstrMessageEvent,
         idx_or_name: int | str | None = None,
+        flag: str | None = None,
     ) -> None:
-        """查看或者切换模型"""
+        """查看或切换模型：默认只对当前会话生效；-save 保存到自定义规则；-global 保存为全局默认"""
         try:
-            await self.provider_c.model_ls(event, idx_or_name)
+            await self.provider_c.model_ls(event, idx_or_name, flag)
         finally:
             event.should_call_llm(True)
 

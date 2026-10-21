@@ -1332,7 +1332,7 @@ def _log_internal_agent_usage(
     model = ""
     provider_display = ""
     try:
-        model = str(provider.get_model() or "")
+        model = str(getattr(stats, "model_name", "") or provider.get_model() or "")
     except Exception:
         model = ""
     try:
@@ -1410,7 +1410,7 @@ async def _record_internal_agent_stats(
             umo=event.unified_msg_origin,
             conversation_id=conversation_id,
             provider_id=provider_config.get("id", "") or provider.meta().id,
-            provider_model=provider.get_model(),
+            provider_model=stats.model_name or provider.get_model(),
             status=status,
             stats=stats.to_dict(),
             agent_type="internal",

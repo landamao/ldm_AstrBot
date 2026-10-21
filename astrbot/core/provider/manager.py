@@ -9,6 +9,7 @@ from astrbot.core import astrbot_config, logger, sp
 from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
 from astrbot.core.db import BaseDatabase
 from astrbot.core.utils.error_redaction import safe_error
+from astrbot.core.utils.session_selection import get_session_provider_override
 
 from ..persona_mgr import PersonaManager
 from .entities import ProviderType, format_provider_display_id
@@ -19,6 +20,11 @@ from .provider import (
     RerankProvider,
     STTProvider,
     TTSProvider,
+)
+from .provider_ids import (
+    expected_provider_id,
+    is_auto_generated_provider_id,
+    replace_provider_id_in_config,
 )
 from .register import llm_tools, provider_cls_map
 
@@ -230,6 +236,7 @@ class ProviderManager:
         provider = None
         provider_id = None
         if umo:
+            # 自定义规则里的提供商优先；没有规则时再看会话级覆盖。
             provider_id = sp.get(
                 f"provider_perf_{provider_type.value}",
                 None,
@@ -238,6 +245,14 @@ class ProviderManager:
             )
             if provider_id:
                 provider = self.inst_map.get(provider_id)
+            if provider is None:
+                session_provider_id = get_session_provider_override(
+                    umo,
+                    provider_type,
+                )
+                if session_provider_id:
+                    provider_id = session_provider_id
+                    provider = self.inst_map.get(provider_id)
         if not provider:
             # default setting
             config = self.acm.get_conf(umo)
@@ -279,6 +294,8 @@ class ProviderManager:
         return provider
 
     async def initialize(self) -> None:
+        # 先把与 model 失配的自动生成 ID 修正回来，再加载实例
+        await self._sync_provider_ids()
         # 逐个初始化提供商
         for provider_config in self.providers_config:
             try:
@@ -919,29 +936,185 @@ class ProviderManager:
             self.providers_config = astrbot_config["provider"]
             logger.info(f"提供商 {target_prov_ids} 已从配置中删除。")
 
-    async def update_provider(self, origin_provider_id: str, new_config: dict) -> None:
-        """Update provider config and reload the instance. Config will be saved after update."""
+    async def _sync_provider_ids(self) -> None:
+        """把与 model 失配的自动生成配置项 ID 修正为 ``来源/模型``。
+
+        只处理 ID 以 ``provider_source_id/`` 开头的配置项（WebUI 自动生成
+        的命名），手动改过 ID 的配置项保持原样。改名后同步配置引用与
+        会话偏好，避免默认模型链、规则等指向旧 ID。
+        """
+        config = self.acm.default_conf
+        providers = config.get("provider", [])
+        existing_ids = {str(p.get("id", "")) for p in providers}
+        changed = False
+        for provider_config in providers:
+            if not is_auto_generated_provider_id(provider_config):
+                continue
+            old_id = str(provider_config.get("id", ""))
+            new_id = expected_provider_id(provider_config)
+            if not new_id or new_id == old_id:
+                continue
+            if new_id in existing_ids:
+                logger.warning(
+                    "提供商 ID 同步跳过: %s -> %s（目标 ID 已存在）",
+                    old_id,
+                    new_id,
+                )
+                continue
+            provider_config["id"] = new_id
+            existing_ids.discard(old_id)
+            existing_ids.add(new_id)
+            replace_provider_id_in_config(config, old_id, new_id)
+            await self._rename_provider_preferences(
+                old_id,
+                new_id,
+                str(provider_config.get("model", "") or "").strip(),
+            )
+            logger.info("提供商 ID 已按 model 同步: %s -> %s", old_id, new_id)
+            changed = True
+        if changed:
+            await config.save_config_async()
+            self.providers_config = config["provider"]
+            self.provider_sources_config = config.get("provider_sources", [])
+
+    async def _rename_provider_preferences(
+        self, old_id: str, new_id: str, model: str
+    ) -> None:
+        """同步会话偏好里对旧提供商 ID 的引用。"""
+        sp_obj = self.acm.sp
+        prefs = await sp_obj.range_get_async("umo", None, None)
+        for pref in prefs or []:
+            key = str(getattr(pref, "key", "") or "")
+            raw_value = getattr(pref, "value", None)
+            if not isinstance(raw_value, dict):
+                continue
+            value = raw_value.get("val")
+            changed = False
+            if key.startswith("provider_perf_") or key.startswith(
+                "session_provider_override_"
+            ):
+                if value == old_id:
+                    value = new_id
+                    changed = True
+            elif key == "session_model_override" and isinstance(value, dict):
+                if value.get("provider_id") == old_id:
+                    value["provider_id"] = new_id
+                    if model:
+                        value["model"] = model
+                    changed = True
+            elif key == "session_service_config" and isinstance(value, dict):
+                if value.get("model_provider_id") == old_id:
+                    value["model_provider_id"] = new_id
+                    if model:
+                        value["model"] = model
+                    changed = True
+            if changed:
+                await sp_obj.put_async("umo", pref.scope_id, key, value)
+
+        for key in ("curr_provider", "curr_provider_tts", "curr_provider_stt"):
+            value = await sp_obj.get_async("global", "global", key, None)
+            if value == old_id:
+                await sp_obj.put_async("global", "global", key, new_id)
+
+    async def ensure_provider_entry(
+        self, template_provider_id: str, model: str
+    ) -> tuple[str, bool]:
+        """确保存在 ``来源/模型`` 的配置项，不存在就按模板创建。
+
+        Returns:
+            (provider_id, created)
+        """
+        model = str(model or "").strip()
+        if not model:
+            raise ValueError("模型名不能为空")
+        template = self.get_provider_config_by_id(template_provider_id)
+        if not template:
+            raise ValueError(f"未找到提供商 [{template_provider_id}] 的配置")
+        source_id = str(template.get("provider_source_id", "") or "").strip()
+        if not source_id:
+            raise ValueError(
+                f"配置项 [{template_provider_id}] 没有 provider_source_id，"
+                "无法自动创建新配置项，请先在 WebUI 添加模型。"
+            )
+        new_id = f"{source_id}/{model}"
+        existing = self.get_provider_config_by_id(new_id)
+        if existing is not None:
+            if not existing.get("enable", True):
+                raise ValueError(
+                    f"配置项 [{new_id}] 已存在但处于禁用状态，请先在 WebUI 启用。"
+                )
+            return new_id, False
+        new_config = copy.deepcopy(template)
+        new_config["id"] = new_id
+        new_config["model"] = model
+        new_config["enable"] = True
+        # 旧模型的上下文窗口不一定适用于新模型，交给按模型自动识别。
+        new_config["max_context_tokens"] = 0
+        await self.create_provider(new_config)
+        return new_id, True
+
+    async def update_provider(
+        self, origin_provider_id: str, new_config: dict
+    ) -> str:
+        """Update provider config and reload the instance.
+
+        返回生效后的提供商 ID：WebUI 改了 ID 就用手填值；否则如果配置项
+        属于自动生成的 ``来源/模型`` 形式，会按 model 同步 ID。
+
+        Config will be saved after update.
+        """
         async with self.resource_lock:
-            npid = new_config.get("id", None)
-            if not npid:
-                raise ValueError("新的提供商配置缺少 id 字段")
             config = self.acm.default_conf
-            for provider in config["provider"]:
-                if (
-                    provider.get("id", None) == npid
-                    and provider.get("id", None) != origin_provider_id
-                ):
-                    raise ValueError(f"提供商 ID「{npid}」已存在，请换一个 ID")
-            # update config
-            for idx, provider in enumerate(config["provider"]):
+            providers = config["provider"]
+            old_config = None
+            for provider in providers:
                 if provider.get("id", None) == origin_provider_id:
-                    config["provider"][idx] = new_config
+                    old_config = provider
                     break
-            else:
+            if old_config is None:
                 raise ValueError(f"提供商 ID「{origin_provider_id}」不存在")
+
+            new_provider_id = str(new_config.get("id", "") or "").strip()
+            if not new_provider_id:
+                raise ValueError("新的提供商配置缺少 id 字段")
+
+            # 手填了新 ID 就尊重；没改 ID 时按 model 同步自动生成的 ID。
+            if new_provider_id == origin_provider_id:
+                expected = expected_provider_id(new_config)
+                if (
+                    expected
+                    and expected != origin_provider_id
+                    and is_auto_generated_provider_id(new_config)
+                ):
+                    new_provider_id = expected
+                    new_config["id"] = expected
+
+            for provider in providers:
+                pid = provider.get("id", None)
+                if pid == new_provider_id and pid != origin_provider_id:
+                    raise ValueError(
+                        f"提供商 ID「{new_provider_id}」已存在，请换一个 ID"
+                    )
+
+            for idx, provider in enumerate(providers):
+                if provider.get("id", None) == origin_provider_id:
+                    providers[idx] = new_config
+                    break
+
+            if new_provider_id != origin_provider_id:
+                replace_provider_id_in_config(
+                    config, origin_provider_id, new_provider_id
+                )
+                await self._rename_provider_preferences(
+                    origin_provider_id,
+                    new_provider_id,
+                    str(new_config.get("model", "") or "").strip(),
+                )
+
             config.save_config()
             # reload instance
             await self.reload(new_config)
+            return new_provider_id
 
     async def create_provider(self, new_config: dict) -> None:
         """Add new provider config and load the instance. Config will be saved after addition."""

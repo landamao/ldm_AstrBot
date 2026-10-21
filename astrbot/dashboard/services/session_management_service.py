@@ -12,15 +12,13 @@ from astrbot.core.db import BaseDatabase
 from astrbot.core.db.po import ConversationV2, Preference
 from astrbot.core.provider.entities import ProviderType
 from astrbot.core.umo_alias import build_umo_alias_map, parse_umo, serialize_umo_alias
+from astrbot.core.utils.session_selection import (
+    RULE_MODEL_KEY,
+    RULE_MODEL_PROVIDER_KEY,
+    SESSION_RULE_KEYS,
+)
 
-AVAILABLE_SESSION_RULE_KEYS = [
-    "session_service_config",
-    "session_plugin_config",
-    "kb_config",
-    f"provider_perf_{ProviderType.CHAT_COMPLETION.value}",
-    f"provider_perf_{ProviderType.SPEECH_TO_TEXT.value}",
-    f"provider_perf_{ProviderType.TEXT_TO_SPEECH.value}",
-]
+AVAILABLE_SESSION_RULE_KEYS = SESSION_RULE_KEYS
 
 
 class SessionManagementServiceError(Exception):
@@ -259,6 +257,15 @@ class SessionManagementService:
 
         if rule_key == "session_plugin_config":
             rule_value = {umo: rule_value}
+
+        if rule_key == "session_service_config" and isinstance(rule_value, dict):
+            # WebUI 规则编辑器只认识服务开关/备注/人格，保存时会整体覆盖。
+            # /model 写入的模型字段不在表单里，这里补回，避免被一次编辑抹掉。
+            existing = await sp.get_async("umo", umo, rule_key, {}) or {}
+            if isinstance(existing, dict):
+                for preserve_key in (RULE_MODEL_KEY, RULE_MODEL_PROVIDER_KEY):
+                    if preserve_key not in rule_value and preserve_key in existing:
+                        rule_value[preserve_key] = existing[preserve_key]
 
         await sp.session_put(umo, rule_key, rule_value)
         return {"message": f"规则 {rule_key} 已更新", "umo": umo}

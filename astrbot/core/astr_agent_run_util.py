@@ -569,7 +569,14 @@ async def run_live_agent(
                                 "tts_total_time": tts_duration,
                                 "tts_first_frame_time": tts_first_frame_time,
                                 "tts": tts_provider.meta().type,
-                                "chat_model": agent_runner.provider.get_model(),
+                                "chat_model": (
+                                    getattr(
+                                        getattr(agent_runner, "stats", None),
+                                        "model_name",
+                                        "",
+                                    )
+                                    or agent_runner.provider.get_model()
+                                ),
                             }
                         )
                     ],
