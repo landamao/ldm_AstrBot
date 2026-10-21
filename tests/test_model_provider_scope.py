@@ -140,6 +140,11 @@ def _patch_scope(monkeypatch, *, rule_exists: bool = False):
         "resolve_session_model",
         AsyncMock(return_value=(None, "none")),
     )
+    monkeypatch.setattr(
+        provider_cmd,
+        "resolve_effective_model",
+        AsyncMock(return_value=(None, "none")),
+    )
     return rule_mock, session_mock, save_mock
 
 
@@ -265,7 +270,7 @@ async def test_model列表显示生效模型与来源(monkeypatch):
     _patch_scope(monkeypatch, rule_exists=True)
     monkeypatch.setattr(
         provider_cmd,
-        "resolve_session_model",
+        "resolve_effective_model",
         AsyncMock(return_value=("rule-model", "rule")),
     )
 
@@ -275,6 +280,29 @@ async def test_model列表显示生效模型与来源(monkeypatch):
     text = _text(event)
     assert "rule-model" in text
     assert "自定义规则" in text
+
+
+@pytest.mark.asyncio
+async def test_model列表规则只选提供商时来源仍是自定义规则(monkeypatch):
+    prov = FakeProvider("p1", model="entry-model")
+    cmds = _commands([prov])
+    _patch_scope(monkeypatch, rule_exists=True)
+    fake_sp = FakeSP({"provider_perf_chat_completion": "p1"})
+    monkeypatch.setattr(session_selection, "sp", fake_sp)
+    # 用真实解析函数，验证“规则只选了提供商”时来源不被误判
+    monkeypatch.setattr(
+        provider_cmd,
+        "resolve_effective_model",
+        session_selection.resolve_effective_model,
+    )
+
+    event = FakeEvent()
+    await cmds.model_ls(event)
+
+    text = _text(event)
+    assert "entry-model" in text
+    assert "自定义规则" in text
+    assert "全局配置" not in text
 
 
 @pytest.mark.asyncio
@@ -471,6 +499,48 @@ async def test_会话模型覆盖在无规则时生效(monkeypatch):
 
     assert await resolve_session_model("umo", "p1") == ("session-model", "session")
     assert await resolve_session_model("umo", "p2") == (None, "none")
+
+
+@pytest.mark.asyncio
+async def test_规则只选提供商时生效模型来源是自定义规则(monkeypatch):
+    fake_sp = FakeSP({"provider_perf_chat_completion": "p1"})
+    monkeypatch.setattr(session_selection, "sp", fake_sp)
+
+    # 规则没有单独存模型，模型来自配置项本身，来源仍应算规则
+    assert await session_selection.resolve_effective_model(
+        "umo", "p1", "entry-model"
+    ) == ("entry-model", "rule")
+    assert await session_selection.resolve_effective_model(
+        "umo", "p2", "other-model"
+    ) == ("other-model", "none")
+
+
+@pytest.mark.asyncio
+async def test_会话只选提供商时生效模型来源是当前会话(monkeypatch):
+    fake_sp = FakeSP({"session_provider_override_chat_completion": "p1"})
+    monkeypatch.setattr(session_selection, "sp", fake_sp)
+
+    assert await session_selection.resolve_effective_model(
+        "umo", "p1", "entry-model"
+    ) == ("entry-model", "session")
+
+
+@pytest.mark.asyncio
+async def test_规则模型来源且模型以配置项为准(monkeypatch):
+    fake_sp = FakeSP(
+        {
+            "session_service_config": {
+                "model": "stale-model",
+                "model_provider_id": "p1",
+            }
+        }
+    )
+    monkeypatch.setattr(session_selection, "sp", fake_sp)
+
+    # 规则里的模型名漂移时，展示以配置项当前 model 为准
+    assert await session_selection.resolve_effective_model(
+        "umo", "p1", "entry-model"
+    ) == ("entry-model", "rule")
 
 
 @pytest.mark.asyncio

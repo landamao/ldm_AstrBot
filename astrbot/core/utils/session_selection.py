@@ -139,6 +139,41 @@ async def resolve_session_model(
     return None, "none"
 
 
+async def resolve_effective_model(
+    umo: str, provider_id: str | None, provider_model: str | None
+) -> tuple[str | None, str]:
+    """返回当前会话实际生效的模型及其来源。
+
+    配置项的 ``model`` 是唯一事实来源：规则/会话选中某个配置项后，模型就
+    取该配置项的 model。因此来源要看“谁选中了这个配置项”，只看模型字段
+    会把「规则只选了提供商」的会话误判成全局配置。
+
+    Returns:
+        (model, source)，source 为 ``rule`` / ``session`` / ``none``。
+    """
+    provider_id = (provider_id or "").strip()
+    provider_model = (provider_model or "").strip()
+
+    model, source = await resolve_session_model(umo, provider_id)
+    if source != "none":
+        return provider_model or model, source
+
+    if provider_id:
+        prefs = await get_session_prefs(umo)
+        if (
+            prefs.get(rule_provider_key(ProviderType.CHAT_COMPLETION))
+            == provider_id
+        ):
+            return provider_model, "rule"
+        if (
+            prefs.get(session_provider_key(ProviderType.CHAT_COMPLETION))
+            == provider_id
+        ):
+            return provider_model, "session"
+
+    return provider_model, "none"
+
+
 async def set_session_selection(umo: str, provider_id: str, model: str) -> None:
     """写入会话级提供商 + 模型覆盖（不创建自定义规则）。"""
     await sp.session_put(

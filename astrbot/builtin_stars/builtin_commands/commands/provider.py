@@ -19,6 +19,7 @@ from astrbot.core.utils.error_redaction import safe_error
 from astrbot.core.utils.session_selection import (
     clear_session_provider,
     has_session_rule,
+    resolve_effective_model,
     resolve_session_model,
     set_rule_provider,
     set_rule_selection,
@@ -932,12 +933,11 @@ class ProviderCommands:
         for i, model in enumerate(models, 1):
             parts.append(f"\n{i}. {model}")
 
-        curr_model, source = await resolve_session_model(
-            message.unified_msg_origin, prov.meta().id
+        curr_model, source = await resolve_effective_model(
+            message.unified_msg_origin, prov.meta().id, prov.get_model()
         )
-        curr_model = prov.get_model() or curr_model or "无"
         parts.append(
-            f"\n当前模型: 「{curr_model}」"
+            f"\n当前模型: 「{curr_model or '无'}」"
             f"（来源: {_MODEL_SOURCE_LABELS.get(source, source)}）"
         )
         prefix = 获取第一个唤醒词()
@@ -1200,7 +1200,7 @@ class ProviderCommands:
                 curr_model, _source = await resolve_session_model(
                     umo, prov.meta().id
                 )
-                curr_model = curr_model or prov.get_model()
+                curr_model = prov.get_model() or curr_model
                 if not curr_model:
                     message.set_result(
                         MessageEventResult().message(
@@ -1239,7 +1239,7 @@ class ProviderCommands:
             curr_model, _source = await resolve_session_model(
                 message.unified_msg_origin, prov.meta().id
             )
-            parts.append("\n当前模型: " + (curr_model or prov.get_model()))
+            parts.append("\n当前模型: " + (prov.get_model() or curr_model or "无"))
             parts.append(f"\n使用 {获取第一个唤醒词()}key <序号> 切换 Key。")
 
             ret = "".join(parts)
