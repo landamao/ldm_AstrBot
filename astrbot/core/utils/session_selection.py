@@ -270,3 +270,55 @@ async def clear_rule_model_if_bound_elsewhere(umo: str, provider_id: str) -> Non
         cfg.pop(RULE_MODEL_KEY, None)
         cfg.pop(RULE_MODEL_PROVIDER_KEY, None)
         await sp.session_put(umo, SESSION_SERVICE_CONFIG_KEY, cfg)
+
+
+async def _clear_rule_selection(umo: str, provider_type: ProviderType) -> None:
+    """清除自定义规则里的模型/提供商选择，保留规则的其他设置。"""
+    try:
+        await sp.session_remove(umo, rule_provider_key(provider_type))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("清除规则提供商选择 %s 失败: %s", provider_type.value, e)
+
+    if provider_type != ProviderType.CHAT_COMPLETION:
+        return
+    cfg = await sp.get_async("umo", umo, SESSION_SERVICE_CONFIG_KEY, {}) or {}
+    if not isinstance(cfg, dict):
+        return
+    if RULE_MODEL_KEY not in cfg and RULE_MODEL_PROVIDER_KEY not in cfg:
+        return
+    cfg.pop(RULE_MODEL_KEY, None)
+    cfg.pop(RULE_MODEL_PROVIDER_KEY, None)
+    if cfg:
+        await sp.session_put(umo, SESSION_SERVICE_CONFIG_KEY, cfg)
+    else:
+        try:
+            await sp.session_remove(umo, SESSION_SERVICE_CONFIG_KEY)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("清除空的会话服务规则失败: %s", e)
+
+
+async def reset_selection(umo: str, provider_type: ProviderType) -> bool:
+    """重置模型/提供商选择，恢复跟随全局配置。
+
+    同时清除会话级覆盖与自定义规则里的对应选择；规则里的其他设置
+    （人格、插件、知识库、服务开关等）保持不变。
+
+    Returns:
+        是否清除了内容；False 表示本来就没有自定义选择。
+    """
+    prefs = await get_session_prefs(umo)
+    removed = prefs.get(session_provider_key(provider_type)) is not None
+    if provider_type == ProviderType.CHAT_COMPLETION:
+        override = prefs.get(SESSION_MODEL_OVERRIDE_KEY)
+        if isinstance(override, dict) and override.get("model"):
+            removed = True
+    if prefs.get(rule_provider_key(provider_type)) is not None:
+        removed = True
+    cfg = prefs.get(SESSION_SERVICE_CONFIG_KEY)
+    if provider_type == ProviderType.CHAT_COMPLETION and isinstance(cfg, dict):
+        if cfg.get(RULE_MODEL_KEY) or cfg.get(RULE_MODEL_PROVIDER_KEY):
+            removed = True
+
+    await clear_session_provider(umo, provider_type)
+    await _clear_rule_selection(umo, provider_type)
+    return removed

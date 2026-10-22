@@ -19,6 +19,7 @@ from astrbot.core.utils.error_redaction import safe_error
 from astrbot.core.utils.session_selection import (
     clear_session_provider,
     has_session_rule,
+    reset_selection,
     resolve_effective_model,
     resolve_session_model,
     set_rule_provider,
@@ -43,11 +44,14 @@ MODEL_CACHE_MAX_ENTRIES = 512
 
 _FLAG_SAVE = "save"
 _FLAG_GLOBAL = "global"
+_FLAG_RESET = "reset"
 _SWITCH_FLAGS = {
     "-save": _FLAG_SAVE,
     "--save": _FLAG_SAVE,
     "-global": _FLAG_GLOBAL,
     "--global": _FLAG_GLOBAL,
+    "-reset": _FLAG_RESET,
+    "--reset": _FLAG_RESET,
 }
 _MODEL_SOURCE_LABELS = {
     "rule": "自定义规则",
@@ -80,7 +84,7 @@ def _split_switch_args(
         else:
             positional.append(text)
     if len(modes) > 1:
-        return [], "", "参数 -save 与 -global 不能同时使用。"
+        return [], "", "参数 -save、-global、-reset 不能同时使用。"
     if len(positional) > max_positional:
         return [], "", "参数过多，请检查指令格式。"
     return positional, (modes[0] if modes else ""), ""
@@ -519,7 +523,7 @@ class ProviderCommands:
             event.set_result(
                 MessageEventResult().message(
                     f"{arg_err}\n用法: {获取第一个唤醒词()}provider "
-                    "[序号|tts|stt <序号>] [-save|-global]"
+                    "[序号|tts|stt <序号>] [-save|-global|-reset]"
                 ).use_t2i(False)
             )
             return
@@ -533,8 +537,13 @@ class ProviderCommands:
                 if reachability_check_enabled:
                     event.set_result(
                         MessageEventResult().message(
-                            "test 不支持 -save/-global 参数。"
+                            "test 不支持 -save/-global/-reset 参数。"
                         ).use_t2i(False)
+                    )
+                    return
+                if mode == _FLAG_RESET:
+                    await self._reset_provider_choice(
+                        event, ProviderType.CHAT_COMPLETION
                     )
                     return
                 provider_using = self.context.get_using_provider(umo=umo)
@@ -670,22 +679,42 @@ class ProviderCommands:
             parts.append(
                 f"\n使用 {获取第一个唤醒词()}provider <序号|配置项ID> "
                 "切换当前会话的 LLM 提供商；"
-                "加 -save 保存到自定义规则，加 -global 保存为全局默认。"
+                "加 -save 保存到自定义规则，加 -global 保存为全局默认，"
+                "加 -reset 重置为全局默认。"
             )
             ret = "".join(parts)
 
             if ttss:
-                ret += f"\n使用 {获取第一个唤醒词()}provider tts <序号> 切换 TTS 提供商。"
+                ret += (
+                    f"\n使用 {获取第一个唤醒词()}provider tts <序号> 切换 TTS 提供商，"
+                    "加 -reset 重置为全局默认。"
+                )
             if stts:
-                ret += f"\n使用 {获取第一个唤醒词()}provider stt <序号> 切换 STT 提供商。"
+                ret += (
+                    f"\n使用 {获取第一个唤醒词()}provider stt <序号> 切换 STT 提供商，"
+                    "加 -reset 重置为全局默认。"
+                )
             if not reachability_check_enabled:
                 ret += f"\n已跳过提供商可达性检测，如需检测请使用 {获取第一个唤醒词()}provider test。"
 
             event.set_result(MessageEventResult().message(ret))
         elif positional[0] == "tts":
+            if mode == _FLAG_RESET:
+                if len(positional) > 1:
+                    event.set_result(
+                        MessageEventResult().message(
+                            f"重置不需要指定序号，请使用 {获取第一个唤醒词()}provider tts -reset。"
+                        ).use_t2i(False)
+                    )
+                    return
+                await self._reset_provider_choice(
+                    event, ProviderType.TEXT_TO_SPEECH
+                )
+                return
             if len(positional) < 2:
                 event.set_result(MessageEventResult().message(
-                    f"使用方法：{获取第一个唤醒词()}provider tts <序号> [-save|-global]"
+                    f"使用方法：{获取第一个唤醒词()}provider tts <序号> [-save|-global]，"
+                    f"或 {获取第一个唤醒词()}provider tts -reset 重置为全局默认。"
                 ))
                 return
             num, err = 转整数(positional[1], "TTS 提供商序号", 最小值=1)
@@ -705,9 +734,22 @@ class ProviderCommands:
                 mode,
             )
         elif positional[0] == "stt":
+            if mode == _FLAG_RESET:
+                if len(positional) > 1:
+                    event.set_result(
+                        MessageEventResult().message(
+                            f"重置不需要指定序号，请使用 {获取第一个唤醒词()}provider stt -reset。"
+                        ).use_t2i(False)
+                    )
+                    return
+                await self._reset_provider_choice(
+                    event, ProviderType.SPEECH_TO_TEXT
+                )
+                return
             if len(positional) < 2:
                 event.set_result(MessageEventResult().message(
-                    f"使用方法：{获取第一个唤醒词()}provider stt <序号> [-save|-global]"
+                    f"使用方法：{获取第一个唤醒词()}provider stt <序号> [-save|-global]，"
+                    f"或 {获取第一个唤醒词()}provider stt -reset 重置为全局默认。"
                 ))
                 return
             num, err = 转整数(positional[1], "STT 提供商序号", 最小值=1)
@@ -727,6 +769,13 @@ class ProviderCommands:
                 mode,
             )
         else:
+            if mode == _FLAG_RESET:
+                event.set_result(
+                    MessageEventResult().message(
+                        f"重置不需要指定提供商，请使用 {获取第一个唤醒词()}provider -reset。"
+                    ).use_t2i(False)
+                )
+                return
             if len(positional) > 1:
                 event.set_result(
                     MessageEventResult().message(
@@ -749,7 +798,7 @@ class ProviderCommands:
             if err:
                 event.set_result(MessageEventResult().message(
                     f"无效的参数「{positional[0]}」。\n"
-                    f"使用方法：{获取第一个唤醒词()}provider <序号|配置项ID> [-save|-global] "
+                    f"使用方法：{获取第一个唤醒词()}provider <序号|配置项ID> [-save|-global|-reset] "
                     "切换 LLM 提供商，"
                     f"{获取第一个唤醒词()}provider test 测试连通性，"
                     f"{获取第一个唤醒词()}provider tts/stt <序号> 切换 TTS/STT 提供商。"
@@ -767,6 +816,62 @@ class ProviderCommands:
                 llm_providers[num - 1],
                 mode,
             )
+
+    async def _reset_provider_choice(
+        self,
+        event: AstrMessageEvent,
+        provider_type: ProviderType,
+    ) -> None:
+        """清除规则/会话里的提供商选择，恢复跟随全局配置。"""
+        umo = event.unified_msg_origin
+        try:
+            removed = await reset_selection(umo, provider_type)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            event.set_result(
+                MessageEventResult().message(
+                    safe_error("重置提供商选择失败: ", e)
+                ).use_t2i(False)
+            )
+            return
+
+        type_label = {
+            ProviderType.CHAT_COMPLETION: "提供商",
+            ProviderType.TEXT_TO_SPEECH: "TTS 提供商",
+            ProviderType.SPEECH_TO_TEXT: "STT 提供商",
+        }.get(provider_type, "提供商")
+        if removed:
+            msg = (
+                f"已重置当前会话的{type_label}选择（含自定义规则里的选择），"
+                "恢复跟随全局配置。"
+            )
+        else:
+            msg = f"当前会话没有自定义的{type_label}选择，已经跟随全局配置。"
+
+        if provider_type == ProviderType.CHAT_COMPLETION:
+            prov = self.context.get_using_provider(umo)
+            if prov:
+                curr_model, source = await resolve_effective_model(
+                    umo, prov.meta().id, prov.get_model()
+                )
+                label = _MODEL_SOURCE_LABELS.get(source, source)
+                msg += (
+                    f"\n当前提供商: [{self._provider_entry_label(prov)}]"
+                    f"\n当前模型: 「{curr_model or '无'}」（来源: {label}）"
+                )
+        elif provider_type == ProviderType.TEXT_TO_SPEECH:
+            prov = self.context.get_using_tts_provider(umo)
+            if prov:
+                msg += f"\n当前 TTS 提供商: [{self._provider_entry_label(prov)}]"
+        elif provider_type == ProviderType.SPEECH_TO_TEXT:
+            prov = self.context.get_using_stt_provider(umo)
+            if prov:
+                msg += f"\n当前 STT 提供商: [{self._provider_entry_label(prov)}]"
+
+        if await has_session_rule(umo):
+            msg += "\n自定义规则的其他设置（人格、插件、知识库等）保持不变。"
+        event.set_result(MessageEventResult().message(msg).use_t2i(False))
 
     async def _apply_provider_choice(
         self,
@@ -911,6 +1016,40 @@ class ProviderCommands:
         await clear_session_provider(umo, ProviderType.CHAT_COMPLETION)
         return provider_already, configured_model
 
+    async def _reset_model_choice(self, message: AstrMessageEvent) -> None:
+        """清除规则/会话里的模型选择，恢复跟随全局配置。"""
+        umo = message.unified_msg_origin
+        try:
+            removed = await reset_selection(umo, ProviderType.CHAT_COMPLETION)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            message.set_result(
+                MessageEventResult().message(
+                    safe_error("重置模型选择失败: ", e)
+                ).use_t2i(False)
+            )
+            return
+
+        if removed:
+            msg = (
+                "已重置当前会话的模型选择（含自定义规则里的选择），"
+                "恢复跟随全局配置。"
+            )
+        else:
+            msg = "当前会话没有自定义的模型选择，已经跟随全局配置。"
+
+        prov = self.context.get_using_provider(umo)
+        if prov:
+            curr_model, source = await resolve_effective_model(
+                umo, prov.meta().id, prov.get_model()
+            )
+            label = _MODEL_SOURCE_LABELS.get(source, source)
+            msg += f"\n当前模型: 「{curr_model or '无'}」（来源: {label}）"
+        if await has_session_rule(umo):
+            msg += "\n自定义规则的其他设置（人格、插件、知识库等）保持不变。"
+        message.set_result(MessageEventResult().message(msg).use_t2i(False))
+
     async def _show_model_list(
         self,
         message: AstrMessageEvent,
@@ -945,7 +1084,8 @@ class ProviderCommands:
             f"\n提示: 按编号只改当前配置项的模型；输入模型名会优先匹配"
             f"ID 或 model 相同的配置项。\n"
             f"使用 {prefix}model <模型名/编号> 切换当前会话；"
-            "加 -save 保存到自定义规则，加 -global 保存为全局默认。"
+            "加 -save 保存到自定义规则，加 -global 保存为全局默认，"
+            "加 -reset 重置为全局默认。"
         )
         message.set_result(
             MessageEventResult().message("".join(parts)).use_t2i(False)
@@ -1180,7 +1320,7 @@ class ProviderCommands:
             message.set_result(
                 MessageEventResult().message(
                     f"{arg_err}\n用法: {获取第一个唤醒词()}model "
-                    "[模型名/编号] [-save|-global]"
+                    "[模型名/编号] [-save|-global|-reset]"
                 ).use_t2i(False)
             )
             return
@@ -1195,6 +1335,9 @@ class ProviderCommands:
         config = self._get_model_lookup_config(umo)
 
         if not positional:
+            if mode == _FLAG_RESET:
+                await self._reset_model_choice(message)
+                return
             if mode:
                 # 无目标时把当前生效的模型保存到规则/全局
                 curr_model, _source = await resolve_session_model(
@@ -1211,6 +1354,14 @@ class ProviderCommands:
                 await self._apply_model_choice(message, prov, curr_model, mode)
                 return
             await self._show_model_list(message, prov, config)
+            return
+
+        if mode == _FLAG_RESET:
+            message.set_result(
+                MessageEventResult().message(
+                    f"重置不需要指定模型，请使用 {获取第一个唤醒词()}model -reset。"
+                ).use_t2i(False)
+            )
             return
 
         target_prov, target_model = await self._resolve_model_target(

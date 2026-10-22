@@ -120,6 +120,12 @@ class FakeContext:
     def get_all_providers(self) -> list[FakeProvider]:
         return self.providers
 
+    def get_using_tts_provider(self, umo: str | None = None):
+        return None
+
+    def get_using_stt_provider(self, umo: str | None = None):
+        return None
+
     def get_config(self, umo: str | None = None) -> dict:
         return self.config
 
@@ -174,6 +180,87 @@ def test_拆分参数拒绝冲突与未知开关():
         ("3", "-save", "-global"), max_positional=1
     )[2]
     assert "未知参数" in _split_switch_args(("3", "-x"), max_positional=1)[2]
+
+
+def test_拆分参数支持reset并拒绝与其他开关同时使用():
+    assert _split_switch_args(("-reset",), max_positional=1) == ([], "reset", "")
+    assert _split_switch_args(("--reset", "2"), max_positional=1) == (
+        ["2"],
+        "reset",
+        "",
+    )
+    assert "不能同时使用" in _split_switch_args(
+        ("-save", "-reset"), max_positional=1
+    )[2]
+    assert "不能同时使用" in _split_switch_args(
+        ("-global", "-reset"), max_positional=1
+    )[2]
+
+
+@pytest.mark.asyncio
+async def test_model_reset清除规则与会话选择(monkeypatch):
+    prov = FakeProvider("p1", model="global-model")
+    cmds = _commands([prov])
+    _patch_scope(monkeypatch, rule_exists=True)
+    reset_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(provider_cmd, "reset_selection", reset_mock)
+
+    event = FakeEvent()
+    await cmds.model_ls(event, None, "-reset")
+
+    reset_mock.assert_awaited_once_with(
+        event.unified_msg_origin, ProviderType.CHAT_COMPLETION
+    )
+    text = _text(event)
+    assert "已重置" in text
+    assert "全局配置" in text
+
+
+@pytest.mark.asyncio
+async def test_model_reset不接受目标(monkeypatch):
+    cmds = _commands([FakeProvider()])
+    reset_mock = AsyncMock()
+    monkeypatch.setattr(provider_cmd, "reset_selection", reset_mock)
+
+    event = FakeEvent()
+    await cmds.model_ls(event, "2", "-reset")
+
+    reset_mock.assert_not_awaited()
+    assert "重置不需要指定模型" in _text(event)
+
+
+@pytest.mark.asyncio
+async def test_provider_reset清除规则与会话选择(monkeypatch):
+    prov = FakeProvider("p1", model="global-model")
+    cmds = _commands([prov])
+    _patch_scope(monkeypatch, rule_exists=True)
+    reset_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(provider_cmd, "reset_selection", reset_mock)
+
+    event = FakeEvent()
+    await cmds.provider(event, None, None, "-reset")
+
+    reset_mock.assert_awaited_once_with(
+        event.unified_msg_origin, ProviderType.CHAT_COMPLETION
+    )
+    text = _text(event)
+    assert "已重置" in text
+    assert "全局配置" in text
+
+
+@pytest.mark.asyncio
+async def test_provider_tts_reset不需要序号(monkeypatch):
+    cmds = _commands([FakeProvider()])
+    reset_mock = AsyncMock(return_value=False)
+    monkeypatch.setattr(provider_cmd, "reset_selection", reset_mock)
+
+    event = FakeEvent()
+    await cmds.provider(event, "tts", None, "-reset")
+
+    reset_mock.assert_awaited_once_with(
+        event.unified_msg_origin, ProviderType.TEXT_TO_SPEECH
+    )
+    assert "TTS" in _text(event)
 
 
 # ==== /model 三档 ====
@@ -471,6 +558,12 @@ class FakeSP:
     async def get_async(self, scope: str, scope_id: str, key: str, default=None):
         return self.prefs.get(key, default)
 
+    async def session_put(self, umo: str, key: str, value) -> None:
+        self.prefs[key] = value
+
+    async def session_remove(self, umo: str, key: str) -> None:
+        self.prefs.pop(key, None)
+
 
 @pytest.mark.asyncio
 async def test_规则模型优先且按提供商绑定(monkeypatch):
@@ -541,6 +634,65 @@ async def test_规则模型来源且模型以配置项为准(monkeypatch):
     assert await session_selection.resolve_effective_model(
         "umo", "p1", "entry-model"
     ) == ("entry-model", "rule")
+
+
+@pytest.mark.asyncio
+async def test_reset_selection清除规则选择保留其他设置(monkeypatch):
+    fake_sp = FakeSP(
+        {
+            "provider_perf_chat_completion": "p1",
+            "session_model_override": {"provider_id": "p1", "model": "x"},
+            "session_service_config": {
+                "model": "x",
+                "model_provider_id": "p1",
+                "llm_enabled": True,
+                "persona_id": "p",
+            },
+        }
+    )
+    monkeypatch.setattr(session_selection, "sp", fake_sp)
+
+    assert (
+        await session_selection.reset_selection(
+            "umo", ProviderType.CHAT_COMPLETION
+        )
+        is True
+    )
+    assert "provider_perf_chat_completion" not in fake_sp.prefs
+    assert "session_model_override" not in fake_sp.prefs
+    # 规则里的其他设置保留，模型选择字段被移除
+    assert fake_sp.prefs["session_service_config"] == {
+        "llm_enabled": True,
+        "persona_id": "p",
+    }
+
+    # 已经没有任何自定义选择，再重置返回 False
+    assert (
+        await session_selection.reset_selection(
+            "umo", ProviderType.CHAT_COMPLETION
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_reset_selection只清对应类型的提供商(monkeypatch):
+    fake_sp = FakeSP(
+        {
+            "provider_perf_chat_completion": "p1",
+            "provider_perf_text_to_speech": "tts1",
+        }
+    )
+    monkeypatch.setattr(session_selection, "sp", fake_sp)
+
+    assert (
+        await session_selection.reset_selection(
+            "umo", ProviderType.TEXT_TO_SPEECH
+        )
+        is True
+    )
+    assert "provider_perf_text_to_speech" not in fake_sp.prefs
+    assert fake_sp.prefs["provider_perf_chat_completion"] == "p1"
 
 
 @pytest.mark.asyncio

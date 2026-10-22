@@ -5,6 +5,7 @@
 
 > 本文件只作版本索引：每个版本的更新内容在 [changelogs/](changelogs/) 目录下的单版本文件里，点击下方链接直接跳转；每项变更的完整根因与回归记录在「详细变更日志/vX.Y.Z/」目录（4.27.15 起）。
 
+- [v4.27.52](changelogs/v4.27.52.md)
 - [v4.27.51](changelogs/v4.27.51.md)
 - [v4.27.51-beta.2](changelogs/v4.27.51-beta.2.md)
 - [v4.27.51-beta.1](changelogs/v4.27.51-beta.1.md)
