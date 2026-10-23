@@ -22,6 +22,14 @@ from astrbot.core.utils import session_selection
 from astrbot.core.utils.session_selection import resolve_session_model
 
 
+@pytest.fixture(autouse=True)
+def _clear_runtime_overrides():
+    """会话级临时覆盖存在进程内存中，测试间需要清空。"""
+    session_selection.clear_all_session_overrides()
+    yield
+    session_selection.clear_all_session_overrides()
+
+
 class FakeEvent:
     def __init__(self, umo: str = "test:FriendMessage:10001") -> None:
         self.unified_msg_origin = umo
@@ -261,6 +269,110 @@ async def test_provider_tts_reset不需要序号(monkeypatch):
         event.unified_msg_origin, ProviderType.TEXT_TO_SPEECH
     )
     assert "TTS" in _text(event)
+
+
+# ==== -clear 清除内存临时选择 ====
+
+
+def test_拆分参数支持clear并拒绝与其他开关同时使用():
+    assert _split_switch_args(("-clear",), max_positional=1) == ([], "clear", "")
+    assert _split_switch_args(("--clear",), max_positional=1) == (
+        [],
+        "clear",
+        "",
+    )
+    assert "不能同时使用" in _split_switch_args(
+        ("-clear", "-save"), max_positional=1
+    )[2]
+
+
+@pytest.mark.asyncio
+async def test_model_clear清除所有会话的临时选择():
+    cmds = _commands([FakeProvider()])
+    await session_selection.set_session_selection("umo1", "p1", "m1")
+    await session_selection.set_session_provider(
+        "umo2", ProviderType.TEXT_TO_SPEECH, "tts1"
+    )
+
+    event = FakeEvent()
+    await cmds.model_ls(event, None, "-clear")
+
+    assert await session_selection.get_session_model_override("umo1") is None
+    assert (
+        session_selection.get_session_provider_override(
+            "umo1", ProviderType.CHAT_COMPLETION
+        )
+        is None
+    )
+    assert (
+        session_selection.get_session_provider_override(
+            "umo2", ProviderType.TEXT_TO_SPEECH
+        )
+        is None
+    )
+    assert "2 个会话" in _text(event)
+
+
+@pytest.mark.asyncio
+async def test_model_clear没有记录时提示无需清除():
+    cmds = _commands([FakeProvider()])
+
+    event = FakeEvent()
+    await cmds.model_ls(event, None, "-clear")
+
+    assert "无需清除" in _text(event)
+
+
+@pytest.mark.asyncio
+async def test_model_clear不接受目标():
+    cmds = _commands([FakeProvider()])
+    event = FakeEvent()
+    await session_selection.set_session_selection(
+        event.unified_msg_origin, "p1", "m1"
+    )
+
+    await cmds.model_ls(event, "2", "-clear")
+
+    assert "清除不需要指定模型" in _text(event)
+    assert await session_selection.get_session_model_override(
+        event.unified_msg_origin
+    ) == {"provider_id": "p1", "model": "m1"}
+
+
+@pytest.mark.asyncio
+async def test_provider_clear清除所有会话的临时选择():
+    cmds = _commands([FakeProvider("p1"), FakeProvider("p2")])
+    await session_selection.set_session_selection("umo1", "p1", "m1")
+
+    event = FakeEvent()
+    await cmds.provider(event, None, None, "-clear")
+
+    assert await session_selection.get_session_model_override("umo1") is None
+    assert (
+        session_selection.get_session_provider_override(
+            "umo1", ProviderType.CHAT_COMPLETION
+        )
+        is None
+    )
+    assert "1 个会话" in _text(event)
+
+
+@pytest.mark.asyncio
+async def test_provider_clear不接受序号或提供商类型():
+    cmds = _commands([FakeProvider("p1"), FakeProvider("p2")])
+    event = FakeEvent()
+    await session_selection.set_session_selection(
+        event.unified_msg_origin, "p1", "m1"
+    )
+
+    await cmds.provider(event, "2", None, "-clear")
+    assert "清除不需要指定提供商" in _text(event)
+
+    await cmds.provider(event, "tts", None, "-clear")
+    assert "不需要指定提供商类型" in _text(event)
+    assert await session_selection.get_session_model_override(
+        event.unified_msg_origin
+    ) is not None
 
 
 # ==== /model 三档 ====
@@ -566,32 +678,72 @@ class FakeSP:
 
 
 @pytest.mark.asyncio
-async def test_规则模型优先且按提供商绑定(monkeypatch):
+async def test_规则模型在无会话覆盖时生效(monkeypatch):
     fake_sp = FakeSP(
         {
             "session_service_config": {
                 "model": "rule-model",
                 "model_provider_id": "p1",
             },
-            "session_model_override": {"provider_id": "p1", "model": "session-model"},
         }
     )
     monkeypatch.setattr(session_selection, "sp", fake_sp)
 
     assert await resolve_session_model("umo", "p1") == ("rule-model", "rule")
-    # 规则模型绑定 p1，换到 p2 后不适用，落到会话覆盖（同样绑定 p1，也不适用）
+    # 规则模型绑定 p1，换到 p2 后不适用
     assert await resolve_session_model("umo", "p2") == (None, "none")
 
 
 @pytest.mark.asyncio
-async def test_会话模型覆盖在无规则时生效(monkeypatch):
+async def test_规则优先于会话临时覆盖(monkeypatch):
     fake_sp = FakeSP(
-        {"session_model_override": {"provider_id": "p1", "model": "session-model"}}
+        {
+            "session_service_config": {
+                "model": "rule-model",
+                "model_provider_id": "p1",
+            },
+        }
     )
     monkeypatch.setattr(session_selection, "sp", fake_sp)
+    await session_selection.set_session_selection("umo", "p1", "session-model")
+
+    assert await resolve_session_model("umo", "p1") == ("rule-model", "rule")
+    # 规则模型只绑定 p1，换到 p2 后不适用；会话覆盖同样绑定 p1，也不适用
+    assert await resolve_session_model("umo", "p2") == (None, "none")
+
+
+@pytest.mark.asyncio
+async def test_会话临时覆盖重启后失效(monkeypatch):
+    fake_sp = FakeSP({})
+    monkeypatch.setattr(session_selection, "sp", fake_sp)
+    await session_selection.set_session_selection("umo", "p1", "session-model")
+
+    assert await resolve_session_model("umo", "p1") == ("session-model", "session")
+
+    # 模拟重启：内存覆盖清空后不再生效
+    session_selection.clear_all_session_overrides()
+    assert await resolve_session_model("umo", "p1") == (None, "none")
+
+
+@pytest.mark.asyncio
+async def test_会话模型覆盖在无规则时生效(monkeypatch):
+    fake_sp = FakeSP({})
+    monkeypatch.setattr(session_selection, "sp", fake_sp)
+    await session_selection.set_session_selection("umo", "p1", "session-model")
 
     assert await resolve_session_model("umo", "p1") == ("session-model", "session")
     assert await resolve_session_model("umo", "p2") == (None, "none")
+
+
+@pytest.mark.asyncio
+async def test_旧版本持久化的会话覆盖重启后不再生效(monkeypatch):
+    # 旧版本把会话覆盖写进了数据库；现在只读内存，启动后不应再生效
+    fake_sp = FakeSP(
+        {"session_model_override": {"provider_id": "p1", "model": "stale-model"}}
+    )
+    monkeypatch.setattr(session_selection, "sp", fake_sp)
+
+    assert await resolve_session_model("umo", "p1") == (None, "none")
 
 
 @pytest.mark.asyncio
@@ -610,12 +762,32 @@ async def test_规则只选提供商时生效模型来源是自定义规则(monk
 
 @pytest.mark.asyncio
 async def test_会话只选提供商时生效模型来源是当前会话(monkeypatch):
-    fake_sp = FakeSP({"session_provider_override_chat_completion": "p1"})
+    fake_sp = FakeSP({})
     monkeypatch.setattr(session_selection, "sp", fake_sp)
+    await session_selection.set_session_provider(
+        "umo", ProviderType.CHAT_COMPLETION, "p1"
+    )
 
     assert await session_selection.resolve_effective_model(
         "umo", "p1", "entry-model"
     ) == ("entry-model", "session")
+
+
+@pytest.mark.asyncio
+async def test_规则提供商优先于会话覆盖(monkeypatch):
+    fake_sp = FakeSP({"provider_perf_chat_completion": "p1"})
+    monkeypatch.setattr(session_selection, "sp", fake_sp)
+    await session_selection.set_session_provider(
+        "umo", ProviderType.CHAT_COMPLETION, "p2"
+    )
+
+    assert await session_selection.resolve_effective_model(
+        "umo", "p1", "m1"
+    ) == ("m1", "rule")
+    # 规则只绑定 p1，p2 上没有规则选择，来源是会话覆盖
+    assert await session_selection.resolve_effective_model(
+        "umo", "p2", "m2"
+    ) == ("m2", "session")
 
 
 @pytest.mark.asyncio
@@ -641,7 +813,6 @@ async def test_reset_selection清除规则选择保留其他设置(monkeypatch):
     fake_sp = FakeSP(
         {
             "provider_perf_chat_completion": "p1",
-            "session_model_override": {"provider_id": "p1", "model": "x"},
             "session_service_config": {
                 "model": "x",
                 "model_provider_id": "p1",
@@ -651,6 +822,7 @@ async def test_reset_selection清除规则选择保留其他设置(monkeypatch):
         }
     )
     monkeypatch.setattr(session_selection, "sp", fake_sp)
+    await session_selection.set_session_selection("umo", "p1", "x")
 
     assert (
         await session_selection.reset_selection(
@@ -659,7 +831,13 @@ async def test_reset_selection清除规则选择保留其他设置(monkeypatch):
         is True
     )
     assert "provider_perf_chat_completion" not in fake_sp.prefs
-    assert "session_model_override" not in fake_sp.prefs
+    assert await session_selection.get_session_model_override("umo") is None
+    assert (
+        session_selection.get_session_provider_override(
+            "umo", ProviderType.CHAT_COMPLETION
+        )
+        is None
+    )
     # 规则里的其他设置保留，模型选择字段被移除
     assert fake_sp.prefs["session_service_config"] == {
         "llm_enabled": True,
@@ -697,10 +875,9 @@ async def test_reset_selection只清对应类型的提供商(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_has_session_rule只认规则键(monkeypatch):
-    fake_sp = FakeSP(
-        {"session_model_override": {"provider_id": "p1", "model": "x"}}
-    )
+    fake_sp = FakeSP({})
     monkeypatch.setattr(session_selection, "sp", fake_sp)
+    await session_selection.set_session_selection("umo", "p1", "x")
     assert await session_selection.has_session_rule("umo") is False
 
     fake_sp.prefs["provider_perf_chat_completion"] = "p1"
@@ -753,6 +930,20 @@ def test_get_using_provider规则提供商优先于会话覆盖(monkeypatch):
         assert pm.get_using_provider(ProviderType.CHAT_COMPLETION, "umo") is p1
 
 
+def test_get_using_provider无会话覆盖时回落到规则(monkeypatch):
+    p1, p2 = FakeProvider("p1"), FakeProvider("p2")
+    pm = _bare_provider_manager({"p1": p1, "p2": p2}, "p2")
+
+    with (
+        patch("astrbot.core.provider.manager.sp.get", return_value="p1"),
+        patch(
+            "astrbot.core.provider.manager.get_session_provider_override",
+            return_value=None,
+        ),
+    ):
+        assert pm.get_using_provider(ProviderType.CHAT_COMPLETION, "umo") is p1
+
+
 # ==== 配置项 ID 与 model 同步 ====
 
 
@@ -780,6 +971,7 @@ class FakePrefSP:
     def __init__(self, prefs: list[FakePref]) -> None:
         self.prefs = prefs
         self.puts: list[tuple] = []
+        self.removed: list[tuple] = []
 
     async def range_get_async(self, scope, scope_id=None, key=None):
         return list(self.prefs)
@@ -789,6 +981,9 @@ class FakePrefSP:
 
     async def put_async(self, scope, scope_id, key, value):
         self.puts.append((scope, scope_id, key, value))
+
+    async def remove_async(self, scope, scope_id, key):
+        self.removed.append((scope, scope_id, key))
 
 
 def _sync_manager(config: FakeConfig, sp_obj: FakePrefSP):
@@ -837,11 +1032,6 @@ async def test_启动时按model同步失配的配置项ID并更新引用():
                     "model_provider_id": "懒大猫模型/test",
                 },
             ),
-            FakePref(
-                "umo2",
-                "session_model_override",
-                {"provider_id": "懒大猫模型/test", "model": "喜欢懒大猫"},
-            ),
         ]
     )
     pm = _sync_manager(config, sp_obj)
@@ -863,9 +1053,6 @@ async def test_启动时按model同步失配的配置项ID并更新引用():
     updated = {put[2]: put[3] for put in sp_obj.puts}
     assert updated["provider_perf_chat_completion"] == "懒大猫模型/喜欢懒大猫"
     assert updated["session_service_config"]["model_provider_id"] == (
-        "懒大猫模型/喜欢懒大猫"
-    )
-    assert updated["session_model_override"]["provider_id"] == (
         "懒大猫模型/喜欢懒大猫"
     )
 
@@ -1005,6 +1192,29 @@ async def test_ensure_provider_entry无来源时拒绝():
 
     with pytest.raises(ValueError, match="provider_source_id"):
         await pm.ensure_provider_entry("manual", "new")
+
+
+@pytest.mark.asyncio
+async def test_启动时清理旧版本持久化的会话覆盖(monkeypatch):
+    sp_obj = FakePrefSP(
+        [
+            FakePref(
+                "umo1",
+                "session_model_override",
+                {"provider_id": "p1", "model": "m"},
+            ),
+            FakePref("umo2", "session_provider_override_chat_completion", "p1"),
+            FakePref("umo3", "provider_perf_chat_completion", "p1"),
+        ]
+    )
+    monkeypatch.setattr(session_selection, "sp", sp_obj)
+
+    await session_selection.purge_legacy_session_overrides()
+
+    assert [item[2] for item in sp_obj.removed] == [
+        "session_model_override",
+        "session_provider_override_chat_completion",
+    ]
 
 
 # ==== WebUI 规则保存不抹掉模型字段 ====

@@ -9,7 +9,10 @@ from astrbot.core import astrbot_config, logger, sp
 from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
 from astrbot.core.db import BaseDatabase
 from astrbot.core.utils.error_redaction import safe_error
-from astrbot.core.utils.session_selection import get_session_provider_override
+from astrbot.core.utils.session_selection import (
+    get_session_provider_override,
+    purge_legacy_session_overrides,
+)
 
 from ..persona_mgr import PersonaManager
 from .entities import ProviderType, format_provider_display_id
@@ -236,7 +239,7 @@ class ProviderManager:
         provider = None
         provider_id = None
         if umo:
-            # 自定义规则里的提供商优先；没有规则时再看会话级覆盖。
+            # 自定义规则里的提供商优先；没有规则时再看会话级临时覆盖。
             provider_id = sp.get(
                 f"provider_perf_{provider_type.value}",
                 None,
@@ -294,6 +297,8 @@ class ProviderManager:
         return provider
 
     async def initialize(self) -> None:
+        # 会话级覆盖现在只存在内存中，旧版本持久化的记录在启动时清理
+        await purge_legacy_session_overrides()
         # 先把与 model 失配的自动生成 ID 修正回来，再加载实例
         await self._sync_provider_ids()
         # 逐个初始化提供商
@@ -990,17 +995,9 @@ class ProviderManager:
                 continue
             value = raw_value.get("val")
             changed = False
-            if key.startswith("provider_perf_") or key.startswith(
-                "session_provider_override_"
-            ):
+            if key.startswith("provider_perf_"):
                 if value == old_id:
                     value = new_id
-                    changed = True
-            elif key == "session_model_override" and isinstance(value, dict):
-                if value.get("provider_id") == old_id:
-                    value["provider_id"] = new_id
-                    if model:
-                        value["model"] = model
                     changed = True
             elif key == "session_service_config" and isinstance(value, dict):
                 if value.get("model_provider_id") == old_id:

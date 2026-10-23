@@ -17,6 +17,7 @@ from astrbot.core.provider.provider_ids import (
 )
 from astrbot.core.utils.error_redaction import safe_error
 from astrbot.core.utils.session_selection import (
+    clear_all_session_overrides,
     clear_session_provider,
     has_session_rule,
     reset_selection,
@@ -45,6 +46,7 @@ MODEL_CACHE_MAX_ENTRIES = 512
 _FLAG_SAVE = "save"
 _FLAG_GLOBAL = "global"
 _FLAG_RESET = "reset"
+_FLAG_CLEAR = "clear"
 _SWITCH_FLAGS = {
     "-save": _FLAG_SAVE,
     "--save": _FLAG_SAVE,
@@ -52,6 +54,8 @@ _SWITCH_FLAGS = {
     "--global": _FLAG_GLOBAL,
     "-reset": _FLAG_RESET,
     "--reset": _FLAG_RESET,
+    "-clear": _FLAG_CLEAR,
+    "--clear": _FLAG_CLEAR,
 }
 _MODEL_SOURCE_LABELS = {
     "rule": "自定义规则",
@@ -84,7 +88,7 @@ def _split_switch_args(
         else:
             positional.append(text)
     if len(modes) > 1:
-        return [], "", "参数 -save、-global、-reset 不能同时使用。"
+        return [], "", "参数 -save、-global、-reset、-clear 不能同时使用。"
     if len(positional) > max_positional:
         return [], "", "参数过多，请检查指令格式。"
     return positional, (modes[0] if modes else ""), ""
@@ -523,7 +527,7 @@ class ProviderCommands:
             event.set_result(
                 MessageEventResult().message(
                     f"{arg_err}\n用法: {获取第一个唤醒词()}provider "
-                    "[序号|tts|stt <序号>] [-save|-global|-reset]"
+                    "[序号|tts|stt <序号>] [-save|-global|-reset|-clear]"
                 ).use_t2i(False)
             )
             return
@@ -545,6 +549,9 @@ class ProviderCommands:
                     await self._reset_provider_choice(
                         event, ProviderType.CHAT_COMPLETION
                     )
+                    return
+                if mode == _FLAG_CLEAR:
+                    await self._clear_all_session_choices(event)
                     return
                 provider_using = self.context.get_using_provider(umo=umo)
                 if provider_using is None:
@@ -680,7 +687,7 @@ class ProviderCommands:
                 f"\n使用 {获取第一个唤醒词()}provider <序号|配置项ID> "
                 "切换当前会话的 LLM 提供商；"
                 "加 -save 保存到自定义规则，加 -global 保存为全局默认，"
-                "加 -reset 重置为全局默认。"
+                "加 -reset 重置为全局默认，加 -clear 清除内存中所有临时选择。"
             )
             ret = "".join(parts)
 
@@ -709,6 +716,14 @@ class ProviderCommands:
                     return
                 await self._reset_provider_choice(
                     event, ProviderType.TEXT_TO_SPEECH
+                )
+                return
+            if mode == _FLAG_CLEAR:
+                event.set_result(
+                    MessageEventResult().message(
+                        "清除会作用于内存中所有临时选择，不需要指定提供商类型，"
+                        f"请使用 {获取第一个唤醒词()}provider -clear。"
+                    ).use_t2i(False)
                 )
                 return
             if len(positional) < 2:
@@ -746,6 +761,14 @@ class ProviderCommands:
                     event, ProviderType.SPEECH_TO_TEXT
                 )
                 return
+            if mode == _FLAG_CLEAR:
+                event.set_result(
+                    MessageEventResult().message(
+                        "清除会作用于内存中所有临时选择，不需要指定提供商类型，"
+                        f"请使用 {获取第一个唤醒词()}provider -clear。"
+                    ).use_t2i(False)
+                )
+                return
             if len(positional) < 2:
                 event.set_result(MessageEventResult().message(
                     f"使用方法：{获取第一个唤醒词()}provider stt <序号> [-save|-global]，"
@@ -776,6 +799,13 @@ class ProviderCommands:
                     ).use_t2i(False)
                 )
                 return
+            if mode == _FLAG_CLEAR:
+                event.set_result(
+                    MessageEventResult().message(
+                        f"清除不需要指定提供商，请使用 {获取第一个唤醒词()}provider -clear。"
+                    ).use_t2i(False)
+                )
+                return
             if len(positional) > 1:
                 event.set_result(
                     MessageEventResult().message(
@@ -798,7 +828,7 @@ class ProviderCommands:
             if err:
                 event.set_result(MessageEventResult().message(
                     f"无效的参数「{positional[0]}」。\n"
-                    f"使用方法：{获取第一个唤醒词()}provider <序号|配置项ID> [-save|-global|-reset] "
+                    f"使用方法：{获取第一个唤醒词()}provider <序号|配置项ID> [-save|-global|-reset|-clear] "
                     "切换 LLM 提供商，"
                     f"{获取第一个唤醒词()}provider test 测试连通性，"
                     f"{获取第一个唤醒词()}provider tts/stt <序号> 切换 TTS/STT 提供商。"
@@ -816,6 +846,18 @@ class ProviderCommands:
                 llm_providers[num - 1],
                 mode,
             )
+
+    async def _clear_all_session_choices(self, event: AstrMessageEvent) -> None:
+        """手动清除内存中所有会话的临时模型/提供商选择。"""
+        count = clear_all_session_overrides()
+        if count:
+            msg = (
+                f"已清除内存中所有临时会话选择（共 {count} 个会话），"
+                "这些会话已恢复跟随自定义规则或全局配置。"
+            )
+        else:
+            msg = "内存中没有临时会话选择，无需清除。"
+        event.set_result(MessageEventResult().message(msg).use_t2i(False))
 
     async def _reset_provider_choice(
         self,
@@ -927,7 +969,7 @@ class ProviderCommands:
                 else:
                     await set_session_provider(umo, provider_type, provider_id)
                     msg = (
-                        "已切换当前会话的提供商（仅本会话生效，不影响其他会话）。\n"
+                        "已切换当前会话的提供商（仅本会话生效，重启后失效）。\n"
                         f"当前提供商: [{display}]\n"
                         f"如需持久化为自定义规则请使用 {prefix}provider <序号> -save；"
                         "如需设为全局默认请使用 -global。"
@@ -1083,9 +1125,10 @@ class ProviderCommands:
         parts.append(
             f"\n提示: 按编号只改当前配置项的模型；输入模型名会优先匹配"
             f"ID 或 model 相同的配置项。\n"
-            f"使用 {prefix}model <模型名/编号> 切换当前会话；"
+            f"使用 {prefix}model <模型名/编号> 切换当前会话"
+            "（会话有自定义规则时写入规则，否则仅本会话生效，重启后失效）；"
             "加 -save 保存到自定义规则，加 -global 保存为全局默认，"
-            "加 -reset 重置为全局默认。"
+            "加 -reset 重置为全局默认，加 -clear 清除内存中所有临时选择。"
         )
         message.set_result(
             MessageEventResult().message("".join(parts)).use_t2i(False)
@@ -1288,7 +1331,7 @@ class ProviderCommands:
                 else:
                     await set_session_selection(umo, provider_id, model)
                     msg = (
-                        "已切换当前会话的模型（仅本会话生效，不影响其他会话）。\n"
+                        "已切换当前会话的模型（仅本会话生效，重启后失效）。\n"
                         f"当前提供商: [{display}] 当前模型: [{model}]\n"
                         f"如需持久化为自定义规则请使用 {prefix}model <模型> -save；"
                         "如需设为全局默认请使用 -global。"
@@ -1320,12 +1363,23 @@ class ProviderCommands:
             message.set_result(
                 MessageEventResult().message(
                     f"{arg_err}\n用法: {获取第一个唤醒词()}model "
-                    "[模型名/编号] [-save|-global|-reset]"
+                    "[模型名/编号] [-save|-global|-reset|-clear]"
                 ).use_t2i(False)
             )
             return
 
         umo = message.unified_msg_origin
+        if mode == _FLAG_CLEAR:
+            if positional:
+                message.set_result(
+                    MessageEventResult().message(
+                        f"清除不需要指定模型，请使用 {获取第一个唤醒词()}model -clear。"
+                    ).use_t2i(False)
+                )
+                return
+            await self._clear_all_session_choices(message)
+            return
+
         prov = self.context.get_using_provider(umo)
         if not prov:
             message.set_result(

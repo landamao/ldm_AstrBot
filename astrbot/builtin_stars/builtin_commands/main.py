@@ -300,7 +300,7 @@ class Main(star.Star):
         idx2: int | None = None,
         flag: str | None = None,
     ) -> None:
-        """查看或切换 LLM 提供商：默认只对当前会话生效；-save 保存到自定义规则；-global 保存为全局默认；-reset 重置为全局默认"""
+        """查看或切换 LLM 提供商：默认只对当前会话生效；-save 保存到自定义规则；-global 保存为全局默认；-reset 重置为全局默认；-clear 清除内存中所有临时选择"""
         try:
             await self.provider_c.provider(event, idx, idx2, flag)
         finally:
@@ -344,7 +344,7 @@ class Main(star.Star):
         idx_or_name: int | str | None = None,
         flag: str | None = None,
     ) -> None:
-        """查看或切换模型：默认只对当前会话生效；-save 保存到自定义规则；-global 保存为全局默认；-reset 重置为全局默认"""
+        """查看或切换模型：默认只对当前会话生效；-save 保存到自定义规则；-global 保存为全局默认；-reset 重置为全局默认；-clear 清除内存中所有临时选择"""
         try:
             await self.provider_c.model_ls(event, idx_or_name, flag)
         finally:
