@@ -37,6 +37,12 @@ def _terminate_child_processes() -> None:
                 child.kill()
     except psutil.NoSuchProcess:
         pass
+    except (RuntimeError, OSError) as exc:
+        # Android proot 下 /proc/stat 可能缺少 btime，清理子进程只是重启前的
+        # 尽力操作，不能因此阻断后续 os.execv。
+        logger.warning(
+            "Unable to read process information; skipping child cleanup: %s", exc
+        )
 
 
 def _collect_flag_values(argv: list[str], flag: str) -> str | None:

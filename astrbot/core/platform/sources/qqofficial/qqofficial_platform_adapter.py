@@ -4,11 +4,13 @@ import asyncio
 import logging
 import os
 import random
+import socket
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import aiohttp
 import botpy
 import botpy.message
 from botpy import Client
@@ -35,6 +37,51 @@ from .qqofficial_message_event import QQOfficialMessageEvent
 # remove logger handler
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
+
+
+def _dns_error_is_temporary(exc: BaseException) -> bool:
+    """DNS 异常链里是否是可重试的 EAI_AGAIN（而不是域名不存在等永久错误）。"""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        os_error = getattr(current, "os_error", None)
+        if isinstance(os_error, socket.gaierror):
+            return os_error.errno == socket.EAI_AGAIN
+        if isinstance(current, socket.gaierror):
+            return current.errno == socket.EAI_AGAIN
+        try:
+            text = str(current)
+        except Exception:
+            text = ""
+        if "Temporary failure in name resolution" in text:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    """判断异常链里是否有可重试的网络错误（DNS 抖动、连接失败、超时）。"""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, aiohttp.ClientConnectorDNSError):
+            return _dns_error_is_temporary(current)
+        if isinstance(current, socket.gaierror):
+            return current.errno == socket.EAI_AGAIN
+        if isinstance(
+            current,
+            (
+                aiohttp.ClientConnectorError,
+                aiohttp.ClientOSError,
+                asyncio.TimeoutError,
+                ConnectionError,
+            ),
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _set_raw_message_fields(message: Any, data: dict[str, Any]) -> None:
@@ -170,6 +217,14 @@ class ManagedBotWebSocket(BotWebSocket):
             logger.debug("[QQOfficial] Ignore websocket reconnect during shutdown.")
             return
         await super().on_closed(close_status_code, close_msg)
+
+    async def on_error(self, exception: BaseException):
+        # DNS 抖动时 botpy 默认会打印整段 traceback；这里只留一行，重连逻辑保持不变
+        if _is_transient_network_error(exception):
+            logger.warning("[QQOfficial] 连接失败，准备重连：%s", exception)
+            self._connection.add(self._session)
+            return
+        await super().on_error(exception)
 
     async def close(self) -> None:
         self._can_reconnect = False
@@ -850,7 +905,27 @@ class QQOfficialPlatformAdapter(Platform):
         return abm
 
     def run(self):
-        return self.client.start(appid=self.appid, secret=self.secret)
+        return self._run_with_retry()
+
+    async def _run_with_retry(self) -> None:
+        """初始登录/取 WS 地址失败时退避重试，避免移动网络抖动直接让平台停摆。"""
+        delay = 5
+        while True:
+            try:
+                await self.client.start(appid=self.appid, secret=self.secret)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if self.client.is_shutting_down or not _is_transient_network_error(exc):
+                    raise
+                logger.warning(
+                    "[QQOfficial] 启动连接失败：%s；%ss 后重试",
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60)
 
     def get_client(self) -> botClient:
         return self.client
