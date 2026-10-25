@@ -843,6 +843,17 @@ class PluginService:
                 info["display_type"] = "无"
                 if handler.event_type == EventType.OnCallingFuncToolEvent:
                     component_type = "llm_tool"
+                    llm_tool_names = handler.extras_configs.get("llm_tool_names")
+                    if isinstance(llm_tool_names, (list, tuple, set)):
+                        llm_tool_name = " / ".join(
+                            str(name).strip()
+                            for name in llm_tool_names
+                            if str(name).strip()
+                        )
+                    else:
+                        llm_tool_name = ""
+                    if llm_tool_name:
+                        info["llm_tool_name"] = llm_tool_name
 
             if component is None:
                 component = {
