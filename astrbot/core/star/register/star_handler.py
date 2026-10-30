@@ -902,3 +902,26 @@ def register_after_message_sent(priority: int = 0, **kwargs):
         return awaitable
 
     return decorator
+
+
+def register_on_event_completed(priority: int = 0, **kwargs):
+    """事件处理完成时的事件（收尾钩子）
+
+    在 pipeline 的 finally 中派发，**无论事件是否被终止**都会执行，
+    因此可用于清理「处理中」状态（如撤回贴出去的表情）。处理器内应先
+    通过 `event.is_stopped()` 判断事件是否被终止。
+
+    Args:
+        priority: 处理优先级，数值越大越先执行，默认为 0。
+    """
+
+    def decorator(awaitable):
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnEventCompletedEvent,
+            priority=priority,
+            **kwargs,
+        )
+        return awaitable
+
+    return decorator

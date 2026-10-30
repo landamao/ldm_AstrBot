@@ -20,6 +20,9 @@ from astrbot.core.star.register import register_on_astrbot_loaded as on_astrbot_
 from astrbot.core.star.register import (
     register_on_decorating_result as on_decorating_result,
 )
+from astrbot.core.star.register import (
+    register_on_event_completed as on_event_completed,
+)
 from astrbot.core.star.register import register_on_llm_request as on_llm_request
 from astrbot.core.star.register import register_on_llm_response as on_llm_response
 from astrbot.core.star.register import (
@@ -57,6 +60,7 @@ __all__ = [
     "on_agent_done",
     "on_astrbot_loaded",
     "on_decorating_result",
+    "on_event_completed",
     "on_llm_request",
     "on_llm_response",
     "on_plugin_error",

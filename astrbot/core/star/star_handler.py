@@ -239,6 +239,7 @@ class EventType(enum.Enum):
     OnPluginErrorEvent = enum.auto()  # 插件处理消息异常时
     OnPluginLoadedEvent = enum.auto()  # 插件加载完成
     OnPluginUnloadedEvent = enum.auto()  # 插件卸载完成
+    OnEventCompletedEvent = enum.auto()  # 事件处理完成（无论是否被终止），收尾类钩子
 
 
 H = TypeVar("H", bound=Callable[..., Any])

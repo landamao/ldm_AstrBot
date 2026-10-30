@@ -181,9 +181,15 @@ async def call_event_hook(
     event: AstrMessageEvent,
     hook_type: EventType,
     *args,
+    allow_stopped: bool = False,
     **kwargs,
 ) -> bool:
     """调用事件钩子函数
+
+    Args:
+        allow_stopped: 事件已终止时是否仍执行钩子。收尾类钩子（如
+            OnEventCompletedEvent）必须为 True，否则会被下面的入口预检直接跳过；
+            此时不再做终止归因，也不会因某个处理器终止事件而中断派发。
 
     Returns:
         bool: 如果事件被终止，返回 True
@@ -192,7 +198,7 @@ async def call_event_hook(
     """
     # 事件已死不再执行钩子（与指令链路 star_request 的预检一致），
     # 只补一条真实来源的终止日志
-    if event.is_stopped():
+    if not allow_stopped and event.is_stopped():
         await notify_event_stopped(event)
         return True
     handlers = star_handlers_registry.get_handlers_by_event_type(
@@ -213,7 +219,7 @@ async def call_event_hook(
         except BaseException:
             logger.error(traceback.format_exc())
 
-        if event.is_stopped():
+        if not allow_stopped and event.is_stopped():
             await notify_event_stopped(event)
             return True
 

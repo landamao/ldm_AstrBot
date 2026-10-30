@@ -1,3 +1,4 @@
+import traceback
 from collections.abc import AsyncGenerator
 
 from astrbot.core import logger
@@ -6,10 +7,12 @@ from astrbot.core.platform.sources.webchat.webchat_event import WebChatMessageEv
 from astrbot.core.platform.sources.wecom_ai_bot.wecomai_event import (
     WecomAIBotMessageEvent,
 )
+from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from astrbot.core.utils.active_event_registry import active_event_registry
 
 from .bootstrap import ensure_builtin_stages_registered
 from .context import PipelineContext
+from .context_utils import call_event_hook
 from .stage import registered_stages
 from .stage_order import STAGES_ORDER
 
@@ -92,5 +95,21 @@ class PipelineScheduler:
 
             logger.debug("pipeline execution completed.")
         finally:
-            event.cleanup_temporary_local_files()
-            active_event_registry.unregister(event)
+            # 事件收尾钩子：无论事件是否被终止、pipeline 是否抛异常，都派发一次。
+            # 必须 allow_stopped=True 绕过 call_event_hook 的终止预检，否则被终止的
+            # 事件恰恰收不到这个钩子，而它存在的首要场景就是这种情况。
+            # 先看有没有处理器：没人注册时直接跳过，省掉每条消息一次会话插件配置查询。
+            try:
+                if star_handlers_registry.get_handlers_by_event_type(
+                    EventType.OnEventCompletedEvent,
+                ):
+                    await call_event_hook(
+                        event,
+                        EventType.OnEventCompletedEvent,
+                        allow_stopped=True,
+                    )
+            except Exception:
+                logger.error(f"事件收尾钩子派发异常: {traceback.format_exc()}")
+            finally:
+                event.cleanup_temporary_local_files()
+                active_event_registry.unregister(event)
