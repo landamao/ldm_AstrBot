@@ -64,18 +64,24 @@ class DocumentStorage:
             await conn.run_sync(BaseDocModel.metadata.create_all)
 
             try:
-                await conn.execute(
-                    text(
-                        "ALTER TABLE documents ADD COLUMN kb_doc_id TEXT "
-                        "GENERATED ALWAYS AS (json_extract(metadata, '$.kb_doc_id')) STORED",
-                    ),
-                )
-                await conn.execute(
-                    text(
-                        "ALTER TABLE documents ADD COLUMN user_id TEXT "
-                        "GENERATED ALWAYS AS (json_extract(metadata, '$.user_id')) STORED",
-                    ),
-                )
+                # 检查已有列，避免重复迁移时 "duplicate column name" 报错刷日志
+                pragma_result = await conn.execute(text("PRAGMA table_info(documents)"))
+                existing_columns = {row[1] for row in pragma_result.fetchall()}
+
+                if "kb_doc_id" not in existing_columns:
+                    await conn.execute(
+                        text(
+                            "ALTER TABLE documents ADD COLUMN kb_doc_id TEXT "
+                            "GENERATED ALWAYS AS (json_extract(metadata, '$.kb_doc_id')) STORED",
+                        ),
+                    )
+                if "user_id" not in existing_columns:
+                    await conn.execute(
+                        text(
+                            "ALTER TABLE documents ADD COLUMN user_id TEXT "
+                            "GENERATED ALWAYS AS (json_extract(metadata, '$.user_id')) STORED",
+                        ),
+                    )
 
                 # Create indexes
                 await conn.execute(

@@ -199,6 +199,14 @@ class OpenApiChatRequest(OpenModel):
     config_name: str | None = None
     platform_id: str | None = None
     enable_streaming: bool | None = None
+    is_admin: bool | None = Field(
+        default=None,
+        description=(
+            "Explicit sender role for WebChat messages. True grants the "
+            "administrator role, False forces a normal member, and None "
+            "falls back to the admins_id config check."
+        ),
+    )
 
 
 class ImMessageRequest(OpenModel):

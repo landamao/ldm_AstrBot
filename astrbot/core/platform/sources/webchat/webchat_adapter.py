@@ -271,6 +271,13 @@ class WebChatAdapter(Platform):
                 message_event.set_extra(
                     "thread_selected_text", payload.get("thread_selected_text")
                 )
+                # WebUI 管理员身份开关：显式指定时写入 extra，
+                # 由 WakingCheckStage 优先于 admins_id 配置判定
+                is_admin = payload.get("is_admin")
+                if isinstance(is_admin, bool):
+                    message_event.set_extra(
+                        "webchat_explicit_role", "admin" if is_admin else "member"
+                    )
 
         return message_event
 

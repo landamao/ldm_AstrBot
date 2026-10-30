@@ -26,33 +26,37 @@ class LogService:
         }
         return f"id: {ts}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    async def replay_cached_logs(self, last_event_id: str) -> AsyncGenerator[str, None]:
-        try:
-            last_ts = float(last_event_id)
-            cached_logs = list(self.log_broker.log_cache)
-
-            for log_item in cached_logs:
-                log_ts = float(log_item.get("time", 0))
-                if log_ts > last_ts:
-                    yield self.format_log_sse(log_item, log_ts)
-        except ValueError:
-            pass
-        except Exception as exc:
-            logger.error(f"Log SSE 补发历史错误: {exc}")
-
     async def stream_log_events(
         self, last_event_id: str | None
     ) -> AsyncGenerator[str, None]:
         queue = None
+        # 补发水位线：队列中 time <= 水位线的消息都已被补发，跳过以避免重复
+        watermark: float | None = None
         try:
-            if last_event_id:
-                async for event in self.replay_cached_logs(last_event_id):
-                    yield event
-
+            # 先注册队列再补发：补发期间产生的新日志会积压在队列中不会丢失；
+            # 旧实现先 replay 后 register，两步之间产生的日志会丢失
             queue = self.log_broker.register()
+
+            if last_event_id:
+                try:
+                    watermark = float(last_event_id)
+                except ValueError:
+                    watermark = None
+                if watermark is not None:
+                    for log_item in list(self.log_broker.log_cache):
+                        try:
+                            log_ts = float(log_item.get("time", 0))
+                        except (TypeError, ValueError):
+                            continue
+                        if log_ts > watermark:
+                            watermark = log_ts
+                            yield self.format_log_sse(log_item, log_ts)
+
             while True:
                 message = await queue.get()
                 current_ts = message.get("time", time.time())
+                if watermark is not None and current_ts <= watermark:
+                    continue
                 yield self.format_log_sse(message, current_ts)
         except asyncio.CancelledError:
             pass

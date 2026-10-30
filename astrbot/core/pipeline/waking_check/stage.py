@@ -95,10 +95,15 @@ class WakingCheckStage(Stage):
 
         # 设置 sender 身份
         event.message_str = event.message_str.strip()
-        for admin_id in self.ctx.astrbot_config["admins_id"]:
-            if str(event.get_sender_id()) == admin_id:
-                event.role = "admin"
-                break
+        # WebChat 显式声明的身份（管理员身份开关）优先于 admins_id 配置判定
+        explicit_role = event.get_extra("webchat_explicit_role")
+        if explicit_role in ("admin", "member"):
+            event.role = explicit_role
+        else:
+            for admin_id in self.ctx.astrbot_config["admins_id"]:
+                if str(event.get_sender_id()) == admin_id:
+                    event.role = "admin"
+                    break
 
         # 检查 wake
         wake_prefixes = self.ctx.astrbot_config["wake_prefix"]

@@ -1925,6 +1925,11 @@ class ChatService:
         enable_streaming = post_data.get("enable_streaming", True)
         show_reasoning = post_data.get("show_reasoning", True)
         enable_fallback = post_data.get("enable_fallback", True)
+        # WebUI 管理员身份开关：True/False 为显式指定，None 表示未指定
+        # （未指定时由流水线按 admins_id 配置判定）
+        is_admin = post_data.get("is_admin")
+        if not isinstance(is_admin, bool):
+            is_admin = None
         platform_history_id = post_data.get("_platform_history_id") or "webchat"
         thread_selected_text = post_data.get("_thread_selected_text")
 
@@ -2046,6 +2051,7 @@ class ChatService:
                         "enable_streaming": enable_streaming,
                         "show_reasoning": show_reasoning,
                         "enable_fallback": enable_fallback,
+                        "is_admin": is_admin,
                         "message_id": message_id,
                         "llm_checkpoint_id": llm_checkpoint_id,
                         "thread_selected_text": thread_selected_text,

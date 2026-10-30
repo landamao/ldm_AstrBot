@@ -323,7 +323,7 @@ DEFAULT_CONFIG = {
         "internal_keywords": {"enable": True, "extra_keywords": []},
         "baidu_aip": {"enable": False, "app_id": "", "api_key": "", "secret_key": ""},
     },
-    "admins_id": ["ldm"],
+    "admins_id": [],
     "t2i": False,
     "t2i_word_threshold": 150,
     "t2i_strategy": "remote",
@@ -4343,6 +4343,7 @@ CONFIG_METADATA_3 = {
                         "description": "管理员 ID",
                         "type": "list",
                         "items": {"type": "string"},
+                        "hint": "按发送者 ID 判定管理员身份。WebUI 聊天可通过输入框加号菜单中的「管理员身份」开关临时控制，无需在此配置。",
                     },
                     "platform_settings.unique_session": {
                         "description": "隔离会话",

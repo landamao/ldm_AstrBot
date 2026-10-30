@@ -459,6 +459,11 @@ class LiveChatService:
         show_reasoning = message.get("show_reasoning")
         enable_streaming = message.get("enable_streaming", True)
         enable_fallback = message.get("enable_fallback", True)
+        # WebUI 管理员身份开关：True/False 为显式指定，None 表示未指定
+        # （未指定时由流水线按 admins_id 配置判定）
+        is_admin = message.get("is_admin")
+        if not isinstance(is_admin, bool):
+            is_admin = None
 
         if not isinstance(payload, list):
             await self.send_chat_payload(
@@ -583,6 +588,7 @@ class LiveChatService:
                         "show_reasoning": show_reasoning,
                         "enable_streaming": enable_streaming,
                         "enable_fallback": enable_fallback,
+                        "is_admin": is_admin,
                         "message_id": message_id,
                         "llm_checkpoint_id": llm_checkpoint_id,
                     },
