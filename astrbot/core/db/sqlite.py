@@ -404,6 +404,30 @@ class SQLiteDatabase(BaseDatabase):
                         col(ConversationV2.content).ilike(f"%{escaped_search_query}%"),
                     )
                 )
+            # 会话搜索：匹配会话展示的各项信息——标题、会话 ID、UHO（含群号/session_id）、
+            # UHO 别名（列表展示的名称来自 umo_aliases.auto_name/user_alias）。
+            # 不匹配 content（会话内容）与 platform_id（机器人 ID，多数会话相同、无区分度）；
+            # 「无标题对话」为前端空标题占位文案，不纳入搜索。
+            conversation_search = kwargs.get("conversation_search") or ""
+            if conversation_search:
+                alias_umo_subquery = (
+                    select(col(UmoAlias.umo))
+                    .where(
+                        or_(
+                            col(UmoAlias.auto_name).ilike(f"%{conversation_search}%"),
+                            col(UmoAlias.user_alias).ilike(f"%{conversation_search}%"),
+                        )
+                    )
+                    .scalar_subquery()
+                )
+                conditions.append(
+                    or_(
+                        col(ConversationV2.title).ilike(f"%{conversation_search}%"),
+                        col(ConversationV2.conversation_id).ilike(f"%{conversation_search}%"),
+                        col(ConversationV2.user_id).ilike(f"%{conversation_search}%"),
+                        col(ConversationV2.user_id).in_(alias_umo_subquery),
+                    )
+                )
             message_types = kwargs.get("message_types") or []
             if message_types:
                 conditions.append(
@@ -438,8 +462,9 @@ class SQLiteDatabase(BaseDatabase):
             total = total_count.scalar_one()
 
             offset = (page - 1) * page_size
+            # 默认按更新时间倒序，方便看到最近活跃的会话
             result_query = (
-                base_query.order_by(desc(ConversationV2.created_at))
+                base_query.order_by(desc(ConversationV2.updated_at))
                 .order_by(desc(ConversationV2.inner_conversation_id))
                 .offset(offset)
                 .limit(page_size)

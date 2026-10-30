@@ -96,6 +96,7 @@ async def _list_conversations(
     exclude_ids: str,
     exclude_platforms: str,
     include_history: bool,
+    conversation_search: str = "",
 ):
     return await _run(
         lambda: service.list_conversations(
@@ -107,6 +108,7 @@ async def _list_conversations(
             exclude_ids=exclude_ids,
             exclude_platforms=exclude_platforms,
             include_history=include_history,
+            conversation_search=conversation_search,
         )
     )
 
@@ -121,6 +123,7 @@ async def list_conversations(
     exclude_ids: str = Query(default=""),
     exclude_platforms: str = Query(default=""),
     include_history: bool = Query(default=True),
+    conversation_search: str = Query(default=""),
     _auth: AuthContext = Depends(require_data_scope),
     service: ConversationService = Depends(get_service),
 ):
@@ -134,6 +137,7 @@ async def list_conversations(
         exclude_ids=exclude_ids,
         exclude_platforms=exclude_platforms,
         include_history=include_history,
+        conversation_search=conversation_search,
     )
 
 
@@ -229,6 +233,7 @@ async def list_dashboard_conversations(
     exclude_ids: str = Query(default=""),
     exclude_platforms: str = Query(default=""),
     include_history: bool = Query(default=True),
+    conversation_search: str = Query(default=""),
     _username: str = Depends(require_dashboard_user),
     service: ConversationService = Depends(get_service),
 ):
@@ -242,6 +247,7 @@ async def list_dashboard_conversations(
         exclude_ids=exclude_ids,
         exclude_platforms=exclude_platforms,
         include_history=include_history,
+        conversation_search=conversation_search,
     )
 
 

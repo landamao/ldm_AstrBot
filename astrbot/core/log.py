@@ -40,9 +40,16 @@ class _RecordEnricherFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name.startswith(PLUGIN_LOGGER_PREFIX):
-            record.plugin_tag = f"[{record.name[len(PLUGIN_LOGGER_PREFIX):]}]"
+            # 插件专属 logger 的记录直接带上插件名，供 WebUI 按插件筛选
+            plugin_name = record.name[len(PLUGIN_LOGGER_PREFIX) :]
+            record.plugin_tag = f"[{plugin_name}]"
+            record.source = "plugin"
+            record.plugin_name = plugin_name
         else:
-            record.plugin_tag = "[Plug]" if _is_plugin_path(record.pathname) else "[Core]"
+            is_plugin = _is_plugin_path(record.pathname)
+            record.plugin_tag = "[Plug]" if is_plugin else "[Core]"
+            record.source = "plugin" if is_plugin else "core"
+            record.plugin_name = None
         record.short_levelname = _get_short_level_name(record.levelname)
         record.astrbot_version_tag = (
             f" [v{VERSION}]" if record.levelno >= logging.WARNING else ""
@@ -190,11 +197,25 @@ class LogQueueHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         log_entry = self.format(record)
+        # source/plugin_name 由 _RecordEnricherFilter 注入；getattr 兜底防止
+        # 未经该过滤器的记录（如子 logger 传播）导致字段缺失
+        plugin_name = getattr(record, "plugin_name", None)
+        if plugin_name is None and record.name.startswith(PLUGIN_LOGGER_PREFIX):
+            plugin_name = record.name[len(PLUGIN_LOGGER_PREFIX) :]
+        source = getattr(record, "source", None)
+        if not source:
+            source = (
+                "plugin"
+                if plugin_name or _is_plugin_path(record.pathname)
+                else "core"
+            )
         self.log_broker.publish(
             {
                 "level": record.levelname,
                 "time": time.time(),
                 "data": log_entry,
+                "source": source,
+                "plugin_name": plugin_name,
             },
         )
 

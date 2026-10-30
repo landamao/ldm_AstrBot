@@ -432,12 +432,21 @@ class UpdateService:
             self._core_update_running = False
 
     async def install_pip_package(self, data: object) -> UpdateServiceResult:
-        """禁用 WebUI 任意 pip 安装；核心更新时的 requirements 安装走独立路径。"""
-        logger.warning("已禁用 WebUI 任意 pip 安装/更新，跳过 install_pip_package 调用。")
-        return UpdateServiceResult(
-            message="已禁用 WebUI 任意 pip 安装；请通过项目更新流程安装 requirements。",
-            headers={},
-        )
+        """WebUI 手动安装 pip 库。"""
+        if self.demo_mode:
+            raise UpdateServiceError("演示模式下不允许执行此操作。")
+
+        payload = data if isinstance(data, dict) else {}
+        package = payload.get("package", "")
+        mirror = payload.get("mirror", None)
+        if not package:
+            raise UpdateServiceError("缺少参数 package 或不合法。")
+        try:
+            await self.pip_install(package, mirror=mirror)
+            return UpdateServiceResult(message="安装成功。")
+        except Exception as exc:
+            logger.error(f"/api/update_pip: {traceback.format_exc()}")
+            raise UpdateServiceError(exc.__str__()) from exc
 
     async def list_rollback_backups(self) -> UpdateServiceResult:
         """列出回滚备份 zip（版本号、大小、备份时间，最新在前）。"""

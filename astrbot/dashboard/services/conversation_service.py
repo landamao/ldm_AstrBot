@@ -43,6 +43,7 @@ class ConversationService:
         exclude_ids: str,
         exclude_platforms: str,
         include_history: bool = True,
+        conversation_search: str = "",
     ) -> dict:
         platform_list = [item.strip() for item in platforms.split(",") if item.strip()]
         message_type_list = [
@@ -70,6 +71,7 @@ class ConversationService:
                 exclude_ids=exclude_id_list,
                 exclude_platforms=exclude_platform_list,
                 include_history=include_history,
+                conversation_search=conversation_search,
             )
         except Exception as exc:
             logger.error(f"数据库查询出错: {exc!s}\n{traceback.format_exc()}")
