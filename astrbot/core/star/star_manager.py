@@ -66,6 +66,29 @@ class PluginVersionUnsupportedError(Exception):
     """Raised when plugin astrbot_version is not supported by current AstrBot."""
 
 
+class PluginAlreadyExistsError(Exception):
+    """安装插件时同名插件已存在（需要用户确认是否覆盖）。
+
+    Attributes:
+        dir_name: 插件在插件目录下的目录名。
+        existing_version: 已安装插件的版本号（读取失败时为 None）。
+        new_version: 待安装插件包的版本号（读取失败时为 None）。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        dir_name: str | None = None,
+        existing_version: str | None = None,
+        new_version: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.dir_name = dir_name
+        self.existing_version = existing_version
+        self.new_version = new_version
+
+
 class PluginDependencyInstallError(Exception):
     """Raised when plugin dependency installation fails."""
 
@@ -662,6 +685,95 @@ class PluginManager:
             raise Exception(f"{metadata_path.name} 中 name 字段内容非法。")
         PluginManager._validate_importable_name(plugin_dir_name)
         return plugin_dir_name
+
+    @staticmethod
+    def _read_plugin_version_info(plugin_path: str) -> dict:
+        """宽松读取插件目录 metadata 里的 name/version，用于覆盖前的版本对比。
+
+        与 _load_plugin_metadata 不同，这里不做校验、不抛异常：
+        读不到或格式异常时返回空值，由调用方兜底显示"未知"。
+        """
+        info: dict = {"name": None, "version": None}
+        try:
+            plugin_root = Path(plugin_path)
+            metadata_path = next(
+                (
+                    plugin_root / filename
+                    for filename in PLUGIN_METADATA_FILENAMES
+                    if (plugin_root / filename).exists()
+                ),
+                None,
+            )
+            if metadata_path is None:
+                return info
+            with metadata_path.open(encoding="utf-8") as f:
+                metadata = yaml.safe_load(f)
+            if isinstance(metadata, dict):
+                name = metadata.get("name")
+                version = metadata.get("version")
+                if isinstance(name, str) and name.strip():
+                    info["name"] = name.strip()
+                if version is not None:
+                    info["version"] = str(version)
+        except Exception as e:
+            logger.debug(f"读取插件版本信息失败 {plugin_path}: {e!s}")
+        return info
+
+    async def _prepare_overwrite_target(
+        self, dir_name: str, target_plugin_path: str
+    ) -> None:
+        """覆盖安装前移除已存在的同名插件。
+
+        若插件已加载，先终止实例并解除注册（不清理配置/数据），再删除插件目录，
+        保证随后的 load 是一次干净的安装。
+        """
+        plugin = self.context.get_registered_star(dir_name)
+        if not plugin:
+            for star in self.context.get_all_stars():
+                if star.root_dir_name == dir_name:
+                    plugin = star
+                    break
+        if plugin:
+            try:
+                await self._terminate_plugin(plugin)
+            except Exception as e:
+                logger.warning(f"覆盖安装：终止插件 {dir_name} 失败: {e!s}")
+            if plugin.module_path:
+                try:
+                    await self._unbind_plugin(plugin.name, plugin.module_path)
+                except Exception as e:
+                    logger.warning(
+                        f"覆盖安装：解除插件 {dir_name} 注册失败: {e!s}",
+                    )
+        if os.path.isdir(target_plugin_path):
+            remove_dir(target_plugin_path)
+
+    async def _handle_existing_target(
+        self,
+        dir_name: str,
+        target_plugin_path: str,
+        new_plugin_path: str,
+        overwrite: bool,
+    ) -> None:
+        """目标插件目录已存在时的统一处理。
+
+        overwrite=False 时抛出 PluginAlreadyExistsError（携带新旧版本信息，
+        供上层转成覆盖确认警告）；overwrite=True 时移除旧插件后继续安装。
+        """
+        existing_info = self._read_plugin_version_info(target_plugin_path)
+        new_info = self._read_plugin_version_info(new_plugin_path)
+        if not overwrite:
+            raise PluginAlreadyExistsError(
+                f"安装失败：目录 {dir_name} 已存在。",
+                dir_name=dir_name,
+                existing_version=existing_info.get("version"),
+                new_version=new_info.get("version"),
+            )
+        logger.info(
+            f"插件 {dir_name} 已存在（当前版本 "
+            f"{existing_info.get('version') or '未知'}），执行覆盖安装。",
+        )
+        await self._prepare_overwrite_target(dir_name, target_plugin_path)
 
     @staticmethod
     def _validate_astrbot_version_specifier(
@@ -1600,6 +1712,7 @@ class PluginManager:
         proxy: str = "",
         ignore_version_check: bool = False,
         download_url: str = "",
+        overwrite: bool = False,
     ):
         """从仓库 URL 安装插件
 
@@ -1609,6 +1722,8 @@ class PluginManager:
             repo_url (str): 要安装的插件仓库 URL
             proxy (str, optional): 用于下载的代理服务器。默认为空字符串。
             download_url (str, optional): 插件压缩包下载地址。提供时优先从此地址下载安装包。
+            overwrite (bool, optional): 同名插件已存在时是否直接覆盖安装。
+                默认 False：抛出 PluginAlreadyExistsError，由上层提示用户确认。
 
         Returns:
             dict | None: 安装成功时返回包含插件信息的字典:
@@ -1640,7 +1755,12 @@ class PluginManager:
                 if target_plugin_path != plugin_path and os.path.exists(
                     target_plugin_path
                 ):
-                    raise Exception(f"安装失败：目录 {metadata_dir_name} 已存在。")
+                    await self._handle_existing_target(
+                        metadata_dir_name,
+                        target_plugin_path,
+                        plugin_path,
+                        overwrite,
+                    )
                 if target_plugin_path != plugin_path:
                     os.rename(plugin_path, target_plugin_path)
                     plugin_path = target_plugin_path
@@ -1692,6 +1812,13 @@ class PluginManager:
                     }
 
                 return plugin_info
+            except PluginAlreadyExistsError:
+                # 同名插件已存在（等待用户确认是否覆盖）：不属于安装失败，
+                # 不进 failed_plugin_dict；清理临时下载解压目录后原样上抛。
+                if plugin_path and os.path.isdir(plugin_path):
+                    with contextlib.suppress(Exception):
+                        remove_dir(plugin_path)
+                raise
             except Exception as e:
                 self._track_failed_install_dir(
                     dir_name=dir_name,
@@ -2080,7 +2207,10 @@ class PluginManager:
             current_plugin.activated = True
 
     async def install_plugin_from_file(
-        self, zip_file_path: str, ignore_version_check: bool = False
+        self,
+        zip_file_path: str,
+        ignore_version_check: bool = False,
+        overwrite: bool = False,
     ):
         dir_name = os.path.splitext(os.path.basename(zip_file_path))[0]
         desti_dir = tempfile.mkdtemp(
@@ -2098,7 +2228,12 @@ class PluginManager:
             )
             if target_plugin_path != desti_dir and os.path.exists(target_plugin_path):
                 skip_failed_tracking = True
-                raise Exception(f"安装失败：目录 {metadata_dir_name} 已存在。")
+                await self._handle_existing_target(
+                    metadata_dir_name,
+                    target_plugin_path,
+                    desti_dir,
+                    overwrite,
+                )
             if target_plugin_path != desti_dir:
                 os.rename(desti_dir, target_plugin_path)
                 dir_name = metadata_dir_name

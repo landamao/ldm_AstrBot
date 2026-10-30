@@ -13,10 +13,15 @@ from astrbot.dashboard.services.static_file_service import StaticFileService
 router = APIRouter(include_in_schema=False)
 service = StaticFileService()
 
-# 与旧版 Quart 静态资源缓存思路一致：访问一次后长期本地缓存。
-# max-age 设为一年，浏览器实际可视为“无过期”长缓存。
-_STATIC_CACHE_HEADERS = {
+# 静态资源缓存策略：
+# - assets/ 下的构建产物文件名自带内容 hash，可以一年长缓存（immutable）
+# - index.html 等入口文件必须 no-cache（每次条件请求协商，未变返回 304），
+#   否则发版后浏览器会长期停留在旧入口页，引用旧资源，Ctrl+F5 都可能绕不开
+_ASSETS_CACHE_HEADERS = {
     "Cache-Control": "public, max-age=31536000, immutable",
+}
+_ENTRY_CACHE_HEADERS = {
+    "Cache-Control": "no-cache",
 }
 
 # 可 gzip 压缩的静态类型（woff2/png/jpg 等本身已压缩的类型不压，省 CPU 且无收益）
@@ -76,18 +81,22 @@ def _ensure_gzip_file(file_path: Path) -> Path | None:
     """确保 file_path 同目录存在对应的 .gz 压缩缓存，返回 gz 路径；失败返回 None。
 
     首次请求某静态文件时压缩一次并落盘，后续请求直接读磁盘 .gz，零重复压缩开销。
-    部署脚本 rm -rf 重建 dist 后 .gz 缓存会随之清空，下次访问自动重新生成。
+    源文件比 .gz 新（部署覆盖、手动修改）时自动重新压缩，避免一直返回旧内容。
     """
     gz_path = file_path.with_name(file_path.name + ".gz")
-    if gz_path.exists():
-        return gz_path
     try:
-        data = file_path.read_bytes()
+        src_mtime = file_path.stat().st_mtime
     except OSError:
         return None
-    compressed = gzip.compress(data, compresslevel=6, mtime=0)
+    if gz_path.exists():
+        try:
+            if gz_path.stat().st_mtime >= src_mtime:
+                return gz_path
+        except OSError:
+            pass
+    compressed = gzip.compress(file_path.read_bytes(), compresslevel=6, mtime=0)
     with _GZIP_LOCK:
-        if gz_path.exists():
+        if gz_path.exists() and gz_path.stat().st_mtime >= src_mtime:
             return gz_path
         tmp_path = gz_path.with_name(gz_path.name + ".tmp")
         try:
@@ -98,8 +107,12 @@ def _ensure_gzip_file(file_path: Path) -> Path | None:
     return gz_path
 
 
-def _file_response(file_path: Path, request: Request | None = None) -> FileResponse:
-    headers = dict(_STATIC_CACHE_HEADERS)
+def _file_response(
+    file_path: Path,
+    request: Request | None = None,
+    cache_headers: dict[str, str] | None = None,
+) -> FileResponse:
+    headers = dict(cache_headers or _ASSETS_CACHE_HEADERS)
     if (
         request is not None
         and _is_compressible(file_path)
@@ -118,7 +131,7 @@ async def serve_index(request: Request):
     index_file = service.resolve_index_file(_static_folder(request))
     if index_file is None:
         return _not_found_response()
-    return _file_response(index_file, request)
+    return _file_response(index_file, request, cache_headers=_ENTRY_CACHE_HEADERS)
 
 
 async def serve_static_file(request: Request, static_path: str):
@@ -132,7 +145,14 @@ async def serve_static_file(request: Request, static_path: str):
     file_path = service.resolve_static_file(_static_folder(request), static_path)
     if file_path is None:
         return _not_found_response()
-    return _file_response(file_path, request)
+
+    normalized_path = static_path.replace("\\", "/").lstrip("/")
+    cache_headers = (
+        _ASSETS_CACHE_HEADERS
+        if normalized_path == "assets" or normalized_path.startswith("assets/")
+        else _ENTRY_CACHE_HEADERS
+    )
+    return _file_response(file_path, request, cache_headers=cache_headers)
 
 
 for index_route in service.list_index_routes():

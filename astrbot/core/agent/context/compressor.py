@@ -115,8 +115,8 @@ def _extract_system_messages(messages: list[Message]) -> list[Message]:
 
 class LLMSummaryCompressor:
     """LLM-based summary compressor.
-    Uses LLM to summarize old conversation history while keeping a recent token
-    budget as exact context.
+    Uses LLM to summarize old conversation history while keeping the most
+    recent rounds as exact context.
     """
 
     TASK_CONTINUATION_INSTRUCTION = (
@@ -127,32 +127,29 @@ class LLMSummaryCompressor:
     def __init__(
         self,
         provider: "Provider",
-        keep_recent_ratio: float = 0.15,
+        keep_recent_rounds: int = 5,
         instruction_text: str | None = None,
-        compression_threshold: float = 0.82,
+        compression_threshold: float = 0.8,
         token_counter: TokenCounter | None = None,
-        keep_recent_rounds: int | None = None,
     ) -> None:
         """Initialize the LLM summary compressor.
 
         Args:
             provider: The LLM provider instance.
-            keep_recent_ratio: Ratio of current context tokens to keep as recent
-                exact context. Clamped to 0-0.3. Ignored when keep_recent_rounds is set.
+            keep_recent_rounds: Keep this many most recent rounds as exact
+                context and summarize everything older. <= 0 summarizes all
+                rounds (except the active user round).
             instruction_text: Custom instruction for summary generation.
-            compression_threshold: The compression trigger threshold (default: 0.82).
-            keep_recent_rounds: If set (>0), keep exactly this many most recent
-                rounds as exact context and summarize everything older.
+            compression_threshold: The compression trigger threshold (default: 0.8).
         """
         self.provider = provider
-        self.keep_recent_ratio = min(max(float(keep_recent_ratio), 0.0), 0.3)
         self.compression_threshold = compression_threshold
         self.token_counter = token_counter or EstimateTokenCounter()
-        self.keep_recent_rounds = (
-            max(0, int(keep_recent_rounds)) if keep_recent_rounds else None
-        )
+        self.keep_recent_rounds = max(0, int(keep_recent_rounds))
         # 最近一次压缩请求的模型返回用量；None 表示本次压缩没有真实模型数据
         self.last_usage: TokenUsage | None = None
+        # 最近一次压缩失败的原因；None 表示最近一次压缩成功
+        self.last_error: str | None = None
 
         self.instruction_text = instruction_text or (
             "Based on our full conversation history, produce a concise summary of key takeaways and/or project progress.\n"
@@ -182,66 +179,45 @@ class LLMSummaryCompressor:
         usage_rate = current_tokens / max_tokens
         return usage_rate > self.compression_threshold
 
-    def _split_recent_rounds_by_token_ratio(
+    def _split_recent_rounds(
         self,
         rounds: list[list[Message]],
-        total_tokens: int,
     ) -> tuple[list[list[Message]], list[list[Message]]]:
         """Split rounds into summarised history and exact recent context.
 
-        When ``keep_recent_rounds`` is set, keep exactly that many most recent
-        whole rounds. Otherwise the token budget is computed from the current
-        context token count and ``keep_recent_ratio``, then floored by
-        ``int(...)``. Mapping that budget to rounds is round-granular: a
-        positive ratio always preserves the latest whole round, even if that
-        round itself exceeds the budget. Earlier rounds are added only while
-        the accumulated recent rounds stay within the budget. No round is split.
+        Keep exactly ``keep_recent_rounds`` most recent whole rounds; all
+        older rounds go into the summary. When ``keep_recent_rounds`` is 0,
+        every round is summarised (the active user round is protected by the
+        caller). No round is split.
         """
         if not rounds:
             return rounds, []
 
-        if self.keep_recent_rounds is not None and self.keep_recent_rounds > 0:
+        if self.keep_recent_rounds > 0:
             keep = min(self.keep_recent_rounds, len(rounds))
             return rounds[: len(rounds) - keep], rounds[len(rounds) - keep :]
 
-        if self.keep_recent_ratio <= 0 or total_tokens <= 0:
-            return rounds, []
-
-        budget = max(1, int(total_tokens * self.keep_recent_ratio))
-        used = 0
-        recent_start = len(rounds)
-
-        for idx in range(len(rounds) - 1, -1, -1):
-            round_tokens = self.token_counter.count_tokens(rounds[idx])
-            if used > 0 and used + round_tokens > budget:
-                break
-            used += round_tokens
-            recent_start = idx
-
-        return rounds[:recent_start], rounds[recent_start:]
+        return rounds, []
 
     async def __call__(self, messages: list[Message]) -> list[Message]:
         """Use LLM to generate a summary of the conversation history.
 
         Uses round-based splitting to preserve user-assistant turn boundaries.
-        On LLM failure, returns the original messages unchanged (caller should
-        fall back to truncation).
+        On LLM failure, returns the original messages unchanged (the caller
+        sends the context as-is).
         """
         from .round_utils import split_into_rounds
 
+        self.last_error = None
         rounds = split_into_rounds(messages)
         message_rounds = [
             [seg for seg in rnd if isinstance(seg, Message)] for rnd in rounds
         ]
-        total_tokens = self.token_counter.count_tokens(messages)
-        old_rounds, recent_rounds = self._split_recent_rounds_by_token_ratio(
-            message_rounds,
-            total_tokens,
-        )
+        old_rounds, recent_rounds = self._split_recent_rounds(message_rounds)
 
         # The latest user message is the active request. Keep its whole round
-        # exact even when the ratio is 0 or the ratio budget would otherwise
-        # summarize every round.
+        # exact even when keep_recent_rounds is 0 (which summarizes every
+        # other round).
         if messages and messages[-1].role == "user" and old_rounds:
             latest_old_round = old_rounds[-1]
             if latest_old_round and latest_old_round[-1] is messages[-1]:
@@ -297,11 +273,13 @@ class LLMSummaryCompressor:
         except Exception as e:
             logger.error(f"Failed to generate summary: {e}")
             self.last_usage = None
+            self.last_error = f"调用压缩模型失败：{e}"
             return messages
         self.last_usage = getattr(response, "usage", None) or None
 
         if not summary_content:
             logger.warning("LLM context compression returned an empty summary.")
+            self.last_error = "压缩模型返回了空摘要"
             return messages
 
         # Build result: system messages + summary pair + recent rounds

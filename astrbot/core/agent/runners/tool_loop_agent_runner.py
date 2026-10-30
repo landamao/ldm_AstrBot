@@ -292,20 +292,18 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         tool_executor: BaseFunctionToolExecutor[TContext],
         agent_hooks: BaseAgentRunHooks[TContext],
         streaming: bool = False,
-        # enforce max turns, will discard older turns when exceeded BEFORE compression
-        # -1 means no limit
-        enforce_max_turns: int = -1,
         # compression trigger threshold: context tokens / window above which compression kicks in
-        context_compress_threshold: float = 0.82,
+        context_compress_threshold: float = 0.8,
         # explicit context window for this request; None falls back to provider config
         max_context_tokens: int | None = None,
+        # absolute token budget above which compression kicks in; <= 0 disables
+        context_max_tokens: int = -1,
+        # turn limit above which compression kicks in; <= 0 disables
+        max_context_length: int = -1,
         # llm compressor
         llm_compress_instruction: str | None = None,
-        llm_compress_keep_recent_ratio: float = 0.15,
-        llm_compress_keep_recent_rounds: int | None = None,
+        llm_compress_keep_recent_rounds: int = 5,
         llm_compress_provider: Provider | None = None,
-        # truncate by turns compressor
-        truncate_turns: int = 1,
         # customize
         custom_token_counter: TokenCounter | None = None,
         custom_compressor: ContextCompressor | None = None,
@@ -320,13 +318,11 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
     ) -> None:
         self.req = request
         self.streaming = streaming
-        self.enforce_max_turns = enforce_max_turns
+        self.max_context_length = max_context_length
         self.context_compress_threshold = context_compress_threshold
         self.llm_compress_instruction = llm_compress_instruction
-        self.llm_compress_keep_recent_ratio = llm_compress_keep_recent_ratio
         self.llm_compress_keep_recent_rounds = llm_compress_keep_recent_rounds
         self.llm_compress_provider = llm_compress_provider
-        self.truncate_turns = truncate_turns
         self.custom_token_counter = custom_token_counter
         self.custom_compressor = custom_compressor
         self.request_max_retries = request_max_retries
@@ -338,18 +334,18 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self.read_tool = read_tool
         self._tool_result_token_counter = EstimateTokenCounter()
         self.request_context_manager_config = ContextConfig(
-            # <=0 disables token-based guarding.
+            # <=0 disables the ratio-based check.
             max_context_tokens=(
                 max_context_tokens
                 if max_context_tokens is not None
                 else provider.provider_config.get("max_context_tokens", 0)
             ),
-            # Enforce max turns before token-based guarding.
-            enforce_max_turns=self.enforce_max_turns,
-            truncate_turns=self.truncate_turns,
+            # Turn limit: whichever limit is reached first triggers compression.
+            max_context_length=self.max_context_length,
+            # Absolute token budget: <= 0 disables this check.
+            context_max_tokens=context_max_tokens,
             context_compress_threshold=self.context_compress_threshold,
             llm_compress_instruction=self.llm_compress_instruction,
-            llm_compress_keep_recent_ratio=self.llm_compress_keep_recent_ratio,
             llm_compress_keep_recent_rounds=self.llm_compress_keep_recent_rounds,
             llm_compress_provider=self.llm_compress_provider,
             custom_token_counter=self.custom_token_counter,
@@ -1183,8 +1179,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 )
             )
             if (
-                self.enforce_max_turns == -1
-                and snapshot.provider is self.provider
+                snapshot.provider is self.provider
                 and snapshot.tool_schema_fingerprint == tool_schema_fingerprint
                 and len(self.run_context.messages) >= len(snapshot.message_fingerprints)
                 and snapshot.message_fingerprints

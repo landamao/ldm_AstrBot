@@ -600,6 +600,31 @@ class Personality(TypedDict):
     _mood_imitation_dialogs_processed: str
 
 
+class ImportantNotification(TimestampMixin, SQLModel, table=True):
+    """重要通知：需要管理员知晓或处理的系统事件（如上下文压缩失败）。
+
+    - 通知持久化存储，不会像日志一样被滚动刷掉
+    - 同一 key 的未读通知聚合计数，不重复堆积
+    - 必须显式标记已读；已读后同一 key 再次发生会生成新通知
+    """
+
+    __tablename__: str = "important_notifications"
+
+    id: int | None = Field(
+        default=None,
+        primary_key=True,
+        sa_column_kwargs={"autoincrement": True},
+    )
+    key: str = Field(nullable=False, index=True)
+    """通知聚合键，例如 context_compress_failed"""
+    title: str = Field(nullable=False)
+    detail: str = Field(default="", nullable=False)
+    count: int = Field(default=1, nullable=False)
+    """同一未读通知的累计发生次数"""
+    read: bool = Field(default=False, nullable=False, index=True)
+    read_at: datetime | None = Field(default=None)
+
+
 # ====
 # Deprecated, and will be removed in future versions.
 # ====

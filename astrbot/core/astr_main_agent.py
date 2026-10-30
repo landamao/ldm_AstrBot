@@ -192,23 +192,18 @@ class MainAgentBuildConfig:
     """The file extraction provider."""
     file_extract_msh_api_key: str = ""
     """The API key for Moonshot AI file extraction provider."""
-    context_limit_reached_strategy: str = "truncate_by_turns"
-    """The strategy to handle context length limit reached."""
-    context_compress_threshold: float = 0.82
-    """Context token usage ratio (against the model window) above which compression/truncation is triggered."""
+    context_compress_threshold: float = 0.8
+    """Context token usage ratio (against the model window) above which compression is triggered. <= 0 or >= 1 disables."""
     llm_compress_instruction: str = ""
-    """The instruction for compression in llm_compress strategy."""
-    llm_compress_keep_recent_ratio: float = 0.15
-    """Percent of current context tokens to keep as exact recent context during llm_compress strategy."""
+    """The instruction for LLM-based context compression."""
     llm_compress_keep_recent_rounds: int = 5
-    """Number of most recent turns to keep as exact context during llm_compress strategy. <= 0 disables, falling back to the ratio."""
+    """Number of most recent turns kept verbatim during compression; older turns are summarized."""
     llm_compress_provider_id: str = ""
     """The provider ID for the LLM used in context compression."""
-    max_context_length: int = 50
-    """The maximum number of turns to keep in context. -1 means no limit.
-    This enforce max turns before compression"""
-    dequeue_context_length: int = 10
-    """The number of oldest turns to remove when context length limit is reached."""
+    max_context_length: int = 60
+    """Turn limit above which compression is triggered. <= 0 disables the check."""
+    context_max_tokens: int = 128000
+    """Absolute token budget above which compression is triggered. <= 0 disables the check."""
     fallback_max_context_tokens: int = 128000
     """Fallback max context tokens. When max_context_tokens is 0 and the model is not in LLM_METADATAS, use this value."""
     llm_safety_mode: bool = True
@@ -1421,8 +1416,6 @@ def _get_compress_provider(
     plugin_context: Context,
     event: AstrMessageEvent | None = None,
 ) -> Provider | None:
-    if config.context_limit_reached_strategy != "llm_compress":
-        return None
     if config.llm_compress_provider_id:
         provider = plugin_context.get_provider_by_id(config.llm_compress_provider_id)
         if provider and isinstance(provider, Provider):
@@ -1939,12 +1932,11 @@ async def build_main_agent(
         streaming=config.streaming_response,
         context_compress_threshold=config.context_compress_threshold,
         max_context_tokens=effective_max_context_tokens,
+        context_max_tokens=config.context_max_tokens,
+        max_context_length=config.max_context_length,
         llm_compress_instruction=config.llm_compress_instruction,
-        llm_compress_keep_recent_ratio=config.llm_compress_keep_recent_ratio,
         llm_compress_keep_recent_rounds=config.llm_compress_keep_recent_rounds,
         llm_compress_provider=_get_compress_provider(config, plugin_context, event),
-        truncate_turns=config.dequeue_context_length,
-        enforce_max_turns=config.max_context_length,
         tool_schema_mode=config.tool_schema_mode,
         fallback_providers=fallback_providers,
         request_max_retries=config.provider_settings.get("request_max_retries", 5),

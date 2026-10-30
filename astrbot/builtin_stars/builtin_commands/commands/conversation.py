@@ -396,7 +396,6 @@ class ConversationCommands(SessionTargetResolver):
             if not allow_truncate:
                 message.set_result(MessageEventResult().message(hint))
                 return
-            truncate_turns = int(settings.get("dequeue_context_length", 1) or 1)
             if keep_recent_rounds:
                 # 保留最近 N 轮：等价于只丢更早的轮次
                 from astrbot.core.agent.context.truncator import ContextTruncator
@@ -405,21 +404,17 @@ class ConversationCommands(SessionTargetResolver):
                 compressed = truncator.truncate_by_turns(
                     messages,
                     keep_most_recent_turns=keep_recent_rounds,
-                    drop_turns=max(1, truncate_turns),
+                    drop_turns=1,
                 )
                 method_label = f"按轮次截断（保留最近 {keep_recent_rounds} 轮）"
             else:
-                compressor = TruncateByTurnsCompressor(
-                    truncate_turns=max(1, truncate_turns)
-                )
+                compressor = TruncateByTurnsCompressor(truncate_turns=1)
                 compressed = await compressor(messages)
                 method_label = "按轮次截断"
         else:
-            keep_ratio = settings.get("llm_compress_keep_recent_ratio", 0.15)
             instruction = settings.get("llm_compress_instruction") or None
             compressor = LLMSummaryCompressor(
                 provider=provider,
-                keep_recent_ratio=float(keep_ratio),
                 instruction_text=instruction,
                 keep_recent_rounds=keep_recent_rounds,
             )

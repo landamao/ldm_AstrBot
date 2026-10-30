@@ -239,6 +239,8 @@ def _should_show_startup_banner(argv: list[str] | None = None) -> bool:
         return False
     if "--rollback" in argv or "--回滚" in argv:
         return False
+    if "--restore-backup" in argv or "--恢复备份" in argv:
+        return False
     return True
 
 

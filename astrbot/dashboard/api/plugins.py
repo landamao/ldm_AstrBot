@@ -393,6 +393,7 @@ async def _install_plugin_upload(
         return await service.install_plugin_upload_from_dashboard_form(
             upload_file=upload_file,
             ignore_version_check=form.get("ignore_version_check", "false"),
+            overwrite=form.get("overwrite", "false"),
         )
 
     return await _run_service(operation, log_label=log_label)
@@ -538,6 +539,7 @@ async def install_plugin_from_repository(
         "url": repository,
         "proxy": body.get("proxy"),
         "ignore_version_check": body.get("ignore_version_check", False),
+        "overwrite": bool(body.get("overwrite", False)),
         "repository_transport": repository_transport,
         **{
             key: body[key]
@@ -573,6 +575,7 @@ async def install_plugin_from_url(
                 "download_url": download_url,
                 "proxy": body.get("proxy"),
                 "ignore_version_check": body.get("ignore_version_check", False),
+                "overwrite": bool(body.get("overwrite", False)),
                 **{
                     key: body[key]
                     for key in (

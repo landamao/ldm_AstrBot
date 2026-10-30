@@ -541,6 +541,7 @@ class PluginInstallRequest(OpenModel):
     download_url: str | None = None
     proxy: str | None = None
     ignore_version_check: bool | None = None
+    overwrite: bool | None = None
 
 
 class PluginValidateRepoRequest(OpenModel):

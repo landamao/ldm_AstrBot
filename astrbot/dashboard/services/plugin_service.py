@@ -33,6 +33,7 @@ from astrbot.core.star.filter.regex import RegexFilter
 from astrbot.core.star.star import StarMetadata
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from astrbot.core.star.star_manager import (
+    PluginAlreadyExistsError,
     PluginManager,
     PluginVersionUnsupportedError,
 )
@@ -1685,6 +1686,7 @@ class PluginService:
         repo_url = str(payload.get("url") or "").strip()
         download_url = str(payload.get("download_url") or "").strip()
         ignore_version_check = bool(payload.get("ignore_version_check", False))
+        overwrite = bool(payload.get("overwrite", False))
         # 前端是否显式清空了 download_url（选 GitHub 加速时会传空串）
         force_skip_download_url = "download_url" in payload and not download_url
         market_install_info = await self.resolve_market_install_info(payload)
@@ -1744,6 +1746,7 @@ class PluginService:
                 proxy,
                 ignore_version_check=ignore_version_check,
                 download_url=download_url,
+                overwrite=overwrite,
             )
             await self.persist_plugin_install_source(
                 plugin_info,
@@ -1765,6 +1768,18 @@ class PluginService:
                     "can_ignore": True,
                 },
                 public_message="当前 ldm 版本不满足插件要求",
+            ) from exc
+        except PluginAlreadyExistsError as exc:
+            raise PluginServiceWarning(
+                str(exc),
+                {
+                    "warning_type": "plugin_exists",
+                    "can_ignore": True,
+                    "plugin_name": exc.dir_name,
+                    "current_version": exc.existing_version,
+                    "new_version": exc.new_version,
+                },
+                public_message="插件已安装，是否覆盖？",
             ) from exc
         except GitUnavailableError as exc:
             raise PluginServiceError(str(exc), public_message=str(exc)) from exc
@@ -1815,6 +1830,7 @@ class PluginService:
         *,
         upload_file,
         ignore_version_check: bool,
+        overwrite: bool = False,
     ) -> tuple[dict, str]:
         self._ensure_not_demo()
         logger.info(f"正在安装用户上传的插件「{upload_file.filename}」")
@@ -1828,6 +1844,7 @@ class PluginService:
             plugin_info = await self.plugin_manager.install_plugin_from_file(
                 file_path,
                 ignore_version_check=ignore_version_check,
+                overwrite=overwrite,
             )
             await self.persist_plugin_install_source(
                 plugin_info,
@@ -1848,16 +1865,30 @@ class PluginService:
                 },
                 public_message="当前 ldm 版本不满足插件要求",
             ) from exc
+        except PluginAlreadyExistsError as exc:
+            raise PluginServiceWarning(
+                str(exc),
+                {
+                    "warning_type": "plugin_exists",
+                    "can_ignore": True,
+                    "plugin_name": exc.dir_name,
+                    "current_version": exc.existing_version,
+                    "new_version": exc.new_version,
+                },
+                public_message="插件已安装，是否覆盖？",
+            ) from exc
 
     async def install_plugin_upload_from_dashboard_form(
         self,
         *,
         upload_file,
         ignore_version_check,
+        overwrite: bool = False,
     ) -> tuple[dict, str]:
         return await self.install_plugin_upload(
             upload_file=upload_file,
             ignore_version_check=self._to_bool(ignore_version_check),
+            overwrite=self._to_bool(overwrite),
         )
 
     async def uninstall_plugin(self, data: object) -> tuple[None, str]:

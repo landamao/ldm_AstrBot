@@ -131,18 +131,12 @@ class InternalAgentSubStage(Stage):
             "moonshotai_api_key", ""
         )
 
-        # 上下文管理相关
-        self.context_limit_reached_strategy: str = settings.get(
-            "context_limit_reached_strategy", "truncate_by_turns"
-        )
+        # 上下文管理相关（三条件任一命中即触发 LLM 压缩，<=0 的条件不参与判断）
         self.context_compress_threshold: float = float(
-            settings.get("context_compress_threshold", 0.82)
+            settings.get("context_compress_threshold", 0.8)
         )
         self.llm_compress_instruction: str = settings.get(
             "llm_compress_instruction", ""
-        )
-        self.llm_compress_keep_recent_ratio: float = settings.get(
-            "llm_compress_keep_recent_ratio", 0.15
         )
         self.llm_compress_keep_recent_rounds: int = settings.get(
             "llm_compress_keep_recent_rounds", 5
@@ -150,13 +144,8 @@ class InternalAgentSubStage(Stage):
         self.llm_compress_provider_id: str = settings.get(
             "llm_compress_provider_id", ""
         )
-        self.max_context_length = settings["max_context_length"]  # int
-        self.dequeue_context_length: int = min(
-            max(1, settings["dequeue_context_length"]),
-            self.max_context_length - 1,
-        )
-        if self.dequeue_context_length <= 0:
-            self.dequeue_context_length = 1
+        self.max_context_length: int = settings.get("max_context_length", 60)
+        self.context_max_tokens: int = settings.get("context_max_tokens", 128000)
         self.fallback_max_context_tokens: int = settings.get(
             "fallback_max_context_tokens", 128000
         )
@@ -183,14 +172,12 @@ class InternalAgentSubStage(Stage):
             file_extract_enabled=self.file_extract_enabled,
             file_extract_prov=self.file_extract_prov,
             file_extract_msh_api_key=self.file_extract_msh_api_key,
-            context_limit_reached_strategy=self.context_limit_reached_strategy,
             context_compress_threshold=self.context_compress_threshold,
             llm_compress_instruction=self.llm_compress_instruction,
-            llm_compress_keep_recent_ratio=self.llm_compress_keep_recent_ratio,
             llm_compress_keep_recent_rounds=self.llm_compress_keep_recent_rounds,
             llm_compress_provider_id=self.llm_compress_provider_id,
             max_context_length=self.max_context_length,
-            dequeue_context_length=self.dequeue_context_length,
+            context_max_tokens=self.context_max_tokens,
             fallback_max_context_tokens=self.fallback_max_context_tokens,
             llm_safety_mode=self.llm_safety_mode,
             safety_mode_strategy=self.safety_mode_strategy,
