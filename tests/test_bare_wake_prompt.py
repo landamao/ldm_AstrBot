@@ -8,6 +8,9 @@
 - handle_empty_mention 已删除，空艾特与普通消息一样走唤醒逻辑
 - internal 阶段对空唤醒补一条 system_reminder 提示词后继续 LLM 请求，
   并设置 _bare_wake 标记；群聊上下文 on_req_llm 据此注入全部缓冲历史
+- platform_settings.bare_wake_prompt.enable 可关闭提示词注入（与
+  「补回艾特自身」等插件重复时用）；关闭后不写 message_str，交由
+  on_waiting_llm_request 钩子里的插件补全，插件也没补出内容则跳过请求
 - 私聊纯空白消息、@ 别人等场景维持跳过，不被误判
 
 运行：python tests/test_bare_wake_prompt.py
@@ -16,6 +19,7 @@
 import asyncio
 import sys
 from collections import OrderedDict, defaultdict, deque
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +31,9 @@ from astrbot.builtin_stars.astrbot.group_chat_context import (  # noqa: E402
     GroupChatContext,
 )
 from astrbot.core.message.components import At, AtAll, Image, Plain  # noqa: E402
+from astrbot.core.pipeline.process_stage.method.agent_sub_stages import (  # noqa: E402
+    internal,
+)
 from astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal import (  # noqa: E402
     _BARE_WAKE_PROMPT,
     InternalAgentSubStage,
@@ -36,9 +43,10 @@ WAKE_PREFIX = "小助手"
 UMO = "aiocqhttp:GroupMessage:456"
 
 
-def make_stage() -> InternalAgentSubStage:
+def make_stage(prompt_enabled: bool = True) -> InternalAgentSubStage:
     stage = InternalAgentSubStage.__new__(InternalAgentSubStage)
     stage.ctx = SimpleNamespace(astrbot_config={"wake_prefix": [WAKE_PREFIX]})
+    stage.bare_wake_prompt_enable = prompt_enabled
     return stage
 
 
@@ -150,6 +158,34 @@ def test_bare_wake_sets_marker_extra():
     assert event.get_extra("_bare_wake") is True
 
 
+def test_disabled_keeps_message_empty_for_plugin():
+    """关闭注入：不写 message_str，但仍标记空唤醒，交给插件补全。"""
+    stage = make_stage(prompt_enabled=False)
+    event = FakeEvent([At(qq="bot123")])
+    assert stage._fill_bare_wake_prompt(event) is True
+    assert event.message_str == "", "关闭注入后不应写入提示词"
+    assert stage._has_message_content(event) is False, "补全前仍无内容"
+    assert event.get_extra("_bare_wake") is True, "群聊历史注入标记不受开关影响"
+
+
+def test_disabled_allows_plugin_filled_content():
+    """关闭注入：插件在钩子里补上内容后即视为可请求。"""
+    stage = make_stage(prompt_enabled=False)
+    event = FakeEvent([At(qq="bot123")])
+    stage._fill_bare_wake_prompt(event)
+    event.message_str = " @咪咪(myself) "
+    assert stage._has_message_content(event) is True
+
+
+def test_disabled_ignores_non_bare_events():
+    """关闭注入后，非空唤醒事件仍不改写、不标记。"""
+    stage = make_stage(prompt_enabled=False)
+    event = FakeEvent([Plain("你好")], message_str="你好")
+    assert stage._fill_bare_wake_prompt(event) is False
+    assert event.message_str == "你好"
+    assert event.get_extra("_bare_wake") is None
+
+
 def test_bare_wake_on_req_llm_injects_full_buffer():
     """空唤醒请求：群聊上下文注入全部缓冲历史并清空缓冲。"""
     gc = make_group_context(["[A/10:00]: 早啊", "[B/10:01]: 早", "[C/10:02]: 在聊啥"])
@@ -204,6 +240,136 @@ def test_record_id_flow_unchanged():
     assert "看这个" not in block, "当前消息本身不应出现在历史块"
     assert "@bot" not in block
     assert "后续" in str(gc.raw_records[UMO]), "之后的记录应保留在缓冲"
+
+
+# ---------- process 层：关闭注入后的放行与跳过 ----------
+
+_REACHED = {"request": False}
+
+
+@dataclass
+class _BuildCfg:
+    """替代 MainAgentBuildConfig，够 replace() 用即可。"""
+
+    provider_wake_prefix: str = ""
+    streaming_response: bool = False
+
+
+async def _stub_build_main_agent(**_kwargs):
+    _REACHED["request"] = True
+    return None
+
+
+class ProcessEvent(FakeEvent):
+    """process() 需要的额外事件接口。"""
+
+    def __init__(self, comps, message_str=""):
+        super().__init__(comps, message_str=message_str)
+        self.set_extra("enable_streaming", False)
+
+    def get_platform_name(self):
+        return "aiocqhttp"
+
+    def is_private_chat(self):
+        return False
+
+    def get_messages(self):
+        return list(self.message_obj.message)
+
+    def get_message_outline(self):
+        return "[At]"
+
+    def is_stopped(self):
+        return False
+
+    async def send_typing(self):
+        return None
+
+    async def stop_typing(self):
+        return None
+
+    async def send(self, chain):
+        return None
+
+
+def make_process_stage(prompt_enabled: bool) -> InternalAgentSubStage:
+    stage = InternalAgentSubStage.__new__(InternalAgentSubStage)
+    conf = {
+        "platform_settings": {
+            "interrupt_reply": {"enable": False},
+            "message_debounce": {"enable": False},
+        },
+    }
+    stage.ctx = SimpleNamespace(
+        astrbot_config={"wake_prefix": [WAKE_PREFIX]},
+        plugin_manager=SimpleNamespace(
+            context=SimpleNamespace(get_config=lambda *a, **k: conf),
+        ),
+    )
+    stage.streaming_response = False
+    stage.show_reasoning = False
+    stage.bare_wake_prompt_enable = prompt_enabled
+    stage.unsupported_streaming_strategy = "turn_off"
+    stage.main_agent_cfg = _BuildCfg()
+    return stage
+
+
+def run_process(stage, event, hook) -> str:
+    """跑一遍 process()，返回 requested（走到建 agent）或 skipped。"""
+
+    async def run():
+        original_build = internal.build_main_agent
+        original_hook = internal.call_event_hook
+        original_follow_up = internal.try_capture_follow_up
+        internal.build_main_agent = _stub_build_main_agent
+        internal.call_event_hook = hook
+        internal.try_capture_follow_up = lambda _event: None
+        _REACHED["request"] = False
+        gen = stage.process(event, "")
+        try:
+            await gen.__anext__()
+        except StopAsyncIteration:
+            pass
+        finally:
+            await gen.aclose()
+            internal.build_main_agent = original_build
+            internal.call_event_hook = original_hook
+            internal.try_capture_follow_up = original_follow_up
+        return "requested" if _REACHED["request"] else "skipped"
+
+    return asyncio.run(run())
+
+
+async def _hook_keep(event, _event_type, *_args, **_kwargs):
+    return False
+
+
+async def _hook_fill(event, _event_type, *_args, **_kwargs):
+    # 模拟「补回艾特自身」在 on_waiting_llm_request 里补内容
+    event.message_str = " @咪咪(myself) "
+    return False
+
+
+def test_process_disabled_skips_without_plugin():
+    """关闭注入且没有插件补内容：跳过请求，不给模型发空消息。"""
+    event = ProcessEvent([At(qq="bot123")])
+    assert run_process(make_process_stage(False), event, _hook_keep) == "skipped"
+    assert event.message_str == ""
+    assert event.get_extra("_bare_wake") is True
+
+
+def test_process_disabled_requests_after_plugin_fill():
+    """关闭注入但插件补出了内容：照常请求。"""
+    event = ProcessEvent([At(qq="bot123")])
+    assert run_process(make_process_stage(False), event, _hook_fill) == "requested"
+    assert event.message_str == " @咪咪(myself) "
+
+
+def test_process_enabled_injects_prompt():
+    """开关默认开启：沿用注入提示词后请求。"""
+    event = ProcessEvent([At(qq="bot123")])
+    assert run_process(make_process_stage(True), event, _hook_keep) == "requested"
+    assert event.message_str == _BARE_WAKE_PROMPT
 
 
 if __name__ == "__main__":

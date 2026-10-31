@@ -75,6 +75,8 @@ _DEBOUNCE_STATE: dict[str, dict] = {}
 # 空唤醒（仅 @ 机器人/全体成员或仅发唤醒前缀，无任何实质内容）时
 # 补进 message_str 的提示词。随 message_str 走，与历史落库内容一致，
 # 群聊上下文等 on_llm_request 注入机制照常生效。
+# 与「补回艾特自身」等插件重复时，可在配置
+# platform_settings.bare_wake_prompt.enable 关闭注入。
 _BARE_WAKE_PROMPT = (
     "<system_reminder>The user woke you up with an @ mention but did not "
     "include any content.</system_reminder>"
@@ -92,6 +94,10 @@ def _safe_error_model(agent_runner) -> str | None:
 
 
 class InternalAgentSubStage(Stage):
+    # 空唤醒提示词注入开关。initialize 时按 platform_settings.bare_wake_prompt.enable
+    # 覆盖；关闭后不再注入提示词，改由插件（如「补回艾特自身」）自行补全 message_str。
+    bare_wake_prompt_enable: bool = True
+
     async def initialize(self, ctx: PipelineContext) -> None:
         self.ctx = ctx
         conf = ctx.astrbot_config
@@ -123,6 +129,11 @@ class InternalAgentSubStage(Stage):
             False,
         )
         self.kb_agentic_mode: bool = conf.get("kb_agentic_mode", False)
+
+        # 空唤醒提示词注入：已装「补回艾特自身」等自行补内容的插件时可关闭，避免重复
+        platform_settings: dict = conf.get("platform_settings", {}) or {}
+        bare_wake_cfg: dict = platform_settings.get("bare_wake_prompt", {}) or {}
+        self.bare_wake_prompt_enable = bool(bare_wake_cfg.get("enable", True))
 
         file_extract_conf: dict = settings.get("file_extract", {})
         self.file_extract_enabled: bool = file_extract_conf.get("enable", False)
@@ -248,17 +259,31 @@ class InternalAgentSubStage(Stage):
             return False
         return has_wake_marker
 
+    @staticmethod
+    def _has_message_content(event: AstrMessageEvent) -> bool:
+        """事件是否已有可用于请求 LLM 的文本内容。"""
+        return bool(event.message_str and event.message_str.strip())
+
     def _fill_bare_wake_prompt(self, event: AstrMessageEvent) -> bool:
         """空唤醒时向 message_str 补提示词并走正常 LLM 请求。
 
+        关闭 bare_wake_prompt 注入时不写提示词，message_str 保持为空，交给
+        on_waiting_llm_request 钩子中的插件（如「补回艾特自身」）补内容。
+
         Returns:
-            True 表示已补提示词，应继续走 LLM 请求；False 表示维持跳过。
+            True 表示可以继续走 LLM 请求；False 表示维持跳过。
         """
         if not event.is_wake or not self._is_bare_wake(event):
             return False
-        event.message_str = _BARE_WAKE_PROMPT
         # 供群聊上下文 on_req_llm 识别：本条不构成群聊记录，注入全部缓冲历史
         event.set_extra("_bare_wake", True)
+        if not self.bare_wake_prompt_enable:
+            logger.info(
+                "空唤醒(仅 @/唤醒前缀): 提示词注入已关闭，交由插件补全 umo=%s",
+                event.unified_msg_origin,
+            )
+            return True
+        event.message_str = _BARE_WAKE_PROMPT
         logger.info(
             "空唤醒(仅 @/唤醒前缀): 补提示词后正常请求 LLM umo=%s",
             event.unified_msg_origin,
@@ -510,7 +535,7 @@ class InternalAgentSubStage(Stage):
                 show_reasoning = self.show_reasoning
 
             has_provider_request = event.get_extra("provider_request") is not None
-            has_valid_message = bool(event.message_str and event.message_str.strip())
+            has_valid_message = self._has_message_content(event)
             has_media_content = any(
                 isinstance(comp, (Image, File, Record, Video))
                 for comp in event.message_obj.message
@@ -519,6 +544,7 @@ class InternalAgentSubStage(Stage):
                 isinstance(comp, Reply) for comp in event.message_obj.message
             )
 
+            bare_wake_awaits_plugin = False
             if (
                 not has_provider_request
                 and not has_valid_message
@@ -530,6 +556,8 @@ class InternalAgentSubStage(Stage):
                         "skip llm request: empty message and no provider_request",
                     )
                     return
+                # 关闭注入时 message_str 仍为空：等内容被插件补上再决定是否请求
+                bare_wake_awaits_plugin = not self._has_message_content(event)
 
             logger.debug("ready to request llm provider")
             interrupt_cfg = self._get_interrupt_reply_config(event)
@@ -559,6 +587,14 @@ class InternalAgentSubStage(Stage):
             except Exception:
                 logger.warning("send_typing failed", exc_info=True)
             if await call_event_hook(event, EventType.OnWaitingLLMRequestEvent):
+                return
+
+            # 空唤醒且关闭了提示词注入：钩子里的插件仍未补出内容，维持跳过
+            if bare_wake_awaits_plugin and not self._has_message_content(event):
+                logger.debug(
+                    "skip llm request: bare wake prompt disabled "
+                    "and no plugin filled message_str",
+                )
                 return
 
             # 防抖结束后等待旧任务收尾，但不重复发送停止提示或停止信号。

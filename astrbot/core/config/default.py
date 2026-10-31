@@ -130,6 +130,11 @@ DEFAULT_CONFIG = {
         "friend_message_needs_wake_prefix": False,
         "ignore_bot_self_message": False,
         "ignore_at_all": False,
+        # 空唤醒（仅 @ 机器人/全体成员或仅唤醒前缀，无任何内容）时的提示词注入。
+        # 已装「补回艾特自身」等自行补内容的插件时可关闭，避免重复。
+        "bare_wake_prompt": {
+            "enable": True,
+        },
         # 消息防抖：私聊连发消息合并为一次 LLM 请求（防抖静默期满才真正请求）
         "message_debounce": {
             "enable": True,
@@ -1145,6 +1150,12 @@ CONFIG_METADATA_2 = {
                     "ignore_at_all": {
                         "type": "bool",
                         "hint": "启用后，机器人会忽略 @ 全体成员 的消息事件。",
+                    },
+                    "bare_wake_prompt": {
+                        "type": "object",
+                        "items": {
+                            "enable": {"type": "bool"},
+                        },
                     },
                     "message_debounce": {
                         "type": "object",
@@ -4900,6 +4911,17 @@ CONFIG_METADATA_3 = {
                             "platform_settings.segmented_reply.enable": True,
                             "platform_settings.segmented_reply.config_mode": "pro",
                         },
+                    },
+                },
+            },
+            "bare_wake_prompt": {
+                "description": "空唤醒提示词",
+                "type": "object",
+                "items": {
+                    "platform_settings.bare_wake_prompt.enable": {
+                        "description": "注入提示词",
+                        "type": "bool",
+                        "hint": "仅 @ 机器人/@ 全体成员或只发唤醒前缀、没有任何内容时，给 LLM 补一句「用户只是把你叫醒」的系统提示。已装「补回艾特自身」等自行补内容的插件时可关闭以免重复：关闭后框架不再补提示词，仍会进入 LLM 流程等插件补全，插件也没补出内容时跳过本次请求。",
                     },
                 },
             },
