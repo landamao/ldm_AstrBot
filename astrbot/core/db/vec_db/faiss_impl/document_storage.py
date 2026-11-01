@@ -64,24 +64,28 @@ class DocumentStorage:
             await conn.run_sync(BaseDocModel.metadata.create_all)
 
             try:
-                # 检查已有列，避免重复迁移时 "duplicate column name" 报错刷日志
-                pragma_result = await conn.execute(text("PRAGMA table_info(documents)"))
+                # 注意：PRAGMA table_info 不会列出 GENERATED 列，必须用 table_xinfo。
+                # 否则已有生成列时判断失效，每次启动都会执行 ALTER 并报
+                # "duplicate column name: kb_doc_id"。
+                pragma_result = await conn.execute(text("PRAGMA table_xinfo(documents)"))
                 existing_columns = {row[1] for row in pragma_result.fetchall()}
 
-                if "kb_doc_id" not in existing_columns:
-                    await conn.execute(
-                        text(
-                            "ALTER TABLE documents ADD COLUMN kb_doc_id TEXT "
-                            "GENERATED ALWAYS AS (json_extract(metadata, '$.kb_doc_id')) STORED",
-                        ),
-                    )
-                if "user_id" not in existing_columns:
-                    await conn.execute(
-                        text(
-                            "ALTER TABLE documents ADD COLUMN user_id TEXT "
-                            "GENERATED ALWAYS AS (json_extract(metadata, '$.user_id')) STORED",
-                        ),
-                    )
+                # SQLite 不允许 ALTER TABLE ADD COLUMN 添加 STORED 生成列，
+                # 新增列一律使用 VIRTUAL（同样可以建立索引）。
+                for column in ("kb_doc_id", "user_id"):
+                    if column in existing_columns:
+                        continue
+                    try:
+                        await conn.execute(
+                            text(
+                                f"ALTER TABLE documents ADD COLUMN {column} TEXT "
+                                f"GENERATED ALWAYS AS (json_extract(metadata, '$.{column}')) VIRTUAL",
+                            ),
+                        )
+                    except Exception as e:
+                        # 多实例并发初始化或历史库已存在该列时忽略
+                        if "duplicate column name" not in str(e).lower():
+                            raise
 
                 # Create indexes
                 await conn.execute(
@@ -95,7 +99,7 @@ class DocumentStorage:
                     ),
                 )
             except Exception:
-                logger.warning("创建 documents(user_id) 索引失败", exc_info=True)
+                logger.warning("初始化 documents 生成列/索引失败", exc_info=True)
 
             await conn.execute(
                 text(
