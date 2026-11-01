@@ -1249,10 +1249,22 @@ class InternalAgentSubStage(Stage):
         if llm_response is None:
             llm_response = LLMResponse(role="assistant", completion_text="")
 
+        # completion_text 是由 result_chain 派生的属性：只要链里没有 Plain，
+        # 哪怕这一轮确实回复了（TTS 插件把文本替换成语音、插件把文本换成图片等），
+        # completion_text 也会读成空。若此时按「空响应」丢弃，用户消息与本轮回复
+        # 都进不了历史，下一轮 LLM 直接失忆。链里还有非 Plain 组件就说明本轮有回复。
+        has_non_text_reply = bool(
+            llm_response.result_chain
+            and any(
+                not isinstance(comp, Plain) for comp in llm_response.result_chain.chain
+            )
+        )
+
         if (
             not llm_response.completion_text
             and not req.tool_calls_result
             and not interrupted
+            and not has_non_text_reply
         ):
             logger.debug("LLM 响应为空，不保存记录。")
             return

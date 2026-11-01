@@ -108,6 +108,15 @@ class Main(star.Star):
                 has_context_content = True
                 break
 
+        # 唤醒时刻的缓冲水位：空唤醒本身没有落位记录，注入历史时靠它确定
+        # "唤醒之前/之后"的分界。必须在消息阶段打点——on_llm_request 可能被
+        # 插件拖上数秒，那时缓冲里已经混进了本轮的新消息。
+        if (
+            self.group_chat_context
+            and event.get_message_type() == MessageType.GROUP_MESSAGE
+        ):
+            self.group_chat_context.mark_wake_watermark(event)
+
         group_context_enabled = False
         if self.group_chat_context:
             try:

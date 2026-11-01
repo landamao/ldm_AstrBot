@@ -30,6 +30,7 @@ if SRC not in sys.path:
 from astrbot.builtin_stars.astrbot.group_chat_context import (  # noqa: E402
     GroupChatContext,
 )
+from astrbot.builtin_stars.astrbot.main import Main  # noqa: E402
 from astrbot.core.message.components import At, AtAll, Image, Plain  # noqa: E402
 from astrbot.core.pipeline.process_stage.method.agent_sub_stages import (  # noqa: E402
     internal,
@@ -38,6 +39,7 @@ from astrbot.core.pipeline.process_stage.method.agent_sub_stages.internal import
     _BARE_WAKE_PROMPT,
     InternalAgentSubStage,
 )
+from astrbot.core.platform.message_type import MessageType  # noqa: E402
 
 WAKE_PREFIX = "小助手"
 UMO = "aiocqhttp:GroupMessage:456"
@@ -74,6 +76,8 @@ def make_group_context(buffered: list[str]) -> GroupChatContext:
     gc._locks = {}
     gc.raw_records = defaultdict(deque)
     gc._record_ids = defaultdict(deque)
+    gc._record_seq = defaultdict(deque)
+    gc._seq = 0
     gc._image_caption_last_at = {}
     gc._pending_images = {}
     gc._caption_cache = OrderedDict()
@@ -83,6 +87,9 @@ def make_group_context(buffered: list[str]) -> GroupChatContext:
     gc._caption_sem_limit = 0
     gc.raw_records[UMO].extend(buffered)
     gc._record_ids[UMO].extend(f"id{i}" for i in range(len(buffered)))
+    for _ in buffered:
+        gc._seq += 1
+        gc._record_seq[UMO].append(gc._seq)
     gc.cfg = lambda event: {"image_caption": False}
     return gc
 
@@ -187,10 +194,12 @@ def test_disabled_ignores_non_bare_events():
 
 
 def test_bare_wake_on_req_llm_injects_full_buffer():
-    """空唤醒请求：群聊上下文注入全部缓冲历史并清空缓冲。"""
+    """空唤醒请求：水位=全部记录时，注入全部历史并清空缓冲。"""
     gc = make_group_context(["[A/10:00]: 早啊", "[B/10:01]: 早", "[C/10:02]: 在聊啥"])
     event = FakeEvent([At(qq="bot123")])
     event.set_extra("_bare_wake", True)
+    # 唤醒时缓冲里已有这三条
+    gc.mark_wake_watermark(event)
     req = SimpleNamespace(leading_user_content_parts=[])
 
     asyncio.run(gc.on_req_llm(event, req))
@@ -200,6 +209,116 @@ def test_bare_wake_on_req_llm_injects_full_buffer():
     for line in ("早啊", "早", "在聊啥"):
         assert line in block, f"历史块应包含缓冲记录：{line}"
     assert len(gc.raw_records[UMO]) == 0, "缓冲应被消费清空"
+
+
+def test_bare_wake_watermark_excludes_later_messages():
+    """空唤醒后、请求前新到的消息不算历史：不注入，且留在缓冲给下一轮。"""
+    gc = make_group_context(["[A/10:00]: 早啊", "[B/10:01]: 早"])
+    event = FakeEvent([At(qq="bot123")])
+    event.set_extra("_bare_wake", True)
+    # 唤醒时缓冲只有前两条
+    gc.mark_wake_watermark(event)
+    # 等待窗口内又来了两条（例如插件在 on_llm_request 里等 6 秒）
+    gc.raw_records[UMO].extend(["[C/10:03]: 看图", "[C/10:04]: [Image: 一只猫]"])
+    gc._record_ids[UMO].extend(["id2", "id3"])
+    gc._record_seq[UMO].extend([3, 4])
+    req = SimpleNamespace(leading_user_content_parts=[])
+
+    asyncio.run(gc.on_req_llm(event, req))
+
+    block = req.leading_user_content_parts[0].text
+    assert "早啊" in block and "早" in block, "水位之前的历史应注入"
+    assert "看图" not in block, "唤醒之后的消息不应算历史"
+    assert "一只猫" not in block, "唤醒之后的图片不应被转述注入"
+    assert list(gc.raw_records[UMO]) == ["[C/10:03]: 看图", "[C/10:04]: [Image: 一只猫]"], (
+        "水位之后的记录应完整保留在缓冲，留给下一轮"
+    )
+    assert list(gc._record_seq[UMO]) == [3, 4], "序号需与记录同步保留"
+    assert list(gc._record_ids[UMO]) == ["id2", "id3"], "记录 ID 需与记录同步保留"
+
+
+def test_bare_wake_watermark_only_later_messages_no_history():
+    """水位为 0（唤醒前缓冲为空）：本轮不注入历史，后到消息全部留给下一轮。"""
+    gc = make_group_context([])
+    event = FakeEvent([At(qq="bot123")])
+    event.set_extra("_bare_wake", True)
+    gc.mark_wake_watermark(event)
+    gc.raw_records[UMO].append("[C/10:03]: 看图")
+    gc._record_ids[UMO].append("id0")
+    gc._record_seq[UMO].append(1)
+    req = SimpleNamespace(leading_user_content_parts=[])
+
+    asyncio.run(gc.on_req_llm(event, req))
+
+    assert req.leading_user_content_parts == [], "没有历史可注入时不应塞空块"
+    assert list(gc.raw_records[UMO]) == ["[C/10:03]: 看图"], "后到消息不能丢"
+
+
+def test_watermark_survives_trim():
+    """水位按序号而非下标切：期间发生出队裁剪也不会切错。"""
+    gc = make_group_context(["[A/10:00]: 一", "[B/10:01]: 二"])
+    event = FakeEvent([At(qq="bot123")])
+    event.set_extra("_bare_wake", True)
+    gc.mark_wake_watermark(event)  # 水位=2
+    # 模拟裁剪：旧记录被挤掉，新记录接着排队
+    gc.raw_records[UMO].popleft()
+    gc._record_ids[UMO].popleft()
+    gc._record_seq[UMO].popleft()
+    gc.raw_records[UMO].extend(["[C/10:02]: 三", "[C/10:03]: 四"])
+    gc._record_ids[UMO].extend(["id2", "id3"])
+    gc._record_seq[UMO].extend([3, 4])
+    req = SimpleNamespace(leading_user_content_parts=[])
+
+    asyncio.run(gc.on_req_llm(event, req))
+
+    block = req.leading_user_content_parts[0].text
+    assert "二" in block, "水位内幸存的记录仍应注入"
+    assert "三" not in block and "四" not in block, "水位之后的记录不入历史"
+    assert list(gc.raw_records[UMO]) == ["[C/10:02]: 三", "[C/10:03]: 四"]
+
+
+def test_bare_wake_without_watermark_keeps_legacy_full_flush():
+    """没有水位信息（异常路径）时维持旧行为：全量注入并清空。"""
+    gc = make_group_context(["[A/10:00]: 早啊", "[B/10:01]: 早"])
+    event = FakeEvent([At(qq="bot123")])
+    event.set_extra("_bare_wake", True)
+    req = SimpleNamespace(leading_user_content_parts=[])
+
+    asyncio.run(gc.on_req_llm(event, req))
+
+    block = req.leading_user_content_parts[0].text
+    assert "早啊" in block and "早" in block
+    assert len(gc.raw_records[UMO]) == 0
+
+
+def test_mark_wake_watermark_uses_current_seq():
+    """水位取"此刻已分配到的序号"，之后新增的记录不会落进水位。"""
+    gc = make_group_context(["[A/10:00]: 早啊"])
+    event = FakeEvent([At(qq="bot123")])
+    gc.mark_wake_watermark(event)
+    assert event.get_extra("_group_context_wake_seq") == 1
+
+    gc.raw_records[UMO].append("[B/10:01]: 早")
+    gc._record_seq[UMO].append(2)
+    assert event.get_extra("_group_context_wake_seq") == 1, "水位不随后续消息变化"
+
+
+def test_bare_wake_with_record_uses_record_index():
+    """有落位记录的空唤醒（仅唤醒前缀）仍按记录下标切，优先于水位。"""
+    gc = make_group_context(["[A/10:00]: 早啊", "[B/10:01]: 小助手", "[C/10:02]: 后续"])
+    event = FakeEvent([Plain(WAKE_PREFIX)])
+    event.set_extra("_bare_wake", True)
+    event.set_extra("_group_context_record_id", "id1")
+    # 故意把水位放到含自己记录的位置：走水位就会把自己也当成历史
+    event.set_extra("_group_context_wake_seq", 2)
+    req = SimpleNamespace(leading_user_content_parts=[])
+
+    asyncio.run(gc.on_req_llm(event, req))
+
+    block = req.leading_user_content_parts[0].text
+    assert "早啊" in block
+    assert "小助手" not in block, "触发消息本身走主 prompt，不应进历史块"
+    assert list(gc.raw_records[UMO]) == ["[C/10:02]: 后续"]
 
 
 def test_bare_wake_empty_buffer_no_inject():
@@ -212,6 +331,31 @@ def test_bare_wake_empty_buffer_no_inject():
     asyncio.run(gc.on_req_llm(event, req))
 
     assert req.leading_user_content_parts == []
+
+
+def test_main_on_message_sets_watermark():
+    """Main.on_message 在消息阶段就给群消息打上水位（早于任何 on_llm_request）。"""
+    gc = make_group_context(["[A/10:00]: 早啊"])
+    main = Main.__new__(Main)
+    main.group_chat_context = gc
+    main.context = SimpleNamespace(
+        get_config=lambda **_kwargs: {
+            "provider_ltm_settings": {
+                "group_icl_enable": False,
+                "active_reply": {"enable": False},
+            },
+        },
+    )
+    event = FakeEvent([At(qq="bot123")])
+    event.get_message_type = lambda: MessageType.GROUP_MESSAGE
+
+    async def run():
+        async for _ in main.on_message(event):
+            pass
+
+    asyncio.run(run())
+
+    assert event.get_extra("_group_context_wake_seq") == 1, "应留下唤醒时刻的水位"
 
 
 def test_plain_event_without_extras_unchanged():

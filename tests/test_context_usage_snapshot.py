@@ -27,6 +27,7 @@ from astrbot.core.agent.runners.tool_loop_agent_runner import (  # noqa: E402
 from astrbot.core.agent.tool import FunctionTool, ToolSet  # noqa: E402
 from astrbot.core.agent.tool_executor import BaseFunctionToolExecutor  # noqa: E402
 from astrbot.core.db.po import Conversation  # noqa: E402
+from astrbot.core.notification import notification_service  # noqa: E402
 from astrbot.core.provider.entities import (  # noqa: E402
     LLMResponse,
     ProviderRequest,
@@ -36,6 +37,20 @@ from astrbot.core.provider.entities import (  # noqa: E402
 PREVIOUS_QUESTION = "previous question"
 HISTORICAL_ANSWER = "important historical answer"
 CURRENT_QUESTION = "current question"
+
+
+async def _silent_notify(key: str, title: str, detail: str = "") -> None:
+    """测试里的压缩告警只打日志，绝不写库。
+
+    本文件会故意构造超大 trusted_token_usage 触发压缩分支；compressor 为空时
+    manager 会调 notification_service.notify，而它走的是真实 db_helper
+    （data/data_v4.db），跑一次测试就会留下一条未读的「上下文压缩失败」假通知，
+    下次重启 WebUI 就弹出来。这里换成空实现规避。
+    """
+    return None
+
+
+notification_service.notify = _silent_notify
 
 
 def make_tool():

@@ -6,6 +6,7 @@ import random
 import re
 import time
 import uuid
+from bisect import bisect_right
 from collections import OrderedDict, defaultdict, deque
 from pathlib import Path
 
@@ -52,6 +53,8 @@ DEFAULT_GROUP_MESSAGE_MAX_CNT = 300
 _ACCESS_WILDCARDS = ("*", "all")
 # 延迟图片转述占位： [Image:__LAZY__:<token>]
 _LAZY_IMAGE_RE = re.compile(r"\[Image:__LAZY__:([0-9a-fA-F]+)\]")
+# 唤醒时刻的缓冲水位（extra 键）：记录"唤醒发生那一瞬间"已累积到第几条记录
+_WAKE_SEQ_EXTRA = "_group_context_wake_seq"
 # MD5 转述缓存上限（按内容复用）
 _CAPTION_CACHE_MAX = 512
 DEFAULT_IMAGE_CAPTION_CONCURRENCY = 2
@@ -64,6 +67,9 @@ class GroupChatContext:
         self._locks: dict[str, asyncio.Lock] = {}
         self.raw_records: dict[str, deque[str]] = defaultdict(deque)
         self._record_ids: dict[str, deque[str]] = defaultdict(deque)
+        # 与 raw_records 平行的单调序号，用于"按唤醒时刻切片"（不受出队裁剪影响）
+        self._record_seq: dict[str, deque[int]] = defaultdict(deque)
+        self._seq = 0
         # 各会话最近一次「标记待转述图片」的时间戳（monotonic 秒）
         self._image_caption_last_at: dict[str, float] = {}
         # token -> 图片 URL/路径（记录阶段写入，唤醒 LLM 时解析）
@@ -529,9 +535,21 @@ class GroupChatContext:
             cnt = len(records)
             self.raw_records.pop(umo, None)
             self._record_ids.pop(umo, None)
+            self._record_seq.pop(umo, None)
         self._locks.pop(umo, None)
         self._image_caption_last_at.pop(umo, None)
         return cnt
+
+    def mark_wake_watermark(self, event: AstrMessageEvent) -> None:
+        """记下"唤醒这一刻"的缓冲水位。
+
+        空唤醒（仅 @ / 唤醒前缀）本身没有落位记录，注入历史时只能退化成
+        "注入请求时的全部缓冲"。但 on_req_llm 往往晚于唤醒（例如插件在
+        on_llm_request 里等待新消息，动辄数秒），窗口内新到的消息会被误当成
+        历史一起注入。这里在消息阶段先打水位，注入时只取水位之前的记录，
+        水位之后的消息留给下一轮再作为历史出现。
+        """
+        event.set_extra(_WAKE_SEQ_EXTRA, self._seq)
 
     async def handle_message(self, event: AstrMessageEvent) -> None:
         if event.get_message_type() != MessageType.GROUP_MESSAGE:
@@ -544,14 +562,19 @@ class GroupChatContext:
         async with self._get_lock(umo):
             records = self.raw_records[umo]
             record_ids = self._record_ids[umo]
+            record_seqs = self._record_seq[umo]
             record_id = uuid.uuid4().hex
+            self._seq += 1
             records.append(final_message)
             record_ids.append(record_id)
+            record_seqs.append(self._seq)
             # 超出上限时同步清理被挤掉记录上的 pending 图片
             while len(records) > cfg["group_message_max_cnt"]:
                 dropped = records.popleft()
                 if record_ids:
                     record_ids.popleft()
+                if record_seqs:
+                    record_seqs.popleft()
                 for token in _LAZY_IMAGE_RE.findall(dropped):
                     self._pending_images.pop(token, None)
             event.set_extra("_group_context_record_id", record_id)
@@ -563,9 +586,8 @@ class GroupChatContext:
         umo = event.unified_msg_origin
         record_id = event.get_extra("_group_context_record_id", None)
         prompt_idx = event.get_extra("_group_context_raw_idx", -1)
-        # 空唤醒（仅 @/唤醒前缀）不经过 handle_message，没有落位 extra，
-        # 但请求同样需要看到群聊历史：注入全部缓冲并清空
         is_bare_wake = bool(event.get_extra("_bare_wake", False))
+        wake_seq = event.get_extra(_WAKE_SEQ_EXTRA, None)
         if (
             not is_bare_wake
             and not isinstance(record_id, str)
@@ -574,6 +596,7 @@ class GroupChatContext:
             return
 
         cfg = self.cfg(event)
+        current_record = ""
 
         async with self._get_lock(umo):
             records = self.raw_records.get(umo)
@@ -582,27 +605,48 @@ class GroupChatContext:
 
             raw_list = list(records)
             id_list = list(self._record_ids.get(umo, deque()))
-            if is_bare_wake:
-                prompt_idx = len(raw_list)
-            elif isinstance(record_id, str) and record_id in id_list:
-                prompt_idx = id_list.index(record_id)
+            seq_list = list(self._record_seq.get(umo, deque()))
 
-            if not is_bare_wake and prompt_idx >= len(raw_list):
+            # 切点：历史只到"唤醒/触发消息"为止，之后的消息属于本轮，不算历史。
+            # - 触发消息有落位记录：注入它之前的，消费它本身
+            # - 空唤醒无落位记录：用唤醒时刻的水位切开；水位之后（例如插件等待
+            #   窗口内新发的）留在缓冲里，下一轮再作为历史出现
+            # - 没有水位（异常路径）：维持旧行为，注入全部并清空
+            if isinstance(record_id, str) and record_id in id_list:
+                inject_end = id_list.index(record_id)
+                keep_from = inject_end + 1
+                current_record = raw_list[inject_end]
+            elif is_bare_wake and isinstance(wake_seq, int):
+                inject_end = bisect_right(seq_list, wake_seq)
+                keep_from = inject_end
+            elif is_bare_wake:
+                inject_end = len(raw_list)
+                keep_from = inject_end
+            elif isinstance(prompt_idx, int) and 0 <= prompt_idx < len(raw_list):
+                # 触发消息已被裁剪掉时的旧兜底：按落位下标切
+                inject_end = prompt_idx
+                keep_from = prompt_idx + 1
+                current_record = raw_list[prompt_idx]
+            else:
                 return
 
-            records_to_inject = raw_list[:prompt_idx]
-            # 当前触发消息不会注入群聊上下文（它走主 prompt），清理其上的延迟占位，避免 pending 泄漏
-            current_record = raw_list[prompt_idx] if 0 <= prompt_idx < len(raw_list) else ""
-            remaining = raw_list[prompt_idx + 1 :]
-            remaining_ids = id_list[prompt_idx + 1 :] if id_list else []
+            records_to_inject = raw_list[:inject_end]
+            remaining = raw_list[keep_from:]
+            remaining_ids = id_list[keep_from:] if id_list else []
+            remaining_seqs = seq_list[keep_from:] if seq_list else []
             records.clear()
             records.extend(remaining)
             if id_list:
                 record_ids = self._record_ids[umo]
                 record_ids.clear()
                 record_ids.extend(remaining_ids)
+            if seq_list:
+                record_seqs = self._record_seq[umo]
+                record_seqs.clear()
+                record_seqs.extend(remaining_seqs)
 
         if current_record:
+            # 当前触发消息不会注入群聊上下文（它走主 prompt），清理其上的延迟占位，避免 pending 泄漏
             for token in _LAZY_IMAGE_RE.findall(current_record):
                 self._pending_images.pop(token, None)
 
