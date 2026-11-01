@@ -18,19 +18,20 @@ if /i "%~1"=="/nopause" set "NOPAUSE=1"
 
 set "SRC=D:\code\ldm-bot\ldmbot"
 set "DST=Q:\_tmp\ldmbot"
+set "DSTNAME=ldmbot"
 set "OUT=Q:\_tmp\ldmbot.zip"
-set "SEVENZIP=C:\Program Files\7-Zip\7z.exe"
+set "TAR=C:\Windows\System32\tar.exe"
 
 set "RC=0"
 
-echo ========== 1. 检查 7-Zip ==========
-if not exist "%SEVENZIP%" (
-    echo [错误] 找不到 7-Zip：%SEVENZIP%
-    echo         请修改本脚本里的 SEVENZIP 变量
+echo ========== 1. 检查 tar.exe ==========
+if not exist "%TAR%" (
+    echo [错误] 找不到 tar.exe：%TAR%
+    echo         Windows 10 1803+ 自带；缺失请升级系统或改用其他打包工具
     set "RC=1"
     goto :finish
 )
-echo [完成] %SEVENZIP%
+echo [完成] %TAR%
 
 echo.
 echo ========== 2. 清理源目录 __pycache__ ==========
@@ -96,19 +97,38 @@ for %%f in (.env .gitignore .zcodeignore CHANGELOG.md LICENSE main.py NOTICE pyp
 )
 
 echo.
-echo ========== 6. 用 7-Zip 打包 ==========
+echo ========== 6. 用 bsdtar 打包 ==========
 if not exist "%DST%" (
     echo [错误] 目标目录不存在，无法打包: %DST%
     set "RC=1"
     goto :finish
 )
 if exist "%OUT%" del /q "%OUT%"
+if exist "%OUT%" (
+    echo [警告] 旧压缩包删不掉，可能正被 7-Zip 文件管理器等程序打开: %OUT%
+    echo         请关闭占用该文件的程序后重试
+    set "RC=1"
+    goto :finish
+)
 
-rem -tzip 生成标准 zip；-mx=5 平衡速度与体积；-mmt=on 多线程
-"%SEVENZIP%" a -tzip -mx=5 -mmt=on -bso0 -bsp0 "%OUT%" "%DST%"
-
-if errorlevel 1 (
-    echo [错误] 7-Zip 打包失败，退出码 !errorlevel!
+rem 用 Windows 自带 bsdtar 打包，不要用 7-Zip。
+rem 原因：7-Zip 给中文文件名打上 0x800(UTF-8) 标志位，
+rem       Linux 的 Info-ZIP unzip 6.00 读 local header 时会按本地编码
+rem       重新解码，与 central directory 比对不上，逐条报
+rem       "mismatching local filename"，最终 unzip 退出码为 1，
+rem       导致安装脚本判定解压失败。
+rem       bsdtar 写原始 UTF-8 字节且不设 0x800，Linux unzip 正常。
+rem
+rem 必须 cd 到父目录后用相对名打包：
+rem   传绝对路径 D:\...\ldmbot 时 tar 会报 "Removing leading drive letter"
+rem   并把成员名存成 _tmp/ldmbot/...，丢掉顶层 ldmbot 目录，
+rem   解压后结构就不对了。
+pushd "%DST%\.." >nul
+"%TAR%" -a -c -f "%OUT%" "%DSTNAME%"
+set "TARRC=%errorlevel%"
+popd >nul
+if not "%TARRC%"=="0" (
+    echo [错误] tar 打包失败，退出码 %TARRC%
     set "RC=1"
     goto :finish
 )
@@ -121,7 +141,7 @@ echo [完成] 已生成 %OUT%
 
 echo.
 echo ========== 7. 校验压缩包 ==========
-"%SEVENZIP%" t -bso0 -bsp0 "%OUT%"
+"%TAR%" -t -f "%OUT%" >nul 2>&1
 if errorlevel 1 (
     echo [错误] 压缩包完整性校验失败: %OUT%
     set "RC=1"
