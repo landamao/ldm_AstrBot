@@ -15,11 +15,16 @@ WALLPAPER_KEY = "dashboard_wallpaper"
 LOGO_KEY = "dashboard_logo"
 LOGIN_WALLPAPER_KEY = "dashboard_login_wallpaper"
 
-# 板块透明度范围（0-100，0=完全不透明；壁纸始终完全显示，无壁纸透明度）
+# 板块透明度范围（0-100，0=完全不透明）
 PANEL_OPACITY_MIN = 0
 PANEL_OPACITY_MAX = 100
 # 板块透明度默认值（50=半透明，2026-08 用户要求默认 50%）
 PANEL_OPACITY_DEFAULT = 50
+# 壁纸自身不透明度范围（0-100，100=壁纸完全不透明）
+WALLPAPER_OPACITY_MIN = 0
+WALLPAPER_OPACITY_MAX = 100
+# 壁纸自身不透明度默认值（80=略微透明，2026-11 用户要求恢复壁纸透明度滑块，默认 80%）
+WALLPAPER_OPACITY_DEFAULT = 80
 # 窗口模糊度范围（0-60px，0=无模糊，用于弹窗/临时侧边栏 backdrop-filter）
 WINDOW_BLUR_MIN = 0
 WINDOW_BLUR_MAX = 41
@@ -122,6 +127,20 @@ def _clamp_number(value: object, default: int, minimum: int, maximum: int) -> in
     if number > maximum:
         return maximum
     return number
+
+
+def _normalize_version(value: object) -> int:
+    """版本号规范化：只接受正整数（毫秒时间戳），其余按「无版本号」处理。
+
+    版本号用于「图片地址没变但内容换了」时给展示地址附加参数破浏览器缓存。
+    """
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
 
 
 def _clean_wallpaper_url(value: object) -> str:
@@ -237,16 +256,18 @@ class DashboardPreferenceService:
     def normalize_wallpaper(cls, value: object) -> dict[str, object] | None:
         """规范化壁纸设置；None 表示使用默认（无壁纸、不透明板块）。
 
-        新结构：{landscape, portrait, mode, panelOpacity}
+        新结构：{landscape, portrait, mode, panelOpacity, opacity, version}
         - landscape/portrait: {"url": 地址} 或 None（缺省=该方向不用壁纸）
         - mode: separate（横竖各用各的）/ portrait_use_landscape（竖屏复用横屏）
           / landscape_use_portrait（横屏复用竖屏）
-        - panelOpacity: 界面板块透明度 0-100（0=完全不透明，共用；壁纸始终
-          完全显示，旧结构的 opacity 字段读取时直接丢弃）
+        - panelOpacity: 界面板块透明度 0-100（0=完全不透明，共用）
+        - opacity: 壁纸自身不透明度 0-100（100=完全不透明，默认 80）
+        - version: 版本号（毫秒时间戳，保存时刷新）：外链壁纸「换了图但地址
+          没变」时用于破缓存，避免浏览器继续用旧图
         - enabled: 是否启用壁纸（默认 true；false=隐藏壁纸但保留设置）
 
         兼容旧结构 {url, opacity, panelOpacity}：旧 url 自动迁移为竖屏壁纸
-        （portrait），桌面横屏需要壁纸时再单独设置或选择复用模式。
+        （portrait），旧 opacity 沿用「壁纸不透明度」语义（100=完全不透明）。
         """
         if value is None:
             return None
@@ -263,12 +284,19 @@ class DashboardPreferenceService:
             PANEL_OPACITY_MIN,
             PANEL_OPACITY_MAX,
         )
+        opacity = _clamp_number(
+            value.get("opacity", value.get("wallpaper_opacity")),
+            WALLPAPER_OPACITY_DEFAULT,
+            WALLPAPER_OPACITY_MIN,
+            WALLPAPER_OPACITY_MAX,
+        )
         window_blur = _clamp_number(
             value.get("windowBlur", value.get("window_blur")),
             WINDOW_BLUR_DEFAULT,
             WINDOW_BLUR_MIN,
             WINDOW_BLUR_MAX,
         )
+        version = _normalize_version(value.get("version", value.get("v")))
 
         def _slot(raw: object) -> dict[str, str] | None:
             """规范化单个方向的壁纸槽：{url} 或 None。"""
@@ -296,6 +324,7 @@ class DashboardPreferenceService:
             and landscape is None
             and portrait is None
             and panel_opacity == PANEL_OPACITY_DEFAULT
+            and opacity == WALLPAPER_OPACITY_DEFAULT
             and window_blur == WINDOW_BLUR_DEFAULT
         ):
             # 启用中且无壁纸 + 全默认透明度 = 未设置
@@ -312,8 +341,12 @@ class DashboardPreferenceService:
             result["mode"] = mode
         if panel_opacity != PANEL_OPACITY_DEFAULT:
             result["panelOpacity"] = panel_opacity
+        if opacity != WALLPAPER_OPACITY_DEFAULT:
+            result["opacity"] = opacity
         if window_blur != WINDOW_BLUR_DEFAULT:
             result["windowBlur"] = window_blur
+        if version:
+            result["version"] = version
         return result or None
 
     async def get_wallpaper(self) -> dict[str, object] | None:
@@ -403,11 +436,13 @@ class DashboardPreferenceService:
     # ---- 自定义 Logo ----
 
     @staticmethod
-    def normalize_logo(value: object) -> dict[str, str] | None:
+    def normalize_logo(value: object) -> dict[str, object] | None:
         """规范化自定义 Logo 设置；None 表示使用默认 Logo。
 
-        结构：{url: 地址}；url 白名单与壁纸一致（http/https、data: 图片、
-        本站上传的 logo 文件路径）。显式 reset/clear 视为清除。
+        结构：{url: 地址, version: 版本号}
+        - url：白名单与壁纸一致（http/https、data: 图片、本站上传的 logo 文件路径）
+        - version：毫秒时间戳，保存时刷新；用于地址不变时强制浏览器重新拉图
+        显式 reset/clear 视为清除。
         """
         if value is None:
             return None
@@ -423,12 +458,18 @@ class DashboardPreferenceService:
             return None
         lowered = url.lower()
         if lowered.startswith(("http://", "https://", "data:image/")):
-            return {"url": url}
-        if lowered.startswith(LOGO_FILES_URL_PREFIX):
-            return {"url": url}
-        return None
+            pass
+        elif lowered.startswith(LOGO_FILES_URL_PREFIX):
+            pass
+        else:
+            return None
+        version = _normalize_version(value.get("version", value.get("v")))
+        result: dict[str, object] = {"url": url}
+        if version:
+            result["version"] = version
+        return result
 
-    async def get_logo(self) -> dict[str, str] | None:
+    async def get_logo(self) -> dict[str, object] | None:
         raw = await sp.global_get(LOGO_KEY, None)
         return self.normalize_logo(raw)
 
