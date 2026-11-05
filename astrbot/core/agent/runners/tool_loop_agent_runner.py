@@ -52,6 +52,7 @@ from astrbot.core.provider.modalities import (
     sanitize_contexts_by_modalities,
 )
 from astrbot.core.provider.provider import Provider
+from astrbot.core.provider.sources.request_retry import resolve_request_max_retries
 from astrbot.core.utils.media_utils import compress_images_for_provider
 
 from ..context.compressor import ContextCompressor
@@ -326,6 +327,24 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self.custom_token_counter = custom_token_counter
         self.custom_compressor = custom_compressor
         self.request_max_retries = request_max_retries
+        # 空输出/仅思考输出重试与传输重试共用「请求重试次数」预算：预算是单次
+        # 逻辑请求的总尝试次数（含首次），用户把它调成 1 时不再补发请求，避免
+        # 失败后对同一模型反复轰炸。未显式传入预算时保留内置上限（单测/脚本）。
+        self.empty_output_retry_attempts = self.EMPTY_OUTPUT_RETRY_ATTEMPTS
+        self.empty_content_retry_attempts = self.EMPTY_CONTENT_RETRY_ATTEMPTS
+        if request_max_retries is not None:
+            retry_budget = resolve_request_max_retries(
+                request_max_retries,
+                source="agent_runner",
+            )
+            self.empty_output_retry_attempts = min(
+                self.EMPTY_OUTPUT_RETRY_ATTEMPTS,
+                retry_budget,
+            )
+            self.empty_content_retry_attempts = min(
+                self.EMPTY_CONTENT_RETRY_ATTEMPTS,
+                retry_budget,
+            )
         # 「模型无正文时重新请求」：仅有思考内容、无正文也无工具调用时的处理方式
         # retry_current=重试当前模型；fallback=请求回退模型
         self.empty_content_retry_enabled = empty_content_retry_enabled
@@ -777,8 +796,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         outcome = retry_state.outcome
         exc = outcome.exception() if outcome is not None else None
         if isinstance(exc, ReasoningOnlyOutputError):
-            return attempt_number >= self.EMPTY_CONTENT_RETRY_ATTEMPTS
-        return attempt_number >= self.EMPTY_OUTPUT_RETRY_ATTEMPTS
+            return attempt_number >= self.empty_content_retry_attempts
+        return attempt_number >= self.empty_output_retry_attempts
 
     async def _iter_llm_responses_with_fallback(
         self,
@@ -871,7 +890,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                                     "对话模型 %s 第 %s/%s 次仅返回思考内容、无正文输出，继续重试当前模型。",
                                     candidate_id,
                                     attempt.retry_state.attempt_number,
-                                    self.EMPTY_CONTENT_RETRY_ATTEMPTS,
+                                    self.empty_content_retry_attempts,
                                 )
                             else:
                                 logger.warning(
@@ -890,7 +909,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                                     "对话模型 %s 第 %s/%s 次尝试返回空输出。",
                                     candidate_id,
                                     attempt.retry_state.attempt_number,
-                                    self.EMPTY_OUTPUT_RETRY_ATTEMPTS,
+                                    self.empty_output_retry_attempts,
                                 )
                             raise
             except Exception as exc:  # noqa: BLE001

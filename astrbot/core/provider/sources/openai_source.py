@@ -47,7 +47,7 @@ from astrbot.core.utils.network_utils import (
 from astrbot.core.utils.string_utils import normalize_and_dedupe_strings
 
 from ..register import register_provider_adapter
-from .request_retry import retry_provider_request
+from .request_retry import resolve_request_max_retries, retry_provider_request
 
 
 @register_provider_adapter(
@@ -382,6 +382,10 @@ class ProviderOpenAIOfficial(Provider):
         )
         default_headers = auth_default_headers or self.custom_headers
 
+        # SDK 自带 max_retries=2 的隐式重试，且完全不受 AstrBot 的
+        # request_max_retries 控制：用户把重试调成 1，SDK 仍会自己补发 2 次，
+        # 叠加在 retry_provider_request 之上就是成倍的「轮番轰炸」。这里关掉
+        # SDK 内部重试，把重试权唯一交给 retry_provider_request。
         if "api_version" in provider_config:
             # Using Azure OpenAI API
             self.client = AsyncAzureOpenAI(
@@ -390,6 +394,7 @@ class ProviderOpenAIOfficial(Provider):
                 default_headers=default_headers,
                 base_url=provider_config.get("api_base", ""),
                 timeout=self.timeout,
+                max_retries=0,
                 http_client=self._create_http_client(provider_config),
             )
         else:
@@ -399,6 +404,7 @@ class ProviderOpenAIOfficial(Provider):
                 base_url=provider_config.get("api_base", None),
                 default_headers=default_headers,
                 timeout=self.timeout,
+                max_retries=0,
                 http_client=self._create_http_client(provider_config),
             )
 
@@ -1364,7 +1370,12 @@ class ProviderOpenAIOfficial(Provider):
             payloads["tool_choice"] = tool_choice
 
         llm_response = None
-        max_retries = 10
+        # 外层错误恢复循环与内层传输重试共用同一份预算：用户把「请求重试次数」
+        # 调成 N，本次逻辑请求最多只发 N 次，不再固定放大到 10 次。
+        max_retries = resolve_request_max_retries(
+            request_max_retries,
+            source=f"OpenAI/{self.display_provider_id()}",
+        )
         available_api_keys = self.api_keys.copy()
         chosen_key = random.choice(available_api_keys)
         image_fallback_used = False
@@ -1409,7 +1420,7 @@ class ProviderOpenAIOfficial(Provider):
 
         # 仅在从未成功时抛错，避免「最后一次重试成功却因 retry_cnt 仍被当成失败」
         if not succeeded or llm_response is None:
-            logger.error(f"API 调用失败，重试 {max_retries} 次仍然失败。")
+            logger.error(f"API 调用失败，共尝试 {max_retries} 次仍失败。")
             if last_exception is None:
                 raise Exception("未知错误")
             raise last_exception
@@ -1444,7 +1455,10 @@ class ProviderOpenAIOfficial(Provider):
         if func_tool and not func_tool.empty():
             payloads["tool_choice"] = tool_choice
 
-        max_retries = 10
+        max_retries = resolve_request_max_retries(
+            request_max_retries,
+            source=f"OpenAI/{self.display_provider_id()}",
+        )
         available_api_keys = self.api_keys.copy()
         chosen_key = random.choice(available_api_keys)
         image_fallback_used = False
@@ -1490,7 +1504,7 @@ class ProviderOpenAIOfficial(Provider):
 
         # 仅在从未成功时抛错，避免「最后一次重试成功却因 retry_cnt 仍被当成失败」
         if not succeeded:
-            logger.error(f"API 调用失败，重试 {max_retries} 次仍然失败。")
+            logger.error(f"API 调用失败，共尝试 {max_retries} 次仍失败。")
             if last_exception is None:
                 raise Exception("未知错误")
             raise last_exception

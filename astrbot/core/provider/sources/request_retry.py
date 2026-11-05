@@ -22,6 +22,47 @@ REQUEST_RETRY_WAIT_MAX_S = 30
 REQUEST_RETRY_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504, 529}
 
 
+def _get_configured_request_max_retries() -> int | None:
+    """读取全局 provider_settings.request_max_retries；不可用时返回 None。"""
+    try:
+        # 延迟导入：避免 request_retry 与 astrbot.core 的循环导入
+        from astrbot.core import astrbot_config
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        provider_settings = astrbot_config.get("provider_settings", {}) or {}
+        return provider_settings.get("request_max_retries")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def resolve_request_max_retries(
+    max_attempts: int | None = None,
+    *,
+    source: str = "provider",
+) -> int:
+    """解析单次逻辑请求的最大尝试次数（含首次请求）。
+
+    显式传入的值优先；未传入时回落到全局 provider_settings.request_max_retries，
+    这样图片转述、上下文压缩、插件调用、标题生成等没有显式传参的调用点也会
+    遵循 WebUI 里的「请求重试次数」设置，而不是各自退回硬编码默认值 ——
+    否则用户把重试调成 1，这些路径仍会按 5 次反复请求同一模型。
+    """
+    if max_attempts is None:
+        max_attempts = _get_configured_request_max_retries()
+    if max_attempts is None:
+        max_attempts = REQUEST_RETRY_ATTEMPTS
+
+    return coerce_int_config(
+        max_attempts,
+        default=REQUEST_RETRY_ATTEMPTS,
+        min_value=1,
+        field_name="request_max_retries",
+        source=source,
+    )
+
+
 def _get_status_code(error: BaseException) -> int | None:
     for attr in ("status_code", "status", "code"):
         value = getattr(error, attr, None)
@@ -78,13 +119,7 @@ def _build_retrying(
     retry_rate_limits: bool,
     max_attempts: int | None = None,
 ) -> AsyncRetrying:
-    max_attempts = coerce_int_config(
-        max_attempts if max_attempts is not None else REQUEST_RETRY_ATTEMPTS,
-        default=REQUEST_RETRY_ATTEMPTS,
-        min_value=1,
-        field_name="request_max_retries",
-        source=provider_label,
-    )
+    max_attempts = resolve_request_max_retries(max_attempts, source=provider_label)
 
     return AsyncRetrying(
         retry=retry_if_exception(

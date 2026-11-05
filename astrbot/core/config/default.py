@@ -3647,7 +3647,7 @@ CONFIG_METADATA_3 = {
                     "provider_settings.request_max_retries": {
                         "description": "请求最大重试次数",
                         "type": "int",
-                        "hint": "单次模型请求遇到可重试错误时的最大尝试次数。",
+                        "hint": "单次模型请求的最大尝试次数，含首次请求，对传输重试、SDK 隐身重试、图片转述/上下文压缩等调用统一生效。填 1 = 失败后不再补发请求；填 2 = 首次失败后再试 1 次。",
                     },
                     "provider_settings.default_image_caption_provider_id": {
                         "description": "默认图片转述模型",

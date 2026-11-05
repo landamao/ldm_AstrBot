@@ -109,6 +109,8 @@ class ProviderAnthropic(Provider):
         self.chosen_api_key = self.api_keys[0] if len(self.api_keys) > 0 else ""
         # 非 ASCII 密钥(httpx 要求头值为 ASCII)转成 UTF-8 bytes 头透传,
         # 同时把 api_key 置 None 避免 SDK 自己再输出 str 版中文头
+        # 关掉 SDK 内置的隐式重试（默认 2 次），重试权唯一交给
+        # retry_provider_request，否则 request_max_retries 形同虚设。
         wire_key = self.get_wire_key(self.chosen_api_key)
         if isinstance(wire_key, bytes):
             self.client = AsyncAnthropic(
@@ -116,6 +118,7 @@ class ProviderAnthropic(Provider):
                 timeout=self.timeout,
                 base_url=self.base_url,
                 default_headers={"X-Api-Key": wire_key} | (self.custom_headers or {}),
+                max_retries=0,
                 http_client=self._create_http_client(provider_config),
             )
         else:
@@ -124,6 +127,7 @@ class ProviderAnthropic(Provider):
                 timeout=self.timeout,
                 base_url=self.base_url,
                 default_headers=self.custom_headers,
+                max_retries=0,
                 http_client=self._create_http_client(provider_config),
             )
 
