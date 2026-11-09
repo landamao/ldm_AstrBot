@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import traceback
 from collections.abc import AsyncGenerator
 from dataclasses import replace
 
@@ -37,6 +38,7 @@ from astrbot.core.message.message_event_result import (
     MessageEventResult,
     ResultContentType,
 )
+from astrbot.core.notification import notify_agent_error
 from astrbot.core.persona_error_reply import (
     extract_persona_custom_error_message_from_event,
 )
@@ -91,6 +93,22 @@ def _safe_error_model(agent_runner) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _safe_provider_label(provider) -> str:
+    """安全获取提供方展示名（用于异常通知），失败时返回空串。"""
+    if provider is None:
+        return ""
+    try:
+        display = provider.display_provider_id()
+        if display:
+            return str(display)
+    except Exception:
+        pass
+    try:
+        return str(provider.provider_config.get("id", "") or "")
+    except Exception:
+        return ""
 
 
 class InternalAgentSubStage(Stage):
@@ -876,12 +894,28 @@ class InternalAgentSubStage(Stage):
 
         except Exception as e:
             logger.error(f"Error occurred while processing agent: {e}")
+            traceback_text = traceback.format_exc()
             custom_error_message = extract_persona_custom_error_message_from_event(
                 event
             )
             error_text = custom_error_message or (
                 f"AI 执行请求时出现错误: {e}"
             )
+
+            # 重要通知：AI 请求失败同样要留痕（群号/模型/调用栈），
+            # 否则用户只会在聊天窗看到一句错误提示
+            await notify_agent_error(
+                event,
+                e,
+                traceback_text,
+                model=(
+                    _safe_error_model(agent_runner)
+                    or str(getattr(locals().get("req"), "model", "") or "")
+                    or None
+                ),
+                provider=_safe_provider_label(locals().get("provider")),
+            )
+
             await self._send_llm_error_message(
                 event,
                 error_text,

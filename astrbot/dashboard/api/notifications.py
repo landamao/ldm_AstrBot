@@ -13,6 +13,11 @@ class MarkReadRequest(BaseModel):
     ids: list[int]
 
 
+class DeleteRequest(BaseModel):
+    ids: list[int] = []
+    clear_read: bool = False
+
+
 @router.get("/notifications")
 async def list_notifications(
     include_read: bool = True,
@@ -40,3 +45,20 @@ async def mark_notifications_read(
     """将指定通知标记为已读。必须显式调用，打开面板不会自动已读。"""
     marked = await notification_service.mark_read(body.ids)
     return ok({"marked": marked, "unread": await notification_service.unread_count()})
+
+
+@router.post("/notifications/delete")
+async def delete_notifications(
+    body: DeleteRequest,
+    _username: str = Depends(require_dashboard_user),
+):
+    """删除通知。
+
+    - body.ids：删这几条（已读未读都删）
+    - body.clear_read=true：清空所有已读通知
+    """
+    deleted = await notification_service.delete_notifications(
+        ids=body.ids,
+        clear_read=body.clear_read,
+    )
+    return ok({"deleted": deleted, "unread": await notification_service.unread_count()})

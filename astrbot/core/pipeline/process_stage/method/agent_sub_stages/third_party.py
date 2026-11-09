@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import traceback
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,7 @@ from astrbot.core.message.message_event_result import (
     MessageEventResult,
     ResultContentType,
 )
+from astrbot.core.notification import notify_agent_error
 from astrbot.core.persona_error_reply import (
     resolve_event_conversation_persona_id,
     resolve_persona_custom_error_message,
@@ -63,10 +65,13 @@ async def run_third_party_agent(
     runner: "BaseAgentRunner",
     stream_to_general: bool = False,
     custom_error_message: str | None = None,
+    event: AstrMessageEvent | None = None,
 ) -> AsyncGenerator[tuple[MessageChain, bool], None]:
     """
     运行第三方 agent runner 并转换响应格式
     类似于 run_agent 函数，但专门处理第三方 agent runner
+
+    event 用于把异常写进 WebUI 重要通知（可省略，省略时不记录通知）。
     """
     try:
         async for resp in runner.step_until_done(max_step=30):  # type: ignore[misc]
@@ -81,6 +86,15 @@ async def run_third_party_agent(
                 yield resp.data["chain"], True
     except Exception as e:
         logger.error(f"Third party agent runner error: {e}")
+        traceback_text = traceback.format_exc()
+        await notify_agent_error(
+            event,
+            e,
+            traceback_text,
+            model=_safe_runner_model(runner),
+            provider=_safe_runner_provider_id(runner),
+            runner_type=type(runner).__name__,
+        )
         err_msg = custom_error_message
         if not err_msg:
             err_msg = (
@@ -89,6 +103,26 @@ async def run_third_party_agent(
                 f"错误信息: {str(e)}"
             )
         yield MessageChain().message(err_msg), True
+
+
+def _safe_runner_model(runner: "BaseAgentRunner") -> str:
+    try:
+        provider = getattr(runner, "provider", None)
+        if provider is not None:
+            return str(provider.get_model() or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _safe_runner_provider_id(runner: "BaseAgentRunner") -> str:
+    try:
+        runner_provider_id = getattr(runner, "provider_id", "") or getattr(
+            runner, "prov_id", ""
+        )
+        return str(runner_provider_id or "")
+    except Exception:
+        return ""
 
 
 class _RunnerResultAggregator:
@@ -222,6 +256,7 @@ class ThirdPartyAgentSubStage(Stage):
                     runner,
                     stream_to_general=False,
                     custom_error_message=custom_error_message,
+                    event=event,
                 ):
                     aggregator.add_chunk(chain, is_error)
                     if is_error:
@@ -264,6 +299,7 @@ class ThirdPartyAgentSubStage(Stage):
             runner,
             stream_to_general=stream_to_general,
             custom_error_message=custom_error_message,
+            event=event,
         ):
             aggregator.add_chunk(chain, is_error)
             if is_error:

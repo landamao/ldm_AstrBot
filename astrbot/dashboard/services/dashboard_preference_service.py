@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import os
+import time
 import uuid
+from collections import OrderedDict
+from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from astrbot.api import sp
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
@@ -37,6 +43,106 @@ WALLPAPER_ALLOWED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 WALLPAPER_MAX_SIZE = 10 * 1024 * 1024  # 10MB
 # 上传时自动压缩：最长边超过该值则等比缩到该值内（背景图无需原始大图）
 WALLPAPER_MAX_EDGE = 1920
+
+# 远程壁纸代理拉取（「下载当前壁纸」用：远程随机壁纸 API 每次请求换图，
+# 只有让服务端把字节钉住，前端才能保存「当前看到的这一张」）
+WALLPAPER_PROXY_MAX_SIZE = 32 * 1024 * 1024  # 32MB（超过只透传，不进令牌缓存）
+WALLPAPER_PROXY_TIMEOUT = 20.0  # 秒
+WALLPAPER_PROXY_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
+# 令牌缓存：前端每次取图带一个 token，服务端把这次流式透传的字节记下来。
+# 浏览器用同一个 token 地址再次取图（设置页预览 / 下载）时直接回这份字节，
+# 随机接口也不会再换一张。TTL 给够，够用户看完再下载。
+WALLPAPER_TOKEN_TTL = 6 * 60 * 60  # 6 小时
+WALLPAPER_TOKEN_MAX_ENTRIES = 8  # 最多留 8 张（最近的）
+WALLPAPER_TOKEN_MAX_BYTES = 48 * 1024 * 1024  # 令牌缓存总量上限
+# 图片文件头嗅探：部分壁纸 API 返回 application/octet-stream 甚至不带类型
+_IMAGE_MAGIC = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"BM", "image/bmp"),
+)
+
+
+def _sniff_image_type(content: bytes) -> str:
+    """按文件头判断图片类型，判断不出来返回空串。"""
+    for magic, mime in _IMAGE_MAGIC:
+        if content.startswith(magic):
+            return mime
+    # WebP: RIFF....WEBP
+    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+@dataclass
+class _WallpaperTokenEntry:
+    """某个令牌钉住的一张远程壁纸。"""
+
+    content: bytes
+    media_type: str
+    saved_at: float
+
+
+# 令牌 → 字节（LRU）。前端每次取图带一个 token，服务端把这次透传的字节存下来，
+# 之后同一 token 的请求（设置页预览、点下载）直接回这份，随机接口也不会换图。
+_token_cache: OrderedDict[str, _WallpaperTokenEntry] = OrderedDict()
+_token_cache_bytes = 0
+
+# 共享的 httpx 客户端：复用连接与 TLS 会话，避免每张壁纸都重建一次握手
+# （每次新建客户端会让取图白白多花 0.3-1s）
+_remote_client: httpx.AsyncClient | None = None
+
+
+def _get_remote_client() -> httpx.AsyncClient:
+    global _remote_client
+    if _remote_client is None or _remote_client.is_closed:
+        _remote_client = httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=WALLPAPER_PROXY_TIMEOUT,
+            headers={
+                "User-Agent": WALLPAPER_PROXY_USER_AGENT,
+                "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+            },
+        )
+    return _remote_client
+
+
+def _normalize_remote_url(url: str) -> str:
+    text = (url or "").strip()
+    if not text:
+        raise ValueError("壁纸地址为空")
+    if not text.lower().startswith(("http://", "https://")):
+        raise ValueError("只支持 http/https 壁纸地址")
+    return text
+
+
+def _pick_media_type(declared: str, first_chunk: bytes) -> str:
+    """以实际内容为准判定类型（不少壁纸 API 写 octet-stream 或 text/html）。"""
+    sniffed = _sniff_image_type(first_chunk)
+    if sniffed:
+        return sniffed
+    if declared.startswith("image/"):
+        return declared
+    raise ValueError(
+        "该地址返回的内容不是图片"
+        + (f"（Content-Type: {declared}）" if declared else "")
+    )
+
+
+def _drop_token(token: str) -> None:
+    """从令牌缓存里删掉一项并同步总量计数。"""
+    global _token_cache_bytes
+    entry = _token_cache.pop(token, None)
+    if entry is not None:
+        _token_cache_bytes -= len(entry.content)
+        if _token_cache_bytes < 0:
+            _token_cache_bytes = 0
+
 # 横屏/竖屏壁纸使用模式
 WALLPAPER_MODE_SEPARATE = "separate"  # 横屏用横屏壁纸、竖屏用竖屏壁纸
 WALLPAPER_MODE_PORTRAIT_USE_LANDSCAPE = "portrait_use_landscape"  # 竖屏复用横屏壁纸
@@ -416,6 +522,128 @@ class DashboardPreferenceService:
             path.unlink(missing_ok=True)
         except OSError:
             pass
+
+    @staticmethod
+    def get_cached_wallpaper_image(token: str) -> tuple[bytes, str] | None:
+        """按令牌取回已钉住的壁纸字节；没有或已过期返回 None。"""
+        if not token:
+            return None
+        entry = _token_cache.get(token)
+        if entry is None:
+            return None
+        if time.time() - entry.saved_at > WALLPAPER_TOKEN_TTL:
+            _drop_token(token)
+            return None
+        _token_cache.move_to_end(token)
+        return entry.content, entry.media_type
+
+    @staticmethod
+    def cache_wallpaper_image(token: str, content: bytes, media_type: str) -> None:
+        """把某个令牌这次透传的字节钉住（LRU + 总量上限）。"""
+        global _token_cache_bytes
+        if not token or not content:
+            return
+        if len(content) > WALLPAPER_PROXY_MAX_SIZE:
+            return
+        _drop_token(token)
+        _token_cache[token] = _WallpaperTokenEntry(
+            content=content,
+            media_type=media_type,
+            saved_at=time.time(),
+        )
+        _token_cache_bytes += len(content)
+        # 先按条目数淘汰，再按总量淘汰
+        while len(_token_cache) > WALLPAPER_TOKEN_MAX_ENTRIES:
+            oldest = next(iter(_token_cache))
+            _drop_token(oldest)
+        while _token_cache_bytes > WALLPAPER_TOKEN_MAX_BYTES and len(_token_cache) > 1:
+            oldest = next(iter(_token_cache))
+            _drop_token(oldest)
+
+    @classmethod
+    async def open_remote_wallpaper_stream(
+        cls,
+        url: str,
+        token: str = "",
+    ) -> tuple[AsyncGenerator[bytes, None], str]:
+        """打开远程壁纸的流式响应，返回 (异步字节流, content-type)。
+
+        为什么不先收完再返回：壁纸通常几百 KB 到几 MB，先缓冲完再给浏览器
+        会让首屏多等好几秒；这里边收边转发，浏览器可以边下边画。
+
+        流读完后（且没有被中途掐断）把字节钉到 token 上，供「下载当前壁纸」
+        和设置页预览取回同一张。
+        """
+        text = _normalize_remote_url(url)
+        client = _get_remote_client()
+        request = client.build_request("GET", text)
+        resp = await client.send(request, stream=True)
+
+        if resp.status_code >= 400:
+            await resp.aclose()
+            raise ValueError(f"壁纸地址返回 HTTP {resp.status_code}")
+
+        declared = (resp.headers.get("content-type") or "")
+        declared = declared.split(";")[0].strip().lower()
+        iterator = resp.aiter_bytes(64 * 1024)
+        try:
+            first_chunk = await iterator.__anext__()
+        except StopAsyncIteration:
+            await resp.aclose()
+            raise ValueError("壁纸地址返回空内容") from None
+
+        try:
+            media_type = _pick_media_type(declared, first_chunk)
+        except ValueError:
+            await resp.aclose()
+            raise
+
+        async def _stream() -> AsyncGenerator[bytes, None]:
+            buffer = bytearray()
+            completed = False
+            try:
+                buffer.extend(first_chunk)
+                yield first_chunk
+                async for chunk in iterator:
+                    # 超过上限只透传不落缓存，避免把内存顶爆
+                    if len(buffer) <= WALLPAPER_PROXY_MAX_SIZE:
+                        buffer.extend(chunk)
+                    yield chunk
+                completed = True
+            finally:
+                await resp.aclose()
+                if completed and token and buffer:
+                    cls.cache_wallpaper_image(token, bytes(buffer), media_type)
+
+        return _stream(), media_type
+
+    @classmethod
+    async def fetch_remote_wallpaper(cls, url: str) -> tuple[bytes, str]:
+        """服务端拉取远程壁纸图片（一次性收完），返回 (图片字节, content-type)。
+
+        用于不带令牌的请求；带令牌的走 open_remote_wallpaper_stream 流式透传。
+        """
+        text = _normalize_remote_url(url)
+        client = _get_remote_client()
+        chunks: list[bytes] = []
+        total = 0
+        async with client.stream("GET", text) as resp:
+            if resp.status_code >= 400:
+                raise ValueError(f"壁纸地址返回 HTTP {resp.status_code}")
+            declared = (resp.headers.get("content-type") or "")
+            declared = declared.split(";")[0].strip().lower()
+            async for chunk in resp.aiter_bytes(64 * 1024):
+                total += len(chunk)
+                if total > WALLPAPER_PROXY_MAX_SIZE:
+                    raise ValueError(
+                        f"壁纸图片超过 {WALLPAPER_PROXY_MAX_SIZE // 1024 // 1024}MB 上限"
+                    )
+                chunks.append(chunk)
+
+        content = b"".join(chunks)
+        if not content:
+            raise ValueError("壁纸地址返回空内容")
+        return content, _pick_media_type(declared, content[:32])
 
     async def set_wallpaper(self, data: object) -> dict[str, object] | None:
         normalized = self.normalize_wallpaper(data)

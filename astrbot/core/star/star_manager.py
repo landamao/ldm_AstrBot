@@ -31,6 +31,7 @@ from astrbot.core import (
 from astrbot.core.agent.handoff import FunctionTool, HandoffTool
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.config.default import VERSION
+from astrbot.core.notification import notify_plugin_load_error
 from astrbot.core.platform.register import unregister_platform_adapters_by_module
 from astrbot.core.provider.register import llm_tools
 from astrbot.core.utils.astrbot_path import (
@@ -1549,6 +1550,8 @@ class PluginManager:
                 for line in errors.split("\n"):
                     logger.error(f"| {line}")
                 logger.error("----------------------------------")
+                # 重要通知：插件导入/初始化失败，WebUI 通知中心留痕
+                await notify_plugin_load_error(root_dir_name, e, errors)
                 has_load_error = True
                 self.failed_plugin_dict[root_dir_name] = (
                     self._build_failed_plugin_record(

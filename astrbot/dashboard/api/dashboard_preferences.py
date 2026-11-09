@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from astrbot.dashboard.responses import ApiError, ok
 from astrbot.dashboard.services.dashboard_preference_service import (
@@ -124,6 +124,62 @@ async def upload_wallpaper(
     except ValueError as exc:
         raise ApiError(str(exc), status_code=400) from exc
     return ok({"url": url}, message="壁纸上传成功")
+
+
+# 带 token 的壁纸地址是「一次性」的唯一地址，可以放心让浏览器长期缓存：
+# 设置页预览、点下载再取同一 token 时直接命中缓存或服务端令牌缓存，不会再换图
+_WALLPAPER_IMAGE_HEADERS = {
+    "Cache-Control": "public, max-age=31536000, immutable",
+}
+
+
+@router.get("/ui-preferences/wallpaper/proxy")
+async def proxy_wallpaper(
+    url: str,
+    t: str = "",
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    """远程壁纸取图接口。
+
+    两种用法：
+    - 带 `t`（令牌）：流式透传远程图片，边收边发给浏览器（不缓冲，首屏快），
+      同时把这次字节钉在令牌上；同一令牌再次请求直接返回这份字节，
+      所以「设置页预览 / 下载当前壁纸」拿到的和页面背景是同一张。
+    - 不带 `t`：一次性收完再返回（兼容旧调用）。
+    """
+    if t:
+        cached = service.get_cached_wallpaper_image(t)
+        if cached is not None:
+            content, media_type = cached
+            return Response(
+                content=content,
+                media_type=media_type,
+                headers=_WALLPAPER_IMAGE_HEADERS,
+            )
+    try:
+        if t:
+            stream, media_type = await service.open_remote_wallpaper_stream(url, t)
+            return StreamingResponse(
+                stream,
+                media_type=media_type,
+                headers=_WALLPAPER_IMAGE_HEADERS,
+            )
+        content, media_type = await service.fetch_remote_wallpaper(url)
+    except ValueError as exc:
+        raise ApiError(str(exc), status_code=400) from exc
+    except Exception as exc:  # 网络异常等
+        reason = str(exc).strip() or repr(exc)
+        raise ApiError(
+            f"服务端拉取壁纸失败（{type(exc).__name__}）：{reason}"
+            "。如果是网络/代理问题，可在 AstrBot 的 .env 里配置 https_proxy",
+            status_code=502,
+        ) from exc
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers=_WALLPAPER_IMAGE_HEADERS,
+    )
 
 
 @router.get("/ui-preferences/wallpaper/files/{filename}")

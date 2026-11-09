@@ -11,10 +11,12 @@ class:
 """
 
 import asyncio
+import traceback
 from asyncio import Queue
 
 from astrbot.core import logger
 from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
+from astrbot.core.notification import notify_pipeline_error
 from astrbot.core.pipeline.scheduler import PipelineScheduler
 
 from .platform import AstrMessageEvent
@@ -35,6 +37,8 @@ class EventBus:
         self.astrbot_config_mgr = astrbot_config_mgr
         # 持有正在执行的 pipeline 任务的强引用, 防止 task 在 pending 状态被 GC 回收
         self._pending_tasks: set[asyncio.Task] = set()
+        # 异常通知任务（写库是异步的，不能阻塞 done_callback）
+        self._notify_tasks: set[asyncio.Task] = set()
         self._stopping = asyncio.Event()
 
     async def dispatch(self) -> None:
@@ -54,7 +58,9 @@ class EventBus:
                 continue
             task = asyncio.create_task(scheduler.execute(event))
             self._pending_tasks.add(task)
-            task.add_done_callback(self._on_task_done)
+            task.add_done_callback(
+                lambda t, ev=event: self._on_task_done(t, ev),
+            )
 
     async def shutdown(self) -> None:
         """停止接收并收敛所有已经创建的 Pipeline 任务。"""
@@ -66,8 +72,12 @@ class EventBus:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._pending_tasks.clear()
+        # 收尾前把异常通知写完，避免关停时丢掉最后一条报错
+        if self._notify_tasks:
+            await asyncio.gather(*list(self._notify_tasks), return_exceptions=True)
+        self._notify_tasks.clear()
 
-    def _on_task_done(self, task: asyncio.Task) -> None:
+    def _on_task_done(self, task: asyncio.Task, event: AstrMessageEvent) -> None:
         """pipeline 任务结束回调: 移除强引用并暴露未捕获的异常"""
         self._pending_tasks.discard(task)
         if task.cancelled():
@@ -75,6 +85,22 @@ class EventBus:
         exc = task.exception()
         if exc is not None:
             logger.error("pipeline 任务执行异常", exc_info=exc)
+            self._notify_uncaught(event, exc)
+
+    def _notify_uncaught(self, event: AstrMessageEvent, exc: BaseException) -> None:
+        """把未被任何阶段接住的异常写进 WebUI 重要通知（不阻塞回调）。"""
+        traceback_text = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__),
+        )
+        try:
+            notify_task = asyncio.create_task(
+                notify_pipeline_error(event, exc, traceback_text),
+            )
+        except RuntimeError:
+            # 事件循环已关闭（关停中），仅保留日志
+            return
+        self._notify_tasks.add(notify_task)
+        notify_task.add_done_callback(self._notify_tasks.discard)
 
     def _print_event(self, event: AstrMessageEvent, conf_name: str) -> None:
         """用于记录事件信息

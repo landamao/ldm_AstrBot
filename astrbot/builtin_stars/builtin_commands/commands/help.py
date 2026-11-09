@@ -77,13 +77,20 @@ class HelpCommand:
         if not items:
             return []
 
-        lines = ["⚠️ 重要通知（请到 WebUI 通知中心查看详情并标记已读）："]
+        lines = ["⚠️ 重要通知（请到 WebUI 通知中心查看详情）："]
         for i, item in enumerate(items, 1):
             count_text = f"（已发生 {item.count} 次）" if item.count > 1 else ""
             detail = (item.detail or "").strip()
             line = f"{i}. {item.title}{count_text}"
             if detail:
-                line += f"\n   {detail}"
+                # 详情里可能带整段调用栈（插件异常通知），聊天里压成一行摘要，
+                # 完整内容留到 WebUI 通知中心看
+                summary = " ".join(
+                    part.strip() for part in detail.splitlines() if part.strip()
+                )
+                if len(summary) > 160:
+                    summary = summary[:160] + "…"
+                line += f"\n   {summary}"
             lines.append(line)
         return lines
 

@@ -1,3 +1,4 @@
+import asyncio
 import random
 import re
 import time
@@ -7,6 +8,7 @@ from collections.abc import AsyncGenerator
 from astrbot.core import file_token_service, html_renderer, logger
 from astrbot.core.message.components import At, Image, Json, Node, Plain, Record, Reply
 from astrbot.core.message.message_event_result import ResultContentType
+from astrbot.core.notification import notify_plugin_hook_error
 from astrbot.core.pipeline.content_safety_check.stage import ContentSafetyCheckStage
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.message_type import MessageType
@@ -184,8 +186,19 @@ class ResultDecorateStage(Stage):
                     logger.debug(
                         f"hook(on_decorating_result) -> {star_map[handler.handler_module_path].name} - {handler.handler_name} 将消息结果清空。",
                     )
-            except BaseException:
-                logger.error(traceback.format_exc())
+            except BaseException as exc:
+                traceback_text = traceback.format_exc()
+                logger.error(traceback_text)
+                # on_decorating_result 钩子异常原先只打日志，写进重要通知留痕
+                if not isinstance(exc, asyncio.CancelledError):
+                    md = star_map.get(handler.handler_module_path)
+                    await notify_plugin_hook_error(
+                        event,
+                        md.name if md else handler.handler_module_path,
+                        EventType.OnDecoratingResultEvent.name,
+                        exc,
+                        traceback_text,
+                    )
 
             if event.is_stopped():
                 await notify_event_stopped(event)

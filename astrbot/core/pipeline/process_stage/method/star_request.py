@@ -6,6 +6,7 @@ from typing import Any
 
 from astrbot.core import logger
 from astrbot.core.message.message_event_result import MessageEventResult
+from astrbot.core.notification import notify_plugin_error
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, StarHandlerMetadata
@@ -57,6 +58,16 @@ class StarRequestSubStage(Stage):
                 traceback_text = traceback.format_exc()
                 logger.error(traceback_text)
                 logger.error(f"Star {handler.handler_full_name} handle error: {e}")
+
+                # 重要通知：把「群号/时间/插件/调用栈」沉淀到 WebUI 通知中心，
+                # 避免报错只出现在容易被刷掉的日志里
+                await notify_plugin_error(
+                    event,
+                    md.name,
+                    handler.handler_name,
+                    e,
+                    traceback_text,
+                )
 
                 await call_event_hook(
                     event,

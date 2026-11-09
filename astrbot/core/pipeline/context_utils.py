@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import inspect
 import traceback
@@ -10,6 +11,7 @@ from astrbot.core.message.message_event_result import (
     MessageChain,
     MessageEventResult,
 )
+from astrbot.core.notification import notify_plugin_hook_error
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.star.star import StarMetadata, star_map
 from astrbot.core.star.star_handler import (
@@ -216,8 +218,19 @@ async def call_event_hook(
                 f"hook({hook_type.name}) -> {star_map[handler.handler_module_path].name} - {handler.handler_name}",
             )
             await handler.handler(event, *args, **kwargs)
-        except BaseException:
-            logger.error(traceback.format_exc())
+        except BaseException as exc:
+            traceback_text = traceback.format_exc()
+            logger.error(traceback_text)
+            # 钩子异常原先只打日志，用户和管理员都看不到；写进重要通知留痕
+            if not isinstance(exc, asyncio.CancelledError):
+                md = star_map.get(handler.handler_module_path)
+                await notify_plugin_hook_error(
+                    event,
+                    plugin_display_name(md) if md else handler.handler_module_path,
+                    hook_type.name,
+                    exc,
+                    traceback_text,
+                )
 
         if not allow_stopped and event.is_stopped():
             await notify_event_stopped(event)
