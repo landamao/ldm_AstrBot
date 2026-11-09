@@ -53,7 +53,7 @@ for %%d in (changelogs dashboard readme_image samples scripts tests "详细变�
 
 echo.
 echo ========== 4. 复制文件 ==========
-for %%f in (.env .gitignore .zcodeignore CHANGELOG.md LICENSE main.py NOTICE pyproject.toml README.md requirements.txt runtime_bootstrap.py uv.lock "从官方迁移教程.txt") do (
+for %%f in (.env.example .gitignore .zcodeignore CHANGELOG.md LICENSE main.py NOTICE pyproject.toml README.md requirements.txt runtime_bootstrap.py uv.lock "从官方迁移教程.txt") do (
     if exist "%SRC%\%%~f" (
         copy /Y "%SRC%\%%~f" "%DST%\%%~f" >nul
         echo [完成] %%~f
