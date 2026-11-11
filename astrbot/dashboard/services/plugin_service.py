@@ -30,6 +30,7 @@ from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.filter.permission import PermissionTypeFilter
 from astrbot.core.star.filter.regex import RegexFilter
+from astrbot.core.star.plugin_install_cache import resolve_archive, store_archive
 from astrbot.core.star.star import StarMetadata
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from astrbot.core.star.star_manager import (
@@ -1517,14 +1518,37 @@ class PluginService:
             )
 
         plugin_repo = str(plugin.repo or "").strip()
-        if not plugin_repo:
-            raise PluginServiceError(
-                "当前插件缺少仓库地址，无法更换插件源。",
-                public_message="当前插件缺少仓库地址，无法更换插件源。",
-            )
-
         install_method = str(payload.get("install_method") or "market").strip().lower()
+        custom_repo = str(payload.get("repo") or "").strip()
+
         if install_method in {"github", "repo"}:
+            if custom_repo:
+                # 允许用户在「更换插件源」时自行指定 GitHub 仓库/分支
+                try:
+                    normalized_repo = normalize_repository_url(custom_repo)
+                    repository = parse_repository_url(normalized_repo)
+                except ValueError as exc:
+                    raise PluginServiceError(
+                        str(exc),
+                        public_message="请输入有效的 GitHub 仓库链接。",
+                    ) from exc
+                if (
+                    repository.provider != "github"
+                    or repository.transport != "archive"
+                ):
+                    raise PluginServiceError(
+                        "自定义插件源必须是 GitHub HTTP(S) 仓库地址。",
+                        public_message="请输入有效的 GitHub 仓库链接。",
+                    )
+                target_repo = normalized_repo
+            else:
+                target_repo = plugin_repo
+            if not target_repo:
+                raise PluginServiceError(
+                    "当前插件缺少仓库地址，无法更换插件源。",
+                    public_message="当前插件缺少仓库地址，无法更换插件源。",
+                )
+
             records = await self.get_plugin_install_sources()
             old_record = self.resolve_plugin_install_source(plugin, records)
             installed_at = (
@@ -1539,7 +1563,7 @@ class PluginService:
                 "install_method": "github",
                 "registry_url": None,
                 "registry_name": "Repository",
-                "repo": plugin_repo,
+                "repo": target_repo,
                 "download_url": "",
                 "installed_at": installed_at,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -1687,6 +1711,8 @@ class PluginService:
         download_url = str(payload.get("download_url") or "").strip()
         ignore_version_check = bool(payload.get("ignore_version_check", False))
         overwrite = bool(payload.get("overwrite", False))
+        # 覆盖确认前那份包的 sha256：带回来就复用同一份包，不再重新拉取
+        cache_token = str(payload.get("cache_token") or "").strip()
         # 前端是否显式清空了 download_url（选 GitHub 加速时会传空串）
         force_skip_download_url = "download_url" in payload and not download_url
         market_install_info = await self.resolve_market_install_info(payload)
@@ -1739,6 +1765,14 @@ class PluginService:
             )
             download_url = ""
 
+        # 带回来的 token 必须还能取到同一份包：取不到就明确报错，
+        # 不能静默重新下载——远端可能已经变了，装下去就和提示的版本不一致。
+        if cache_token and not resolve_archive(cache_token):
+            raise PluginServiceError(
+                "插件安装包缓存已失效。",
+                public_message="安装包缓存已失效，请重新安装以获取最新版本。",
+            )
+
         try:
             logger.info(f"正在安装插件「{repo_url}」")
             plugin_info = await self.plugin_manager.install_plugin(
@@ -1747,6 +1781,7 @@ class PluginService:
                 ignore_version_check=ignore_version_check,
                 download_url=download_url,
                 overwrite=overwrite,
+                cache_token=cache_token,
             )
             await self.persist_plugin_install_source(
                 plugin_info,
@@ -1778,6 +1813,8 @@ class PluginService:
                     "plugin_name": exc.dir_name,
                     "current_version": exc.existing_version,
                     "new_version": exc.new_version,
+                    # 待安装包已缓存在本地，确认覆盖后凭它复用同一份包
+                    "install_cache_token": exc.cache_token or "",
                 },
                 public_message="插件已安装，是否覆盖？",
             ) from exc
@@ -1831,20 +1868,65 @@ class PluginService:
         upload_file,
         ignore_version_check: bool,
         overwrite: bool = False,
+        cache_token: str = "",
     ) -> tuple[dict, str]:
+        """安装用户上传的插件压缩包。
+
+        Args:
+            upload_file: 上传的压缩包；覆盖确认复用缓存时可为 None。
+            ignore_version_check: 是否忽略 ldm 版本要求。
+            overwrite: 同名插件已存在时是否直接覆盖。
+            cache_token: 覆盖确认前那份包的 sha256。命中时直接复用缓存包，
+                不再要求重新上传，保证提示的版本与实际安装的是同一个包。
+        """
         self._ensure_not_demo()
-        logger.info(f"正在安装用户上传的插件「{upload_file.filename}」")
-        filename = str(upload_file.filename or "plugin.zip").replace("\\", "/")
-        file_path = os.path.join(
-            get_astrbot_temp_path(),
-            f"plugin_upload_{os.path.basename(filename) or 'plugin.zip'}",
-        )
-        await upload_file.save(file_path)
+        cache_token = str(cache_token or "").strip()
+        cached_path = resolve_archive(cache_token) if cache_token else None
+        if cached_path:
+            file_path = cached_path
+            logger.info(
+                f"复用覆盖确认时的插件包安装: {cache_token[:12]}",
+            )
+        else:
+            if cache_token:
+                logger.warning(
+                    f"插件上传缓存已失效，需要重新上传压缩包: {cache_token[:12]}"
+                )
+                raise PluginServiceError(
+                    "安装包缓存已失效，请重新选择压缩包后再试。",
+                    public_message="安装包缓存已失效，请重新选择压缩包后再试。",
+                )
+            if upload_file is None:
+                raise PluginServiceError(
+                    "缺少插件文件",
+                    public_message="缺少插件文件",
+                )
+            logger.info(f"正在安装用户上传的插件「{upload_file.filename}」")
+            filename = str(upload_file.filename or "plugin.zip").replace("\\", "/")
+            file_path = os.path.join(
+                get_astrbot_temp_path(),
+                f"plugin_upload_{os.path.basename(filename) or 'plugin.zip'}",
+            )
+            await upload_file.save(file_path)
+            # 先把上传内容按哈希存入缓存：覆盖确认后的第二次请求不再重传文件
+            try:
+                cache_token = store_archive(file_path)
+            except Exception as exc:
+                logger.warning(
+                    f"缓存上传的插件包失败，覆盖确认后需要重新上传: {exc!s}"
+                )
+                cache_token = ""
+                if not os.path.isfile(file_path):
+                    raise PluginServiceError(
+                        "保存插件压缩包失败，请重试。",
+                        public_message="保存插件压缩包失败，请重试。",
+                    ) from exc
         try:
             plugin_info = await self.plugin_manager.install_plugin_from_file(
                 file_path,
                 ignore_version_check=ignore_version_check,
                 overwrite=overwrite,
+                cache_token=cache_token,
             )
             await self.persist_plugin_install_source(
                 plugin_info,
@@ -1854,7 +1936,7 @@ class PluginService:
                 download_url="",
             )
             await self.sync_skills_after_plugin_change()
-            logger.info(f"安装插件「{upload_file.filename}」成功")
+            logger.info(f"安装插件「{upload_file.filename if upload_file else 'cache'}」成功")
             return plugin_info or {}, "安装成功。"
         except PluginVersionUnsupportedError as exc:
             raise PluginServiceWarning(
@@ -1874,6 +1956,7 @@ class PluginService:
                     "plugin_name": exc.dir_name,
                     "current_version": exc.existing_version,
                     "new_version": exc.new_version,
+                    "install_cache_token": exc.cache_token or cache_token,
                 },
                 public_message="插件已安装，是否覆盖？",
             ) from exc
@@ -1884,11 +1967,13 @@ class PluginService:
         upload_file,
         ignore_version_check,
         overwrite: bool = False,
+        cache_token: str = "",
     ) -> tuple[dict, str]:
         return await self.install_plugin_upload(
             upload_file=upload_file,
             ignore_version_check=self._to_bool(ignore_version_check),
             overwrite=self._to_bool(overwrite),
+            cache_token=str(cache_token or "").strip(),
         )
 
     async def uninstall_plugin(self, data: object) -> tuple[None, str]:

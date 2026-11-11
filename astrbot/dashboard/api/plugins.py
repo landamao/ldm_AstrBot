@@ -388,12 +388,15 @@ async def _install_plugin_upload(
     async def operation():
         form, files = await multipart_parts(request)
         upload_file = files.get("file")
-        if upload_file is None:
+        cache_token = str(form.get("cache_token") or "").strip()
+        # 覆盖确认时前端只带 cache_token 复用已上传的包，可以不带文件
+        if upload_file is None and not cache_token:
             raise PluginServiceError("缺少插件文件")
         return await service.install_plugin_upload_from_dashboard_form(
             upload_file=upload_file,
             ignore_version_check=form.get("ignore_version_check", "false"),
             overwrite=form.get("overwrite", "false"),
+            cache_token=cache_token,
         )
 
     return await _run_service(operation, log_label=log_label)
@@ -540,6 +543,7 @@ async def install_plugin_from_repository(
         "proxy": body.get("proxy"),
         "ignore_version_check": body.get("ignore_version_check", False),
         "overwrite": bool(body.get("overwrite", False)),
+        "cache_token": str(body.get("cache_token") or "").strip(),
         "repository_transport": repository_transport,
         **{
             key: body[key]
@@ -576,6 +580,7 @@ async def install_plugin_from_url(
                 "proxy": body.get("proxy"),
                 "ignore_version_check": body.get("ignore_version_check", False),
                 "overwrite": bool(body.get("overwrite", False)),
+                "cache_token": str(body.get("cache_token") or "").strip(),
                 **{
                     key: body[key]
                     for key in (

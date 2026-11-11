@@ -6,6 +6,7 @@ import time
 import zipfile
 from pathlib import Path
 from typing import NoReturn
+from urllib.parse import unquote
 
 import certifi
 import httpx
@@ -363,25 +364,42 @@ class RepoZipUpdator:
         await self._download_file(request_url, target_path + ".zip")
 
     def parse_github_url(self, url: str):
-        """使用正则表达式解析 GitHub 仓库 URL，支持 `.git` 后缀和 `tree/branch` 结构
+        """解析 GitHub 仓库 URL，支持 `.git` 后缀和 `tree/branch` 结构。
+
+        分支名允许包含 `/`（如 `fix/xxx`），也可写成 URL 编码的 `%2F`，
+        解析时会统一还原为原始分支名，供 raw 文件与 archive 下载链接使用。
         Returns:
             tuple[str, str, str]: 返回作者名、仓库名和分支名
         Raises:
             ValueError: 如果 URL 格式不正确
         """
         cleaned_url = url.rstrip("/")
-        pattern = r"^https://github\.com/([a-zA-Z0-9_-]+)/([a-zA-Z0-9_-]+)(\.git)?(?:/tree/([a-zA-Z0-9_-]+))?$"
+        pattern = r"^https://github\.com/([a-zA-Z0-9_-]+)/([a-zA-Z0-9_-]+)(\.git)?(?:/tree/([^\s?#]+))?$"
         match = re.match(pattern, cleaned_url)
 
         if match:
             author = match.group(1)
             repo = match.group(2)
             branch = match.group(4)
+            if branch:
+                branch = unquote(branch)
             return author, repo, branch
         raise ValueError("无效的 GitHub URL")
 
-    def unzip_file(self, zip_path: str, target_dir: str) -> None:
-        """解压缩文件, 并将压缩包内**第一个**文件夹内的文件移动到 target_dir"""
+    def unzip_file(
+        self,
+        zip_path: str,
+        target_dir: str,
+        remove_archive: bool = True,
+    ) -> None:
+        """解压缩文件, 并将压缩包内**第一个**文件夹内的文件移动到 target_dir。
+
+        Args:
+            zip_path: 压缩包路径。
+            target_dir: 解压目标目录。
+            remove_archive: 解压后是否删除压缩包。需要在解压后复用同一份包时
+                （插件覆盖确认）传 False。
+        """
         ensure_dir(target_dir)
         with zipfile.ZipFile(zip_path, "r") as z:
             fix_zip_entry_names(z)
@@ -389,7 +407,12 @@ class RepoZipUpdator:
             z.extractall(target_dir)
         logger.debug(f"解压文件完成: {zip_path}")
 
-        self._finalize_extracted_archive(zip_path, target_dir, update_dir)
+        self._finalize_extracted_archive(
+            zip_path,
+            target_dir,
+            update_dir,
+            remove_archive=remove_archive,
+        )
 
     @staticmethod
     def _resolve_archive_root_dir(entries: list[str]) -> str:
@@ -426,6 +449,7 @@ class RepoZipUpdator:
         zip_path: str,
         target_dir: str,
         update_dir: str,
+        remove_archive: bool = True,
     ) -> None:
         target_root_path = os.path.normpath(target_dir)
 
@@ -439,10 +463,11 @@ class RepoZipUpdator:
             return path
 
         if not update_dir:
-            try:
-                os.remove(zip_path)
-            except Exception:
-                logger.warning(f"删除更新文件失败，可以手动删除 {zip_path}")
+            if remove_archive:
+                try:
+                    os.remove(zip_path)
+                except Exception:
+                    logger.warning(f"删除更新文件失败，可以手动删除 {zip_path}")
             return
 
         update_root_path = _join_under_root(target_root_path, update_dir)
@@ -461,7 +486,8 @@ class RepoZipUpdator:
         try:
             logger.debug(f"删除临时更新文件: {zip_path} 和 {update_root_path}")
             shutil.rmtree(update_root_path, onerror=on_error)
-            os.remove(zip_path)
+            if remove_archive:
+                os.remove(zip_path)
         except Exception:
             logger.warning(
                 f"删除更新文件失败，可以手动删除 {zip_path} 和 {update_root_path}"

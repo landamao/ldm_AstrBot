@@ -550,6 +550,8 @@ class PluginInstallRequest(OpenModel):
     proxy: str | None = None
     ignore_version_check: bool | None = None
     overwrite: bool | None = None
+    # 覆盖确认前那份包的 sha256：确认覆盖时带回来复用同一份包
+    cache_token: str | None = None
 
 
 class PluginValidateRepoRequest(OpenModel):
@@ -562,6 +564,8 @@ class PluginSourceBindRequest(OpenModel):
     install_method: str | None = None
     registry_url: str | None = None
     market_plugin_id: str | None = None
+    # 自定义 GitHub 仓库地址（install_method=github 时覆盖插件原有 repo）
+    repo: str | None = None
 
 
 class PluginUpdateRequest(OpenModel):

@@ -52,9 +52,14 @@ from .command_management import sync_command_configs
 from .context import Context
 from .error_messages import format_plugin_error
 from .filter.permission import PermissionType, PermissionTypeFilter
+from .plugin_install_cache import release_archive
 from .star import star_map, star_registry
 from .star_handler import EventType, star_handlers_registry
-from .updator import PLUGIN_METADATA_FILENAMES, PluginUpdator
+from .updator import (
+    PLUGIN_METADATA_FILENAMES,
+    PluginAlreadyExistsError,  # 在此重新导出，dashboard 层仍从本模块导入
+    PluginUpdator,
+)
 
 try:
     from watchfiles import PythonFilter, awatch
@@ -65,29 +70,6 @@ except ImportError:
 
 class PluginVersionUnsupportedError(Exception):
     """Raised when plugin astrbot_version is not supported by current AstrBot."""
-
-
-class PluginAlreadyExistsError(Exception):
-    """安装插件时同名插件已存在（需要用户确认是否覆盖）。
-
-    Attributes:
-        dir_name: 插件在插件目录下的目录名。
-        existing_version: 已安装插件的版本号（读取失败时为 None）。
-        new_version: 待安装插件包的版本号（读取失败时为 None）。
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        dir_name: str | None = None,
-        existing_version: str | None = None,
-        new_version: str | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.dir_name = dir_name
-        self.existing_version = existing_version
-        self.new_version = new_version
 
 
 class PluginDependencyInstallError(Exception):
@@ -755,6 +737,7 @@ class PluginManager:
         target_plugin_path: str,
         new_plugin_path: str,
         overwrite: bool,
+        cache_token: str = "",
     ) -> None:
         """目标插件目录已存在时的统一处理。
 
@@ -769,6 +752,7 @@ class PluginManager:
                 dir_name=dir_name,
                 existing_version=existing_info.get("version"),
                 new_version=new_info.get("version"),
+                cache_token=cache_token or None,
             )
         logger.info(
             f"插件 {dir_name} 已存在（当前版本 "
@@ -1716,6 +1700,7 @@ class PluginManager:
         ignore_version_check: bool = False,
         download_url: str = "",
         overwrite: bool = False,
+        cache_token: str = "",
     ):
         """从仓库 URL 安装插件
 
@@ -1727,6 +1712,8 @@ class PluginManager:
             download_url (str, optional): 插件压缩包下载地址。提供时优先从此地址下载安装包。
             overwrite (bool, optional): 同名插件已存在时是否直接覆盖安装。
                 默认 False：抛出 PluginAlreadyExistsError，由上层提示用户确认。
+            cache_token (str, optional): 覆盖确认前那份包的 sha256。覆盖安装时
+                传回即可复用同一份包，不再重新拉取。
 
         Returns:
             dict | None: 安装成功时返回包含插件信息的字典:
@@ -1739,14 +1726,39 @@ class PluginManager:
             plugin_path = ""
             dir_name = ""
             try:
-                if download_url:
-                    plugin_path = await self.updator.install(
+
+                async def install_once() -> str:
+                    return await self.updator.install(
                         repo_url,
                         proxy,
                         download_url=download_url,
+                        cache_token=cache_token,
                     )
-                else:
-                    plugin_path = await self.updator.install(repo_url, proxy)
+
+                try:
+                    plugin_path = await install_once()
+                except PluginAlreadyExistsError as exc:
+                    if not overwrite or not exc.dir_name:
+                        # 补上已安装版本，让覆盖确认框能显示「已安装版本 x → 待安装版本 y」
+                        if exc.existing_version is None and exc.dir_name:
+                            existing_path = os.path.join(
+                                self.plugin_store_path, exc.dir_name
+                            )
+                            exc.existing_version = (
+                                self._read_plugin_version_info(existing_path)
+                                .get("version")
+                            )
+                        # 交给上层转成「插件已安装，是否覆盖？」确认警告；
+                        # 缓存包保留，用户确认后凭 cache_token 复用同一份包。
+                        raise
+                    existing_path = os.path.join(
+                        self.plugin_store_path, exc.dir_name
+                    )
+                    logger.info(f"覆盖安装：清理已存在的插件目录 {existing_path}")
+                    await self._prepare_overwrite_target(
+                        exc.dir_name, existing_path
+                    )
+                    plugin_path = await install_once()
 
                 # reload the plugin
                 dir_name = os.path.basename(plugin_path)
@@ -1763,6 +1775,7 @@ class PluginManager:
                         target_plugin_path,
                         plugin_path,
                         overwrite,
+                        cache_token=cache_token,
                     )
                 if target_plugin_path != plugin_path:
                     os.rename(plugin_path, target_plugin_path)
@@ -1814,15 +1827,23 @@ class PluginManager:
                         "name": plugin.name,
                     }
 
+                if cache_token:
+                    # 安装已落盘，确认时缓存的包可以清理了
+                    with contextlib.suppress(Exception):
+                        release_archive(cache_token)
                 return plugin_info
             except PluginAlreadyExistsError:
                 # 同名插件已存在（等待用户确认是否覆盖）：不属于安装失败，
                 # 不进 failed_plugin_dict；清理临时下载解压目录后原样上抛。
+                # 缓存的待安装包要保留，用户确认后复用它，不能重新拉取。
                 if plugin_path and os.path.isdir(plugin_path):
                     with contextlib.suppress(Exception):
                         remove_dir(plugin_path)
                 raise
             except Exception as e:
+                if cache_token:
+                    with contextlib.suppress(Exception):
+                        release_archive(cache_token)
                 self._track_failed_install_dir(
                     dir_name=dir_name,
                     plugin_path=plugin_path,
@@ -2214,7 +2235,17 @@ class PluginManager:
         zip_file_path: str,
         ignore_version_check: bool = False,
         overwrite: bool = False,
+        cache_token: str = "",
     ):
+        """从本地压缩包安装插件。
+
+        Args:
+            zip_file_path: 插件压缩包路径（上传包或缓存包）。
+            ignore_version_check: 是否忽略 ldm 版本要求。
+            overwrite: 同名插件已存在时是否直接覆盖。
+            cache_token: 该包在安装缓存中的内容哈希。非空时压缩包属于缓存，
+                由 release 统一回收，不再按上传临时文件删除。
+        """
         dir_name = os.path.splitext(os.path.basename(zip_file_path))[0]
         desti_dir = tempfile.mkdtemp(
             dir=self.plugin_store_path, prefix="plugin_upload_"
@@ -2223,7 +2254,12 @@ class PluginManager:
         skip_failed_tracking = False
 
         try:
-            self.updator.unzip_file(zip_file_path, desti_dir)
+            # 解压后保留压缩包：覆盖确认（用户还没点）和安装失败时都可能要复用
+            self.updator.unzip_file(
+                zip_file_path,
+                desti_dir,
+                remove_archive=False,
+            )
             metadata_dir_name = self._get_plugin_dir_name_from_metadata(desti_dir)
             target_plugin_path = os.path.join(
                 self.plugin_store_path,
@@ -2236,17 +2272,23 @@ class PluginManager:
                     target_plugin_path,
                     desti_dir,
                     overwrite,
+                    cache_token=cache_token,
                 )
             if target_plugin_path != desti_dir:
                 os.rename(desti_dir, target_plugin_path)
                 dir_name = metadata_dir_name
                 desti_dir = target_plugin_path
 
-            # remove the zip
-            try:
-                os.remove(zip_file_path)
-            except BaseException as e:
-                logger.warning(f"删除插件压缩包失败: {e!s}")
+            if cache_token:
+                # 缓存包交给 release 回收，避免和确认流程抢同一份文件
+                with contextlib.suppress(Exception):
+                    release_archive(cache_token)
+            else:
+                # remove the zip
+                try:
+                    os.remove(zip_file_path)
+                except BaseException as e:
+                    logger.warning(f"删除插件压缩包失败: {e!s}")
             await self._ensure_plugin_requirements(desti_dir, dir_name)
             # await self.reload()
             success, error_message = await self.load(
@@ -2290,7 +2332,14 @@ class PluginManager:
                 }
 
             return plugin_info
+        except PluginAlreadyExistsError:
+            # 等用户确认覆盖：已解压的临时目录在 finally 清掉，
+            # 但缓存里的压缩包必须保留，确认后要复用同一份包。
+            raise
         except Exception as e:
+            if cache_token:
+                with contextlib.suppress(Exception):
+                    release_archive(cache_token)
             if not skip_failed_tracking:
                 self._track_failed_install_dir(
                     dir_name=dir_name,

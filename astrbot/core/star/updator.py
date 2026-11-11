@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import shutil
 import tempfile
@@ -22,12 +23,40 @@ from astrbot.core.utils.zip_fix import fix_zip_entry_names
 
 from ..star.star import StarMetadata
 from ..updator import RepoZipUpdator
+from .plugin_install_cache import resolve_archive, store_archive
 
 PLUGIN_METADATA_FILENAMES = ("metadata.yaml", "metadata.yml")
 PLUGIN_METADATA_REQUIRED_FIELDS = ("name", "desc", "version", "author")
 PLUGIN_METADATA_MAX_BYTES = 1024 * 1024
 PLUGIN_REPOSITORY_TIMEOUT_SECONDS = 15
 PLUGIN_GIT_CLONE_TIMEOUT_SECONDS = 180
+
+
+class PluginAlreadyExistsError(Exception):
+    """安装插件时同名插件已存在（需要用户确认是否覆盖）。
+
+    Attributes:
+        dir_name: 插件在插件目录下的目录名。
+        existing_version: 已安装插件的版本号（读取失败时为 None）。
+        new_version: 待安装插件包的版本号（读取失败时为 None）。
+        cache_token: 待安装包在本地缓存中的内容哈希（sha256）。用户确认覆盖后
+            带上它复用同一份包，避免重新拉取导致「提示的版本 ≠ 实际安装的包」。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        dir_name: str | None = None,
+        existing_version: str | None = None,
+        new_version: str | None = None,
+        cache_token: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.dir_name = dir_name
+        self.existing_version = existing_version
+        self.new_version = new_version
+        self.cache_token = cache_token
 
 
 class PluginUpdator(RepoZipUpdator):
@@ -181,13 +210,136 @@ class PluginUpdator(RepoZipUpdator):
             "repo": str(normalized_metadata.get("repo") or normalized_url),
         }
 
-    async def install(self, repo_url: str, proxy="", download_url: str = "") -> str:
+    async def _stage_pending_archive(
+        self,
+        *,
+        repo_url: str,
+        normalized_url: str,
+        repository,
+        proxy: str,
+        download_url: str,
+    ) -> tuple[str, str | None]:
+        """把待安装的插件包取到本地缓存，返回（内容哈希 token, 包内版本号）。
+
+        版本取自实际要安装的那个包（按 zip 内 metadata 读取，不解压），
+        并把同一份字节放进缓存：用户确认覆盖后凭 token 复用，不会再拉一次
+        远端内容，从而保证「提示的版本 == 实际安装的包」。
+
+        取包或写缓存失败时不阻断安装流程，token 返回空串，由上层回退为
+        重新获取（与改造前行为一致）。
+        """
+        staging_dir = tempfile.mkdtemp(
+            dir=get_astrbot_temp_path(), prefix="plugin_stage_"
+        )
+        staging_base = os.path.join(staging_dir, "archive")
+        zip_path = staging_base + ".zip"
+        try:
+            try:
+                if download_url:
+                    logger.info(f"正在下载插件压缩包以读取版本: {download_url}")
+                    await self._download_file(download_url, zip_path)
+                elif repository.transport == "git":
+                    checkout_path = Path(staging_dir) / repository.name
+                    await self._clone_repository(normalized_url, checkout_path)
+                    shutil.make_archive(
+                        staging_base,
+                        "zip",
+                        root_dir=str(checkout_path.parent),
+                        base_dir=checkout_path.name,
+                    )
+                else:
+                    await self.download_from_repo_url(staging_base, repo_url, proxy)
+            except Exception as exc:
+                # 取包失败不该挡住覆盖确认：交给上层照样弹窗，用户确认后
+                # 再走正常下载并在失败时如实报错（与改造前行为一致）。
+                logger.warning(
+                    f"读取待安装插件包失败，覆盖确认后将重新获取: {exc!s}"
+                )
+                return "", None
+
+            new_version = None
+            try:
+                inspection = self.inspect_plugin_archive(zip_path)
+                metadata = inspection.get("metadata")
+                if isinstance(metadata, dict):
+                    version = str(metadata.get("version") or "").strip()
+                    new_version = version or None
+            except Exception as exc:
+                logger.warning(f"读取待安装插件包版本失败: {exc!s}")
+
+            try:
+                token = store_archive(zip_path)
+            except Exception as exc:
+                logger.warning(
+                    f"缓存待安装插件包失败，覆盖确认后将重新获取: {exc!s}"
+                )
+                token = ""
+            return token, new_version
+        finally:
+            with contextlib.suppress(Exception):
+                remove_dir(staging_dir)
+
+    async def install(
+        self,
+        repo_url: str,
+        proxy="",
+        download_url: str = "",
+        cache_token: str = "",
+    ) -> str:
+        """安装插件包。
+
+        Args:
+            repo_url: 插件仓库地址。
+            proxy: GitHub 加速前缀。
+            download_url: 插件压缩包直链，提供时优先使用。
+            cache_token: 覆盖确认前那份包的 sha256。命中时直接解压该包安装，
+                不再访问网络；校验失败则回退为重新获取。
+
+        Returns:
+            安装后的插件目录路径。
+        """
         normalized_url = normalize_repository_url(repo_url)
         repository = parse_repository_url(normalized_url)
         repo_name = self.format_name(repository.name)
         plugin_path = os.path.join(self.plugin_store_path, repo_name)
+
+        if cache_token:
+            cached_archive = resolve_archive(cache_token)
+            if cached_archive:
+                if os.path.exists(plugin_path):
+                    # 覆盖前应先由 star_manager 清理旧目录；仍在说明状态异常，
+                    # 不擅自删除已有插件，交回上层继续确认。
+                    raise PluginAlreadyExistsError(
+                        f"安装失败：目录 {repo_name} 已存在。",
+                        dir_name=repo_name,
+                        cache_token=cache_token,
+                    )
+                logger.info(
+                    f"复用覆盖确认时的插件包安装 {repo_name}: "
+                    f"{cache_token[:12]}"
+                )
+                self.unzip_file(cached_archive, plugin_path, remove_archive=False)
+                return plugin_path
+            logger.warning(
+                f"插件安装缓存已失效，将重新获取插件包: {cache_token[:12]}"
+            )
+
         if os.path.exists(plugin_path):
-            raise Exception(f"安装失败：目录 {repo_name} 已存在。")
+            # 抓一份待安装包，从真实包内读取「待安装版本」，再抛冲突异常，
+            # 供上层转成带版本信息的覆盖确认；包同时留在缓存里待确认后复用。
+            token, new_version = await self._stage_pending_archive(
+                repo_url=repo_url,
+                normalized_url=normalized_url,
+                repository=repository,
+                proxy=proxy,
+                download_url=download_url,
+            )
+            raise PluginAlreadyExistsError(
+                f"安装失败：目录 {repo_name} 已存在。",
+                dir_name=repo_name,
+                new_version=new_version,
+                cache_token=token or None,
+            )
         if download_url:
             logger.info(f"正在下载插件压缩包 {repo_name}: {download_url}")
             await self._download_file(download_url, plugin_path + ".zip")
@@ -411,7 +563,20 @@ class PluginUpdator(RepoZipUpdator):
         inspection = cls.inspect_plugin_archive(zip_path)
         return str(inspection["metadata_entry"])
 
-    def unzip_file(self, zip_path: str, target_dir: str) -> None:
+    def unzip_file(
+        self,
+        zip_path: str,
+        target_dir: str,
+        remove_archive: bool = True,
+    ) -> None:
+        """解压插件包到目标目录。
+
+        Args:
+            zip_path: 插件压缩包路径。
+            target_dir: 解压目标目录。
+            remove_archive: 解压后是否删除压缩包。覆盖确认流程需要在解压后
+                保留缓存包，此时传 False。
+        """
         self.validate_plugin_archive(zip_path)
         ensure_dir(target_dir)
         logger.info(f"Extracting archive: {zip_path}")
@@ -420,4 +585,9 @@ class PluginUpdator(RepoZipUpdator):
             update_dir = self._resolve_archive_root_dir(z.namelist())
             z.extractall(target_dir)
 
-        self._finalize_extracted_archive(zip_path, target_dir, update_dir)
+        self._finalize_extracted_archive(
+            zip_path,
+            target_dir,
+            update_dir,
+            remove_archive=remove_archive,
+        )
