@@ -82,6 +82,26 @@ async def put_theme_colors_preference(
     return ok({"theme_colors": theme_colors}, message="主题颜色已保存")
 
 
+@router.get("/ui-preferences/motion")
+async def get_motion_preference(
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    return ok({"motion": await service.get_motion()})
+
+
+@router.put("/ui-preferences/motion")
+async def put_motion_preference(
+    request: Request,
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    body = await _json_or_empty(request)
+    payload = body.get("motion", body)
+    motion = await service.set_motion(payload)
+    return ok({"motion": motion}, message="动效设置已保存")
+
+
 @router.get("/ui-preferences/wallpaper")
 async def get_wallpaper_preference(
     _username: str = Depends(require_dashboard_user),
@@ -327,6 +347,26 @@ async def legacy_save_theme_colors(
     payload = body.get("theme_colors", body.get("themeColors", body))
     theme_colors = await service.set_theme_colors(payload)
     return ok({"theme_colors": theme_colors}, message="主题颜色已保存")
+
+
+@legacy_router.get("/api/ui-preferences/motion")
+async def legacy_get_motion(
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    return ok({"motion": await service.get_motion()})
+
+
+@legacy_router.post("/api/ui-preferences/motion")
+async def legacy_save_motion(
+    request: Request,
+    _username: str = Depends(require_dashboard_user),
+    service: DashboardPreferenceService = Depends(get_service),
+):
+    body = await _json_or_empty(request)
+    payload = body.get("motion", body)
+    motion = await service.set_motion(payload)
+    return ok({"motion": motion}, message="动效设置已保存")
 
 
 @legacy_router.get("/api/ui-preferences/wallpaper")

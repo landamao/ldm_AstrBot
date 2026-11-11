@@ -94,12 +94,16 @@ class AstrBotExporter:
         output_dir: str | None = None,
         progress_callback: Any | None = None,
         filename_suffix: str = "",
+        include_knowledge_base_dir: bool = False,
     ) -> str:
         """导出所有数据到 ZIP 文件
 
         Args:
             output_dir: 输出目录
             progress_callback: 进度回调函数，接收参数 (stage, current, total, message)
+            filename_suffix: 文件名后缀
+            include_knowledge_base_dir: 额外把整个 knowledge_base 目录按原始文件打包。
+                终端备份没有 kb_manager，读不了向量库，用它保证知识库也有备份。
 
         Returns:
             str: 生成的 ZIP 文件路径
@@ -201,7 +205,9 @@ class AstrBotExporter:
                     await progress_callback(
                         "directories", 0, 100, "正在导出插件和数据目录..."
                     )
-                dir_stats = await self._export_directories(zf)
+                dir_stats = await self._export_directories(
+                    zf, include_knowledge_base=include_knowledge_base_dir
+                )
                 if progress_callback:
                     await progress_callback("directories", 100, 100, "目录导出完成")
 
@@ -330,15 +336,22 @@ class AstrBotExporter:
                     logger.warning(self._export_errors[-1])
 
     async def _export_directories(
-        self, zf: zipfile.ZipFile
+        self,
+        zf: zipfile.ZipFile,
+        include_knowledge_base: bool = False,
     ) -> dict[str, dict[str, int]]:
         """导出插件和其他数据目录
+
+        Args:
+            include_knowledge_base: 是否额外整目录打包 knowledge_base
 
         Returns:
             dict: 每个目录的统计信息 {dir_name: {"files": count, "size": bytes}}
         """
         stats: dict[str, dict[str, int]] = {}
-        backup_directories = get_backup_directories()
+        backup_directories = get_backup_directories(
+            include_knowledge_base=include_knowledge_base
+        )
 
         for dir_name, dir_path in backup_directories.items():
             full_path = Path(dir_path)
@@ -540,3 +553,44 @@ class AstrBotExporter:
         }
 
         return manifest
+
+
+async def create_pre_restore_backup(
+    *,
+    main_db: BaseDatabase,
+    kb_manager: "KnowledgeBaseManager | None" = None,
+    config_path: str = CMD_CONFIG_FILE_PATH,
+    output_dir: str | None = None,
+    progress_callback: Any | None = None,
+    filename_suffix: str = "pre-restore",
+    include_knowledge_base_dir: bool = False,
+) -> str:
+    """恢复数据前的兜底备份。
+
+    恢复流程不再把现有目录改名成 ``.bak`` 留在 data 里，改为在恢复前主动导出一份
+    完整备份：成功时用户手上是「当前数据 + 备份数据」两份，失败时也能用这份备份
+    整体还原，而且不会在 data 目录里堆一堆无人清理的 .bak。
+
+    Args:
+        main_db: 主数据库
+        kb_manager: 知识库管理器（为 None 时备份不含知识库内容）
+        config_path: cmd_config.json 路径
+        output_dir: 输出目录，默认 data/backups
+        progress_callback: 进度回调 (stage, current, total, message)
+        filename_suffix: 文件名后缀，默认 pre-restore
+        include_knowledge_base_dir: 无 kb_manager 时（终端）整目录打包知识库
+
+    Returns:
+        str: 生成的 ZIP 路径
+    """
+    exporter = AstrBotExporter(
+        main_db=main_db,
+        kb_manager=kb_manager,
+        config_path=config_path,
+    )
+    return await exporter.export_all(
+        output_dir=output_dir or get_astrbot_backups_path(),
+        progress_callback=progress_callback,
+        filename_suffix=filename_suffix,
+        include_knowledge_base_dir=include_knowledge_base_dir,
+    )

@@ -241,6 +241,8 @@ def _should_show_startup_banner(argv: list[str] | None = None) -> bool:
         return False
     if "--restore-backup" in argv or "--恢复备份" in argv:
         return False
+    if "--backup" in argv or "--备份" in argv:
+        return False
     return True
 
 
@@ -396,7 +398,10 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
 启动参数:
   --data-dir <路径>        指定 data 目录路径（等价 LDMBOT_DATA_DIR）
   --webui-dir <路径>       指定 WebUI 静态文件目录路径（默认 data/dist）
+  --backup [输出目录]          不启动服务，直接把当前 data 打包成备份 ZIP
+                               （不填输出目录时存到 data/backups）
   --restore-backup [路径]      交互式恢复数据备份；不填路径时从备份目录选择
+                               （恢复前会询问是否先备份当前数据）
   --rollback, --回滚 [版本号]  回滚到旧版本备份；不填版本号时进入交互式选择
                                （只恢复程序代码，不包含运行数据）
   --reset-password,  --重置密码  交互式重置管理面板密码
@@ -478,6 +483,8 @@ if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
   ./.venv/bin/python main.py --rollback 4.26.26               回滚到指定版本备份
   ./.venv/bin/python main.py --restore-backup                  交互式选择并恢复数据备份
   ./.venv/bin/python main.py --restore-backup /path/to/backup.zip  恢复指定数据备份
+  ./.venv/bin/python main.py --backup                         把当前 data 打包成备份
+  ./.venv/bin/python main.py --backup /path/to/out            备份到指定目录
   ./.venv/bin/python main.py --reset-password                 重置管理面板密码
   LDMBOT_DASHBOARD_PORT=8080 ./.venv/bin/python main.py       指定端口启动
   LDMBOT_NO_BANNER=1 ./.venv/bin/python main.py               跳过横幅动画
@@ -776,8 +783,74 @@ async def main_async(webui_dir_arg: str | None) -> None:
     await core_lifecycle.start()
 
 
+async def create_backup_interactive(output: str | None) -> None:
+    """启动前打包当前数据，不启动服务。
+
+    用途：主程序起不来、WebUI 打不开时，也要能把现有数据整体留底。
+    产物与 WebUI「创建备份」同格式，可直接用 --restore-backup 恢复。
+    """
+    from astrbot.core.backup.exporter import AstrBotExporter
+    from astrbot.core.config.default import DB_PATH
+    from astrbot.core.utils.astrbot_path import (
+        get_astrbot_backups_path,
+        get_astrbot_data_path,
+    )
+
+    data_dir = Path(get_astrbot_data_path())
+    if not data_dir.is_dir():
+        print(f"data 目录不存在: {data_dir}")
+        sys.exit(1)
+
+    output_dir = str(Path(output).expanduser().resolve()) if output else get_astrbot_backups_path()
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    # 全新安装时数据库还没建表，先建表再导出；已有数据库一律不动它
+    if not Path(DB_PATH).exists():
+        try:
+            await db_helper.initialize()
+        except Exception as exc:
+            print(f"初始化数据库失败: {exc}")
+            sys.exit(1)
+
+    exporter = AstrBotExporter(
+        main_db=db_helper,
+        config_path=str(data_dir / "cmd_config.json"),
+    )
+    print(f"正在打包 {data_dir} ...")
+    try:
+        zip_path = await exporter.export_all(
+            output_dir=output_dir,
+            filename_suffix="cli",
+            # 终端没有运行时环境，读不了知识库向量库，整目录打包保证知识库也有备份
+            include_knowledge_base_dir=True,
+        )
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        print(f"备份失败: {exc}")
+        sys.exit(1)
+
+    size_mb = Path(zip_path).stat().st_size / (1024 * 1024)
+    print(f"备份完成: {zip_path}")
+    print(f"文件大小: {size_mb:.1f} MB")
+    if (data_dir / "knowledge_base" / "kb.db").exists():
+        print(
+            "知识库已按原始目录一并打包（knowledge_base/）。"
+            "恢复这类备份建议用终端 --restore-backup："
+            "服务运行时知识库目录被占用，WebUI 恢复可能替换不了它。"
+        )
+    print("该 ZIP 与 WebUI 备份同格式，可用 --restore-backup 恢复。")
+    sys.exit(0)
+
+
 async def restore_backup_interactive(backup_path: str | None) -> None:
-    """启动前交互式恢复数据备份。"""
+    """启动前交互式恢复数据备份。
+
+    恢复不再把原有目录改名成 .bak 留在 data 里：改为「恢复前先整包备份当前数据」，
+    成功时用户手上有新旧两份数据，失败时也能用前置备份整体还原。
+    """
+    from astrbot.core.backup.exporter import create_pre_restore_backup
     from astrbot.core.backup.importer import AstrBotImporter
     from astrbot.core.utils.astrbot_path import (
         get_astrbot_backups_path,
@@ -803,15 +876,34 @@ async def restore_backup_interactive(backup_path: str | None) -> None:
     if not path.is_file():
         print(f"备份文件不存在: {path}")
         sys.exit(1)
+
+    config_path = str(Path(get_astrbot_data_path()) / "cmd_config.json")
     importer = AstrBotImporter(
         main_db=db_helper,
-        config_path=str(Path(get_astrbot_data_path()) / "cmd_config.json"),
+        config_path=config_path,
     )
     check = importer.pre_check(str(path))
     if not check.valid:
         print(f"备份检查失败: {check.error}")
         sys.exit(1)
+
+    print("")
+    print("=" * 64)
+    print("即将用备份包里的内容覆盖当前数据，此操作不可撤销。")
+    print("恢复过程不会在 data 目录里留下 .bak：被覆盖的数据只能靠")
+    print("下面的「恢复前备份」找回，所以强烈建议先备份。")
+    print("=" * 64)
     print(f"备份版本: {check.backup_version}，当前版本: {check.current_version}")
+    print(f"备份文件: {path}")
+
+    do_pre_backup = (
+        input("恢复前先备份当前数据？[Y/n]: ").strip().lower() not in ("n", "no")
+    )
+    if not do_pre_backup:
+        if input("已跳过备份，当前数据将无法找回。确认继续？[y/N]: ").strip().lower() != "y":
+            print("已取消恢复。")
+            sys.exit(0)
+
     if input("是否恢复备份中的 WebUI 端口号？[y/N]: ").strip().lower() == "y":
         restore_webui_port = True
     else:
@@ -823,14 +915,60 @@ async def restore_backup_interactive(backup_path: str | None) -> None:
     if input("确认恢复？这将覆盖现有数据 [y/N]: ").strip().lower() != "y":
         print("已取消恢复。")
         sys.exit(0)
+
+    if do_pre_backup:
+        print("正在备份当前数据...")
+        try:
+            # 全新安装（数据库文件还不存在）时先建表，否则空库没有可导出的表；
+            # 已有数据库一律不动，避免在出事现场改结构。
+            from astrbot.core.config.default import DB_PATH
+
+            if not Path(DB_PATH).exists():
+                await db_helper.initialize()
+            created = await create_pre_restore_backup(
+                main_db=db_helper,
+                config_path=config_path,
+                include_knowledge_base_dir=True,
+            )
+            print(f"已备份当前数据: {created}")
+        except Exception as exc:
+            import traceback
+
+            traceback.print_exc()
+            print(f"备份当前数据失败: {exc}")
+            if input("备份失败，是否仍然继续恢复？[y/N]: ").strip().lower() != "y":
+                print("已取消恢复，现有数据未改动。")
+                sys.exit(1)
+
     result = await importer.import_all(
         str(path),
         restore_webui_port=restore_webui_port,
         restore_account_password=restore_account_password,
     )
+
+    if result.directory_results:
+        print("数据目录恢复结果：")
+        for name, info in result.directory_results.items():
+            status = info.get("status")
+            if status == "ok":
+                print(f"  {name}: 已恢复 {info.get('files', 0)} 个文件")
+            elif status == "skipped":
+                print(f"  {name}: 备份中没有该目录，已跳过")
+            else:
+                print(f"  {name}: 失败（原因见下方）")
+
+    if result.warnings:
+        print("警告：")
+        for warning in result.warnings:
+            print(f"  - {warning}")
+
     if not result.success:
-        print("恢复失败: " + "; ".join(result.errors))
+        print("恢复未完全成功：以下项目失败。")
+        print("  失败的目录保持原样；已恢复成功的部分不会自动回滚。")
+        for error in result.errors:
+            print(f"  - {error}")
         sys.exit(1)
+
     print("恢复完成：已默认保留当前 WebUI 端口号和账号密码，请重新启动 ldm 生效。")
     sys.exit(0)
 
@@ -871,12 +1009,22 @@ if __name__ == "__main__":
         "只恢复程序代码与 WebUI，不包含运行数据（data/ 目录不受影响）",
     )
     _parser.add_argument(
+        "--backup",
+        "--备份",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="输出目录",
+        help="不启动服务，直接把当前 data 打包成备份 ZIP"
+        "（不填输出目录时存到 data/backups，产物可用 --restore-backup 恢复）",
+    )
+    _parser.add_argument(
         "--restore-backup",
         "--恢复备份",
         nargs="?",
         const="",
         default=None,
-        help="交互式恢复数据备份（不填路径时从备份目录选择）",
+        help="交互式恢复数据备份（不填路径时从备份目录选择，恢复前会询问是否先备份当前数据）",
     )
     args = _parser.parse_args()
 
@@ -890,6 +1038,8 @@ if __name__ == "__main__":
     LogManager.set_queue_handler(logger, log_broker)
 
     # 只使用一次 asyncio.run()
+    if args.backup is not None:
+        asyncio.run(create_backup_interactive(args.backup or None))
     if args.restore_backup is not None:
         asyncio.run(restore_backup_interactive(args.restore_backup or None))
     asyncio.run(main_async(args.webui_dir))

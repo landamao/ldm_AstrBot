@@ -7,6 +7,7 @@
 - 版本匹配时也需要用户确认
 """
 
+import errno
 import hashlib
 import json
 import os
@@ -36,7 +37,7 @@ from .constants import (
     BACKUP_CONFIG_FILES,
     KB_METADATA_MODELS,
     MAIN_DB_MODELS,
-    get_backup_directories,
+    get_restorable_directories,
 )
 
 if TYPE_CHECKING:
@@ -76,6 +77,122 @@ def _validate_path_within(target_path: Path, base_dir: Path) -> bool:
         return resolved.is_relative_to(base_resolved)
     except (OSError, ValueError):
         return False
+
+
+def _atomic_write_bytes(target_path: Path, data: bytes) -> None:
+    """同目录写临时文件后原子替换。
+
+    恢复配置文件时不再额外留一份 .bak：直接写原文件的话，写到一半失败会留下
+    半个 JSON；先写 .tmp 再 os.replace，要么是旧内容、要么是完整新内容。
+    """
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target_path.with_name(f"{target_path.name}.restoring.tmp")
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target_path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+# Windows: ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION
+_WINDOWS_LOCK_WINERRORS = (5, 32)
+
+# 各目录被占用时最可能的原因与处置方式：(原因, 立即动作, 终端兜底动作模板)
+_LOCKED_DIR_ADVICE = {
+    "plugin_data": (
+        "通常是有插件正在运行并占着自己的数据目录（sqlite、日志、缓存等）。",
+        "请到「插件管理」里禁用相关插件后重试，",
+        "或者停掉服务后执行 `{cmd}` 恢复。",
+    ),
+    "plugins": (
+        "通常是插件已被加载，其中的 .pyd/.dll 正被进程映射着。",
+        "请到「插件管理」里禁用相关插件后重试，",
+        "或者停掉服务后执行 `{cmd}` 恢复。",
+    ),
+    "knowledge_base": (
+        "通常是知识库数据库仍被进程持有。",
+        "请先停止服务，",
+        "然后在终端执行 `{cmd}` 恢复。",
+    ),
+}
+
+
+def _is_directory_lock_error(exc: BaseException) -> bool:
+    """判断是不是「目录被占用」导致的改名失败。"""
+    if getattr(exc, "winerror", None) in _WINDOWS_LOCK_WINERRORS:
+        return True
+    # POSIX 上 rename 不会因为文件被打开而失败，EBUSY 一般是挂载点
+    return getattr(exc, "errno", None) == errno.EBUSY
+
+
+def _detect_directory_holders(target_dir: Path, limit: int = 5) -> list[str]:
+    """尽力列出正持有 target_dir 下文件的插件目录名（best-effort）。
+
+    只用于给用户一个「可能是谁占着」的提示：拿不到就返回空列表，
+    不抛异常、不影响恢复流程。
+    """
+    try:
+        import psutil
+
+        open_paths = [Path(f.path) for f in psutil.Process().open_files()]
+    except Exception:
+        return []
+
+    try:
+        base = target_dir.resolve()
+    except OSError:
+        base = target_dir
+
+    holders: list[str] = []
+    for path in open_paths:
+        try:
+            rel_parts = path.resolve().relative_to(base).parts
+        except (OSError, ValueError):
+            continue
+        if rel_parts and rel_parts[0] not in holders:
+            holders.append(rel_parts[0])
+            if len(holders) >= limit:
+                break
+    return holders
+
+
+def _restore_command_hint() -> str:
+    """当前进程真实可用的恢复命令（复用 about_info 的启动参数逻辑）。"""
+    try:
+        from astrbot.core.utils.about_info import build_restore_command
+
+        return build_restore_command()
+    except Exception:
+        return "python main.py --restore-backup"
+
+
+def _locked_directory_hint(
+    dir_name: str, target_dir: Path, *, from_running_service: bool
+) -> str:
+    """给「目录被占用」拼一段可执行的提示，不暴露内部中转路径。"""
+    holders = _detect_directory_holders(target_dir)
+    who = f"检测到这些插件正在使用该目录：{'、'.join(holders)}。" if holders else ""
+
+    if not from_running_service:
+        # 终端恢复时服务已停，占用多半来自残留进程或别的程序
+        return f"可能还有另一个 ldm 进程或别的程序占用该目录，请结束它后重试。{who}"
+
+    reason, action, tail = _LOCKED_DIR_ADVICE.get(
+        dir_name,
+        (
+            "通常是本程序正在使用该目录。",
+            "请先停止服务后重试，",
+            "或者执行 `{cmd}` 恢复。",
+        ),
+    )
+    return f"{reason}{who}{action}{tail.format(cmd=_restore_command_hint())}"
 
 
 CMD_CONFIG_FILE_PATH = os.path.join(get_astrbot_data_path(), "cmd_config.json")
@@ -190,24 +307,47 @@ class ImportPreCheckResult:
 
 
 class ImportResult:
-    """导入结果"""
+    """导入结果
+
+    success 只在「所有该恢复的东西都恢复成功」时为 True：任何目录、配置文件、
+    知识库导入失败都会置为 False，避免出现「界面绿勾但数据没回来」。
+    """
 
     def __init__(self) -> None:
         self.success = True
         self.imported_tables: dict[str, int] = {}
         self.imported_files: dict[str, int] = {}
         self.imported_directories: dict[str, int] = {}
+        # 每个目录的恢复明细：{目录名: {"status": ok|failed|skipped, "files": n, "error": str|None}}
+        self.directory_results: dict[str, dict] = {}
         self.warnings: list[str] = []
         self.errors: list[str] = []
 
-    def add_warning(self, msg: str) -> None:
+    def add_warning(
+        self, msg: str, *, exc_info: BaseException | bool = False
+    ) -> None:
         self.warnings.append(msg)
-        logger.warning(msg)
+        logger.warning(msg, exc_info=exc_info)
 
-    def add_error(self, msg: str) -> None:
+    def add_error(self, msg: str, *, exc_info: BaseException | bool = False) -> None:
         self.errors.append(msg)
         self.success = False
-        logger.error(msg)
+        # exc_info 用于把原始异常堆栈打进日志：UI 只显示人话，排查靠日志
+        logger.error(msg, exc_info=exc_info)
+
+    def set_directory_result(
+        self,
+        name: str,
+        *,
+        status: str,
+        files: int = 0,
+        error: str | None = None,
+    ) -> None:
+        self.directory_results[name] = {
+            "status": status,
+            "files": files,
+            "error": error,
+        }
 
     def to_dict(self) -> dict:
         return {
@@ -215,6 +355,7 @@ class ImportResult:
             "imported_tables": self.imported_tables,
             "imported_files": self.imported_files,
             "imported_directories": self.imported_directories,
+            "directory_results": self.directory_results,
             "warnings": self.warnings,
             "errors": self.errors,
         }
@@ -246,11 +387,15 @@ class AstrBotImporter:
         kb_manager: "KnowledgeBaseManager | None" = None,
         config_path: str = CMD_CONFIG_FILE_PATH,
         kb_root_dir: str = KB_PATH,
+        suggest_terminal_restore: bool = False,
     ) -> None:
         self.main_db = main_db
         self.kb_manager = kb_manager
         self.config_path = config_path
         self.kb_root_dir = kb_root_dir
+        # 在服务进程内恢复（WebUI）时才提示「停掉服务去终端恢复」；
+        # 终端恢复本身就在终端里，再说一遍只会让人困惑。
+        self.suggest_terminal_restore = suggest_terminal_restore
 
     def pre_check(self, zip_path: str) -> ImportPreCheckResult:
         """预检查备份文件
@@ -281,6 +426,7 @@ class AstrBotImporter:
                     result.error = "备份文件缺少 manifest.json，不是有效的 ldm 备份"
                     return result
                 except json.JSONDecodeError as e:
+                    logger.error("manifest.json 解析失败", exc_info=e)
                     result.error = f"manifest.json 格式错误: {e}"
                     return result
 
@@ -308,10 +454,12 @@ class AstrBotImporter:
 
                 return result
 
-        except zipfile.BadZipFile:
+        except zipfile.BadZipFile as e:
+            logger.error("备份文件不是有效的 ZIP: %s", zip_path, exc_info=e)
             result.error = "无效的 ZIP 文件"
             return result
         except Exception as e:
+            logger.error("检查备份文件失败: %s", zip_path, exc_info=e)
             result.error = f"检查备份文件失败: {e}"
             return result
 
@@ -435,14 +583,14 @@ class AstrBotImporter:
                     result.add_error("备份文件缺少 manifest.json")
                     return result
                 except json.JSONDecodeError as e:
-                    result.add_error(f"manifest.json 格式错误: {e}")
+                    result.add_error(f"manifest.json 格式错误: {e}", exc_info=e)
                     return result
 
                 # 版本校验
                 try:
                     self._validate_version(manifest)
                 except ValueError as e:
-                    result.add_error(str(e))
+                    result.add_error(str(e), exc_info=e)
                     return result
 
                 # 校验和校验：必须在任何写操作（清库、覆盖文件）之前进行，
@@ -468,7 +616,10 @@ class AstrBotImporter:
                     imported = await self._clear_and_import_main_db(main_data)
                     result.imported_tables.update(imported)
                 except Exception as e:
-                    result.add_error(f"导入主数据库失败（已回滚，现有数据未受影响）: {e}")
+                    result.add_error(
+                        f"导入主数据库失败（已回滚，现有数据未受影响）: {e}",
+                        exc_info=e,
+                    )
                     return result
 
                 if progress_callback:
@@ -488,7 +639,11 @@ class AstrBotImporter:
 
                         await self._import_knowledge_bases(zf, kb_meta_data, result)
                     except Exception as e:
-                        result.add_warning(f"导入知识库失败: {e}")
+                        # 知识库数据在导入前已被清空，失败意味着数据缺失，必须显式失败
+                        result.add_error(
+                            f"导入知识库失败（原有知识库数据已被清空）: {e}",
+                            exc_info=e,
+                        )
 
                     if progress_callback:
                         await progress_callback("kb", 100, 100, "知识库导入完成")
@@ -500,10 +655,8 @@ class AstrBotImporter:
                 if "config/cmd_config.json" in zf.namelist():
                     try:
                         config_content = zf.read("config/cmd_config.json")
-                        # 备份现有配置
-                        if os.path.exists(self.config_path):
-                            backup_path = f"{self.config_path}.bak"
-                            shutil.copy2(self.config_path, backup_path)
+                        # 不再生成 cmd_config.json.bak：恢复前的兜底备份由
+                        # WebUI 确认页 / 终端提示统一负责，这里只保证写入原子性。
 
                         if not restore_webui_port or not restore_account_password:
                             try:
@@ -524,11 +677,10 @@ class AstrBotImporter:
                                 result.add_warning(f"保留当前 WebUI 设置失败，将跳过配置文件导入: {exc}")
                                 config_content = None
                         if config_content is not None:
-                            with open(self.config_path, "wb") as f:
-                                f.write(config_content)
+                            _atomic_write_bytes(Path(self.config_path), config_content)
                             result.imported_files["config"] = 1
                     except Exception as e:
-                        result.add_warning(f"导入配置文件失败: {e}")
+                        result.add_error(f"导入配置文件失败: {e}", exc_info=e)
 
                 # 其余配置文件（mcp_server.json、skills.json）直接写回 data 根目录
                 data_dir = Path(self.config_path).parent
@@ -539,14 +691,12 @@ class AstrBotImporter:
                     if archive_name not in zf.namelist():
                         continue
                     try:
-                        target_path = data_dir / config_name
-                        if target_path.exists():
-                            shutil.copy2(target_path, f"{target_path}.bak")
-                        with zf.open(archive_name) as src, open(target_path, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
+                        _atomic_write_bytes(data_dir / config_name, zf.read(archive_name))
                         result.imported_files[config_name] = 1
                     except Exception as e:
-                        result.add_warning(f"导入配置文件 {config_name} 失败: {e}")
+                        result.add_error(
+                            f"导入配置文件 {config_name} 失败: {e}", exc_info=e
+                        )
 
                 if progress_callback:
                     await progress_callback("config", 100, 100, "配置文件导入完成")
@@ -556,7 +706,7 @@ class AstrBotImporter:
                     await progress_callback("attachments", 0, 100, "正在导入附件...")
 
                 attachment_count = await self._import_attachments(
-                    zf, main_data.get("attachments", [])
+                    zf, main_data.get("attachments", []), result
                 )
                 result.imported_files["attachments"] = attachment_count
 
@@ -578,11 +728,11 @@ class AstrBotImporter:
             logger.info(f"备份导入完成: {result.to_dict()}")
             return result
 
-        except zipfile.BadZipFile:
-            result.add_error("无效的 ZIP 文件")
+        except zipfile.BadZipFile as e:
+            result.add_error("无效的 ZIP 文件", exc_info=e)
             return result
         except Exception as e:
-            result.add_error(f"导入失败: {e}")
+            result.add_error(f"导入失败: {e}", exc_info=e)
             return result
 
     def _validate_version(self, manifest: dict) -> None:
@@ -649,7 +799,9 @@ class AstrBotImporter:
                                 session.add(obj)
                             count += 1
                         except Exception as e:
-                            logger.warning(f"导入记录到 {table_name} 失败: {e}")
+                            logger.warning(
+                                f"导入记录到 {table_name} 失败: {e}", exc_info=e
+                            )
 
                     imported[table_name] = count
                     logger.debug(f"导入表 {table_name}: {count} 条记录")
@@ -669,7 +821,7 @@ class AstrBotImporter:
                         await session.execute(delete(model_class))
                         logger.debug(f"已清空知识库表 {table_name}")
                     except Exception as e:
-                        logger.warning(f"清空知识库表 {table_name} 失败: {e}")
+                        logger.warning(f"清空知识库表 {table_name} 失败: {e}", exc_info=e)
 
         # 删除知识库文件目录
         for kb_id in list(self.kb_manager.kb_insts.keys()):
@@ -679,7 +831,7 @@ class AstrBotImporter:
                 if kb_helper.kb_dir.exists():
                     shutil.rmtree(kb_helper.kb_dir)
             except Exception as e:
-                logger.warning(f"清理知识库 {kb_id} 失败: {e}")
+                logger.warning(f"清理知识库 {kb_id} 失败: {e}", exc_info=e)
 
         self.kb_manager.kb_insts.clear()
 
@@ -821,7 +973,9 @@ class AstrBotImporter:
                             session.add(obj)
                             count += 1
                         except Exception as e:
-                            logger.warning(f"导入知识库记录到 {table_name} 失败: {e}")
+                            logger.warning(
+                                f"导入知识库记录到 {table_name} 失败: {e}", exc_info=e
+                            )
 
                     result.imported_tables[f"kb_{table_name}"] = count
 
@@ -845,7 +999,7 @@ class AstrBotImporter:
                     # 导入到文档存储数据库
                     await self._import_kb_documents(kb_id, doc_data)
                 except Exception as e:
-                    result.add_warning(f"导入知识库 {kb_id} 的文档失败: {e}")
+                    result.add_warning(f"导入知识库 {kb_id} 的文档失败: {e}", exc_info=e)
 
             # 导入 FAISS 索引
             faiss_path = f"databases/kb_{kb_id}/index.faiss"
@@ -855,7 +1009,9 @@ class AstrBotImporter:
                     with zf.open(faiss_path) as src, open(target_path, "wb") as dst:
                         dst.write(src.read())
                 except Exception as e:
-                    result.add_warning(f"导入知识库 {kb_id} 的 FAISS 索引失败: {e}")
+                    result.add_warning(
+                        f"导入知识库 {kb_id} 的 FAISS 索引失败: {e}", exc_info=e
+                    )
 
             # 导入媒体文件
             media_prefix = f"files/kb_media/{kb_id}/"
@@ -872,7 +1028,7 @@ class AstrBotImporter:
                         with zf.open(name) as src, open(target_path, "wb") as dst:
                             dst.write(src.read())
                     except Exception as e:
-                        result.add_warning(f"导入媒体文件 {name} 失败: {e}")
+                        result.add_warning(f"导入媒体文件 {name} 失败: {e}", exc_info=e)
 
         # 3. 重新加载知识库实例
         await self.kb_manager.load_kbs()
@@ -898,7 +1054,7 @@ class AstrBotImporter:
                         metadata=json.loads(doc.get("metadata", "{}")),
                     )
                 except Exception as e:
-                    logger.warning(f"导入文档块失败: {e}")
+                    result.add_warning(f"导入文档块失败: {e}", exc_info=e)
         finally:
             await doc_storage.close()
 
@@ -906,6 +1062,7 @@ class AstrBotImporter:
         self,
         zf: zipfile.ZipFile,
         attachments: list[dict],
+        result: ImportResult,
     ) -> int:
         """导入附件文件
 
@@ -965,7 +1122,8 @@ class AstrBotImporter:
                     shutil.copyfileobj(src, dst)
                 count += 1
             except Exception as e:
-                logger.warning(f"导入附件 {name} 失败: {e}")
+                # 单个附件失败不阻断整体恢复，但必须让用户看到，不能只写日志
+                result.add_warning(f"导入附件 {name} 失败: {e}", exc_info=e)
 
         if path_rewrites:
             async with self.main_db.get_db() as session:
@@ -991,6 +1149,16 @@ class AstrBotImporter:
     ) -> dict[str, int]:
         """导入插件和其他数据目录
 
+        目录替换策略（不产生 .bak 残留）：
+        1. 先把备份内容完整解压到同级暂存目录 ``.<name>.importing``；
+        2. 用 ``os.rename`` 把现有目录原子改名为 ``.<name>.old-<时间戳>``；
+        3. 用 ``os.rename`` 把暂存目录改名为正式目录；
+        4. 成功后立刻删除第 2 步的中转目录。
+
+        ``os.rename`` 是原子操作，失败时源目录原封不动；这里**不能**用
+        ``shutil.move``——它在 rename 失败后会退化成 copytree + rmtree(src)，
+        在 Windows 上遇到被占用的文件时会把现有目录删掉一半才报错。
+
         Args:
             zf: ZIP 文件对象
             manifest: 备份清单
@@ -1008,7 +1176,7 @@ class AstrBotImporter:
             return dir_stats
 
         backed_up_dirs = manifest.get("directories", [])
-        backup_directories = get_backup_directories()
+        backup_directories = get_restorable_directories()
 
         for dir_name in backed_up_dirs:
             if dir_name not in backup_directories:
@@ -1017,6 +1185,12 @@ class AstrBotImporter:
 
             target_dir = Path(backup_directories[dir_name])
             archive_prefix = f"directories/{dir_name}/"
+
+            # 先解压到同级暂存目录，全部成功后才替换现有目录。
+            # 直接覆盖的话，中途失败会留下不完整的新目录；
+            # 暂存方案保证解压失败时旧目录原封不动。
+            staging_dir = target_dir.parent / f".{target_dir.name}.importing"
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
             try:
                 # 获取该目录下的所有文件
@@ -1027,59 +1201,115 @@ class AstrBotImporter:
                 ]
 
                 if not dir_files:
+                    result.set_directory_result(dir_name, status="skipped")
                     continue
 
-                # 先解压到同级暂存目录，全部成功后才替换现有目录。
-                # 直接覆盖的话，中途失败会留下不完整的新目录；
-                # 暂存方案保证失败时旧目录原封不动。
-                staging_dir = target_dir.parent / f".{target_dir.name}.importing"
-                shutil.rmtree(staging_dir, ignore_errors=True)
                 staging_dir.mkdir(parents=True, exist_ok=True)
 
                 file_count = 0
-                try:
-                    for name in dir_files:
-                        # 计算相对路径
-                        rel_path = name[len(archive_prefix) :]
-                        if not rel_path:  # 跳过目录条目
-                            continue
+                for name in dir_files:
+                    # 计算相对路径
+                    rel_path = name[len(archive_prefix) :]
+                    if not rel_path:  # 跳过目录条目
+                        continue
 
-                        target_path = staging_dir / rel_path
-                        # Validate path is within staging directory (CWE-22)
-                        if not _validate_path_within(target_path, staging_dir):
-                            result.add_warning(f"文件路径越界，已跳过: {name}")
-                            continue
+                    target_path = staging_dir / rel_path
+                    # Validate path is within staging directory (CWE-22)
+                    if not _validate_path_within(target_path, staging_dir):
+                        result.add_warning(f"文件路径越界，已跳过: {name}")
+                        continue
 
-                        if zf.getinfo(name).is_dir():
-                            ensure_dir(target_path)
-                            continue
+                    if zf.getinfo(name).is_dir():
+                        ensure_dir(target_path)
+                        continue
 
-                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
 
-                        with zf.open(name) as src, open(target_path, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
-                        file_count += 1
-                except Exception as e:
-                    result.add_warning(f"解压目录 {dir_name} 失败，已放弃替换: {e}")
-                    shutil.rmtree(staging_dir, ignore_errors=True)
-                    dir_stats[dir_name] = 0
-                    continue
-
-                # 解压完整：旧目录移入 .bak 保留，暂存目录就位
-                if target_dir.exists():
-                    backup_path = Path(f"{target_dir}.bak")
-                    if backup_path.exists():
-                        shutil.rmtree(backup_path)
-                    shutil.move(str(target_dir), str(backup_path))
-                    logger.debug(f"已备份现有目录 {target_dir} 到 {backup_path}")
-                shutil.move(str(staging_dir), str(target_dir))
-
-                dir_stats[dir_name] = file_count
-                logger.debug(f"导入目录 {dir_name}: {file_count} 个文件")
-
+                    with zf.open(name) as src, open(target_path, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    file_count += 1
             except Exception as e:
-                result.add_warning(f"导入目录 {dir_name} 失败: {e}")
-                dir_stats[dir_name] = 0
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                result.set_directory_result(dir_name, status="failed", error=str(e))
+                result.add_error(
+                    f"解压目录 {dir_name} 失败，该目录保持原样（未替换）: {e}",
+                    exc_info=e,
+                )
+                continue
+
+            # 原子替换；失败则回滚，保证现有数据保持原样
+            replaced_dir = target_dir.parent / (
+                f".{target_dir.name}.old-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            moved_old = False
+            try:
+                if target_dir.exists():
+                    os.rename(target_dir, replaced_dir)
+                    moved_old = True
+                os.rename(staging_dir, target_dir)
+            except Exception as e:
+                rollback_failed = False
+                if moved_old and not target_dir.exists():
+                    try:
+                        os.rename(replaced_dir, target_dir)
+                        moved_old = False
+                    except Exception as rollback_error:
+                        rollback_failed = True
+                        result.set_directory_result(
+                            dir_name, status="failed", error=str(rollback_error)
+                        )
+                        result.add_error(
+                            f"恢复目录 {dir_name} 失败，且旧目录回滚失败；"
+                            f"旧数据仍完整保存在 {replaced_dir}（{rollback_error}）",
+                            exc_info=rollback_error,
+                        )
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                if not rollback_failed:
+                    # 占用场景给可执行的处置办法；原始 WinError（含内部中转路径）
+                    # 只进日志堆栈，不糊到界面上
+                    if _is_directory_lock_error(e):
+                        winerror = getattr(e, "winerror", None)
+                        reason = (
+                            f"WinError {winerror}" if winerror else type(e).__name__
+                        )
+                        hint = _locked_directory_hint(
+                            dir_name,
+                            target_dir,
+                            from_running_service=self.suggest_terminal_restore,
+                        )
+                        message = (
+                            f"恢复目录 {dir_name} 失败，该目录保持原样（未替换）："
+                            f"目录正被其他程序占用（{reason}）。{hint}"
+                        )
+                    else:
+                        message = (
+                            f"恢复目录 {dir_name} 失败，该目录保持原样（未替换）: {e}"
+                        )
+                    result.set_directory_result(
+                        dir_name, status="failed", error=message
+                    )
+                    result.add_error(message, exc_info=e)
+                continue
+
+            # 中转的旧目录已无用，立即删除；删不掉只影响整洁，不影响恢复结果
+            if moved_old:
+                try:
+                    shutil.rmtree(replaced_dir)
+                except Exception as e:
+                    result.add_warning(
+                        f"目录 {dir_name} 已恢复，但旧目录临时副本未能删除"
+                        f"（不影响使用，可手动删除）: {replaced_dir} ({e})",
+                        exc_info=e,
+                    )
+
+            if not target_dir.is_dir():
+                result.set_directory_result(dir_name, status="failed", error="目标目录校验失败")
+                result.add_error(f"恢复目录 {dir_name} 后校验失败：目标目录不存在")
+                continue
+
+            dir_stats[dir_name] = file_count
+            result.set_directory_result(dir_name, status="ok", files=file_count)
+            logger.debug(f"导入目录 {dir_name}: {file_count} 个文件")
 
         return dir_stats
 

@@ -21,6 +21,7 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_data_path,
     get_astrbot_plugin_data_path,
     get_astrbot_plugin_path,
+    get_astrbot_root,
 )
 from astrbot.core.utils.io import get_dashboard_version
 from astrbot.core.utils.update_guard import is_update_disabled
@@ -68,6 +69,60 @@ def _startup_command() -> str:
     """当前进程的启动命令（解释器 + 参数）。"""
     parts = [sys.executable, *(sys.argv or [])]
     return " ".join(p for p in parts if p).strip()
+
+
+# 只透传会影响「去哪儿找数据」的参数：恢复命令必须指向同一份 data
+_PASSTHROUGH_FLAGS = ("--data-dir", "--webui-dir")
+
+
+def _quote_arg(arg: str) -> str:
+    """路径含空格时加引号（Windows cmd 与 POSIX shell 都能识别双引号）。"""
+    if not arg:
+        return '""'
+    if any(ch.isspace() for ch in arg):
+        return f'"{arg}"'
+    return arg
+
+
+def build_restore_command() -> str:
+    """拼一条可直接复制执行的「停服务后恢复」命令。
+
+    复用当前进程真实的解释器与启动参数（venv 路径、绝对路径、自定义
+    ``--data-dir`` 都原样保留），只把启动模式换成 ``--restore-backup``，
+    避免在提示里硬编码 ``python main.py`` 而让用户跑到另一份解释器/数据上。
+    """
+    argv = list(sys.argv or [])
+
+    # 脚本路径优先取源码树里的 main.py（不受当前 cwd 影响）；打包运行时回退 argv[0]
+    script = os.path.join(get_astrbot_root(), "main.py")
+    if not os.path.isfile(script):
+        script = argv[0] if argv else "main.py"
+
+    kept: list[str] = []
+    args = argv[1:]
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        matched = next(
+            (
+                flag
+                for flag in _PASSTHROUGH_FLAGS
+                if arg == flag or arg.startswith(f"{flag}=")
+            ),
+            None,
+        )
+        if not matched:
+            index += 1
+            continue
+        kept.append(arg)
+        if arg == matched and index + 1 < len(args):
+            kept.append(args[index + 1])
+            index += 2
+            continue
+        index += 1
+
+    parts = [sys.executable, script, *kept, "--restore-backup"]
+    return " ".join(_quote_arg(part) for part in parts if part)
 
 
 def _format_duration(seconds: int) -> str:

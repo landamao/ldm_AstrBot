@@ -20,6 +20,8 @@ THEME_COLORS_KEY = "dashboard_theme_colors"
 WALLPAPER_KEY = "dashboard_wallpaper"
 LOGO_KEY = "dashboard_logo"
 LOGIN_WALLPAPER_KEY = "dashboard_login_wallpaper"
+# 全局 Q 弹（按压/悬停弹跳）动效开关：默认开启，关闭时才落库
+MOTION_KEY = "dashboard_motion_effects"
 
 # 板块透明度范围（0-100，0=完全不透明）
 PANEL_OPACITY_MIN = 0
@@ -235,6 +237,21 @@ def _clamp_number(value: object, default: int, minimum: int, maximum: int) -> in
     return number
 
 
+def _as_bool(value: object, default: bool = True) -> bool:
+    """把任意值规范为布尔；非法值用默认值（前端可能传 "false"/0 等）。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("false", "0", "off", "no", "disabled"):
+            return False
+        if text in ("true", "1", "on", "yes", "enabled"):
+            return True
+    return default
+
+
 def _normalize_version(value: object) -> int:
     """版本号规范化：只接受正整数（毫秒时间戳），其余按「无版本号」处理。
 
@@ -356,6 +373,38 @@ class DashboardPreferenceService:
             await sp.global_remove(THEME_COLORS_KEY)
             return None
         await sp.global_put(THEME_COLORS_KEY, normalized)
+        return normalized
+
+    @staticmethod
+    def normalize_motion(value: object) -> dict[str, object] | None:
+        """规范化全局 Q 弹动效开关；None 表示使用默认（开启弹动）。
+
+        结构：{enabled: false}。开启（默认值）不落库，删除记录即恢复默认；
+        兼容直接传 bool、{motion: {...}} 外层已由 API 层剥开、
+        以及 reset/clear 清除写法。
+        """
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None if value else {"enabled": False}
+        if not isinstance(value, dict):
+            # 兼容直接传 "false"/0 这类裸值
+            return None if _as_bool(value, True) else {"enabled": False}
+        if value.get("reset") is True or value.get("clear") is True:
+            return None
+        enabled = _as_bool(value.get("enabled", True), True)
+        return None if enabled else {"enabled": False}
+
+    async def get_motion(self) -> dict[str, object] | None:
+        raw = await sp.global_get(MOTION_KEY, None)
+        return self.normalize_motion(raw)
+
+    async def set_motion(self, data: object) -> dict[str, object] | None:
+        normalized = self.normalize_motion(data)
+        if normalized is None:
+            await sp.global_remove(MOTION_KEY)
+            return None
+        await sp.global_put(MOTION_KEY, normalized)
         return normalized
 
     @classmethod
@@ -773,6 +822,7 @@ class DashboardPreferenceService:
             "wallpaper": await self.get_wallpaper(),
             "logo": await self.get_logo(),
             "login_wallpaper": await self.get_login_wallpaper(),
+            "motion": await self.get_motion(),
         }
 
     # ---- 登录页独立壁纸 ----

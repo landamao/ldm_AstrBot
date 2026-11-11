@@ -7,11 +7,14 @@
 - 主库导入失败回滚:清空与导入同事务,失败后现有数据保持原样
 - 附件跨环境恢复:path 重写到当前附件目录并同步数据库
 - 目录导入原子性:解压暂存目录成功后才替换旧目录
+- 目录替换不产生 .bak 残留;替换失败时现有数据完整且 success=False
 """
 
 from __future__ import annotations
 
 import json
+import os
+import sys
 import zipfile
 from pathlib import Path
 
@@ -271,6 +274,110 @@ async def test_directory_import_is_atomic(tmp_path, data_env, db):
     assert (data_env / "plugins" / "fake_plugin" / "main.py").exists()
     # 暂存目录已被清理,不会残留在 data 下
     assert not (data_env / ".plugins.importing").exists()
+
+
+def _leftover_entries(data_dir: Path) -> list[str]:
+    """data 目录下不应出现的恢复残留（.bak / .old-* / .importing）。"""
+    bad: list[str] = []
+    for entry in data_dir.iterdir():
+        name = entry.name
+        if (
+            name.endswith(".bak")
+            or ".old-" in name
+            or name.endswith(".importing")
+            or name.endswith(".restoring.tmp")
+        ):
+            bad.append(name)
+    return bad
+
+
+@pytest.mark.asyncio
+async def test_directory_import_leaves_no_bak(tmp_path, data_env, db):
+    """恢复成功后不得在 data 目录留下 .bak 等中转残留。"""
+    _seed_files(data_env)
+
+    exporter = AstrBotExporter(
+        main_db=db, kb_manager=None, config_path=str(data_env / "cmd_config.json")
+    )
+    zip_path = await exporter.export_all(output_dir=str(tmp_path / "backups"))
+
+    (data_env / "plugins" / "fake_plugin" / "main.py").write_text("# changed", "utf-8")
+
+    importer = AstrBotImporter(
+        main_db=db,
+        kb_manager=None,
+        config_path=str(data_env / "cmd_config.json"),
+        kb_root_dir=str(data_env / "knowledge_base"),
+    )
+    result = await importer.import_all(zip_path, mode="replace")
+    assert result.success, result.to_dict()
+
+    # 内容被完整替换（不是合并）
+    assert (data_env / "plugins" / "fake_plugin" / "main.py").read_text("utf-8") == "# plugin"
+    assert result.directory_results["plugins"]["status"] == "ok"
+    # 关键：没有任何 .bak / .old-* / .importing 残留
+    assert _leftover_entries(data_env) == []
+    assert not (data_env / "cmd_config.json.bak").exists()
+
+
+@pytest.mark.asyncio
+async def test_directory_import_failure_keeps_existing_data(
+    tmp_path, data_env, db, monkeypatch
+):
+    """替换目录失败时：success=False、现有文件一个不少、不留中转目录。
+
+    复刻 Windows 上「目录内有文件被占用」——os.rename 直接抛 WinError。
+    旧实现用 shutil.move，会退化成 copytree + rmtree，把现有目录删掉一半。
+    """
+    _seed_files(data_env)
+    (data_env / "plugins" / "fake_plugin" / "extra.py").write_text("# extra", "utf-8")
+
+    exporter = AstrBotExporter(
+        main_db=db, kb_manager=None, config_path=str(data_env / "cmd_config.json")
+    )
+    zip_path = await exporter.export_all(output_dir=str(tmp_path / "backups"))
+
+    # 恢复前先改掉内容，确认失败后仍是「当前数据」而不是备份数据
+    (data_env / "plugins" / "fake_plugin" / "main.py").write_text("# current", "utf-8")
+
+    real_rename = os.rename
+
+    def fake_rename(src, dst, *args, **kwargs):
+        if Path(src).name == "plugins":
+            err = PermissionError(13, "拒绝访问。")
+            err.winerror = 5  # 复刻 Windows 的 ERROR_ACCESS_DENIED
+            raise err
+        return real_rename(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rename", fake_rename)
+
+    importer = AstrBotImporter(
+        main_db=db,
+        kb_manager=None,
+        config_path=str(data_env / "cmd_config.json"),
+        kb_root_dir=str(data_env / "knowledge_base"),
+        suggest_terminal_restore=True,  # WebUI 场景才会给「停服务去终端恢复」的提示
+    )
+    result = await importer.import_all(zip_path, mode="replace")
+
+    assert result.success is False
+    assert result.directory_results["plugins"]["status"] == "failed"
+
+    joined = "; ".join(result.errors)
+    # 占用场景要说人话：提示禁用插件重试
+    assert "目录正被其他程序占用" in joined
+    assert "插件管理" in joined
+    # 提示里的恢复命令必须用真实解释器，而不是硬编码的 python main.py
+    assert sys.executable in joined
+    # 内部中转目录名（.plugins.old-*）不能出现在用户可见文本里
+    assert ".old-" not in joined
+    assert ".old-" not in (result.directory_results["plugins"]["error"] or "")
+
+    # 现有数据必须原封不动：两个文件都还在，且内容仍是恢复前的
+    plugin_dir = data_env / "plugins" / "fake_plugin"
+    assert (plugin_dir / "main.py").read_text("utf-8") == "# current"
+    assert (plugin_dir / "extra.py").exists()
+    assert _leftover_entries(data_env) == []
 
 
 # ---------------------------------------------------------------------------

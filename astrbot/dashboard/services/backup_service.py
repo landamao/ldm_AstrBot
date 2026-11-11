@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.core import logger
-from astrbot.core.backup.exporter import AstrBotExporter
+from astrbot.core.backup.exporter import AstrBotExporter, create_pre_restore_backup
 from astrbot.core.backup.importer import AstrBotImporter
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
 from astrbot.core.db import BaseDatabase
@@ -236,13 +236,14 @@ class BackupService:
         if filename_suffix:
             filename_suffix = re.sub(r"[^\w\-.一-龥]", "_", filename_suffix).strip(".")
         # 导出耗时长且占用磁盘 CPU，不允许多个并发；此前导出卡顿期间连点
-        # 会触发多个同名导出互相覆盖，留下截断的残废备份
+        # 会触发多个同名导出互相覆盖，留下截断的残废备份。
+        # 恢复进行中同样禁止导出：否则会拍下一份「一半旧一半新」的脏数据。
         if any(
-            info.get("type") == "export"
+            info.get("type") in ("export", "import")
             and info.get("status") in ("pending", "processing")
             for info in self.backup_tasks.values()
         ):
-            raise BackupServiceError("已有备份导出任务正在进行中，请等待其完成后再试")
+            raise BackupServiceError("已有备份任务正在进行中，请等待其完成后再试")
         task_id = str(uuid.uuid4())
         self._init_task(task_id, "export", "pending")
         asyncio.create_task(self.background_export_task(task_id, filename_suffix))
@@ -483,10 +484,22 @@ class BackupService:
             )
         restore_webui_port = payload.get("restore_webui_port", False)
         restore_account_password = payload.get("restore_account_password", False)
+        backup_first = payload.get("backup_first", True)
+        if isinstance(backup_first, str):
+            backup_first = backup_first.strip().lower() not in ("false", "0", "no", "off")
 
         zip_path = os.path.join(self.backup_dir, filename)
         if not os.path.exists(zip_path):
             raise BackupServiceError(f"备份文件不存在: {filename}")
+
+        # 并发保护：两个恢复任务会共用同一份暂存目录（.plugins.importing），
+        # 互相覆盖后可能把目录恢复成半新半旧的状态；导出/恢复也禁止同时跑。
+        if any(
+            info.get("type") in ("import", "export")
+            and info.get("status") in ("pending", "processing")
+            for info in self.backup_tasks.values()
+        ):
+            raise BackupServiceError("已有备份任务正在进行中，请等待其完成后再试")
 
         task_id = str(uuid.uuid4())
         self._init_task(task_id, "import", "pending")
@@ -496,6 +509,7 @@ class BackupService:
                 zip_path,
                 restore_webui_port=restore_webui_port,
                 restore_account_password=restore_account_password,
+                backup_first=backup_first,
             )
         )
 
@@ -511,14 +525,56 @@ class BackupService:
         *,
         restore_webui_port: bool = False,
         restore_account_password: bool = False,
+        backup_first: bool = True,
     ) -> None:
+        pre_restore_backup: dict | None = None
         try:
-            self._update_progress(task_id, status="processing", message="正在初始化...")
             kb_manager = getattr(self.core_lifecycle, "kb_manager", None)
+
+            # 恢复前先备份现有数据：失败就直接中止，绝不半途清库
+            if backup_first:
+                self._update_progress(
+                    task_id,
+                    status="processing",
+                    stage="pre_backup",
+                    current=0,
+                    total=100,
+                    message="正在备份当前数据（恢复前保护）...",
+                )
+                try:
+                    created = await create_pre_restore_backup(
+                        main_db=self.db,
+                        kb_manager=kb_manager,
+                        config_path=os.path.join(self.data_dir, "cmd_config.json"),
+                        output_dir=self.backup_dir,
+                        progress_callback=self._make_pre_backup_callback(task_id),
+                    )
+                    pre_restore_backup = {
+                        "filename": os.path.basename(created),
+                        "path": created,
+                        "size": os.path.getsize(created),
+                    }
+                    logger.info(f"恢复前备份完成: {created}")
+                except Exception as exc:
+                    logger.error(f"恢复前备份失败，已中止恢复: {exc}", exc_info=exc)
+                    self._set_task_result(
+                        task_id,
+                        "failed",
+                        error=(
+                            "恢复前备份当前数据失败，已中止恢复（现有数据未改动）："
+                            f"{exc}"
+                        ),
+                    )
+                    return
+
+            self._update_progress(task_id, status="processing", message="正在初始化...")
             importer = AstrBotImporter(
                 main_db=self.db,
                 kb_manager=kb_manager,
                 config_path=os.path.join(self.data_dir, "cmd_config.json"),
+                # 在服务进程内恢复：目录被占用时提示用户停服务去终端恢复，
+                # 提示里的命令由 about_info 按真实解释器/参数拼出来
+                suggest_terminal_restore=True,
             )
             result = await importer.import_all(
                 zip_path=zip_path,
@@ -528,18 +584,41 @@ class BackupService:
                 restore_account_password=restore_account_password,
             )
 
+            payload = result.to_dict()
+            payload["pre_restore_backup"] = pre_restore_backup
             if result.success:
-                self._set_task_result(task_id, "completed", result=result.to_dict())
+                self._set_task_result(task_id, "completed", result=payload)
             else:
                 self._set_task_result(
                     task_id,
                     "failed",
-                    error="; ".join(result.errors),
+                    result=payload,
+                    error="; ".join(result.errors) or "导入失败",
                 )
         except Exception as exc:
             logger.error(f"后台导入任务 {task_id} 失败: {exc}")
             logger.error(traceback.format_exc())
             self._set_task_result(task_id, "failed", error=str(exc))
+
+    def _make_pre_backup_callback(self, task_id: str):
+        """恢复前备份的进度回调：复用导出阶段，但文案标明是「恢复前备份」。"""
+
+        async def _callback(
+            stage: str,
+            current: int,
+            total: int,
+            message: str = "",
+        ) -> None:
+            self._update_progress(
+                task_id,
+                status="processing",
+                stage="pre_backup",
+                current=current,
+                total=total,
+                message=f"恢复前备份：{message}" if message else "正在备份当前数据...",
+            )
+
+        return _callback
 
     def get_progress(self, task_id: str | None) -> dict:
         if not task_id:
@@ -561,6 +640,9 @@ class BackupService:
             response_data["result"] = task_info["result"]
         if status == "failed":
             response_data["error"] = task_info["error"]
+            # 失败时也回传明细：用户需要知道哪些数据已经导入、哪些没导入
+            if task_info.get("result"):
+                response_data["result"] = task_info["result"]
 
         return response_data
 

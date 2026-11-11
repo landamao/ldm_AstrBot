@@ -78,6 +78,8 @@ class BackupImportRequest(OpenModel):
     confirmed: bool | None = None
     restore_webui_port: bool | None = None
     restore_account_password: bool | None = None
+    # 恢复前先导出当前数据（默认开启）；备份失败会中止恢复，不动现有数据
+    backup_first: bool | None = None
 
 
 class BackupRenameRequest(OpenModel):

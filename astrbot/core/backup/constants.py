@@ -27,6 +27,7 @@ from astrbot.core.knowledge_base.models import (
 )
 from astrbot.core.utils.astrbot_path import (
     get_astrbot_config_path,
+    get_astrbot_knowledge_base_path,
     get_astrbot_plugin_data_path,
     get_astrbot_plugin_path,
     get_astrbot_skills_path,
@@ -63,15 +64,20 @@ KB_METADATA_MODELS: dict[str, type[SQLModel]] = {
 }
 
 
-def get_backup_directories() -> dict[str, str]:
+def get_backup_directories(include_knowledge_base: bool = False) -> dict[str, str]:
     """获取需要备份的目录列表
 
     使用 astrbot_path 模块动态获取路径，支持通过环境变量 LDMBOT_ROOT 自定义根目录。
 
+    Args:
+        include_knowledge_base: 是否把 knowledge_base 整个目录按原始文件一起打包。
+            终端备份（``--backup``）没有运行时环境，读不了知识库的向量库，
+            只能整目录搬；WebUI 备份有 kb_manager，走结构化导出，无需额外复制。
+
     Returns:
         dict: 键为备份文件中的目录名称，值为目录的绝对路径
     """
-    return {
+    directories = {
         "plugins": get_astrbot_plugin_path(),  # 插件本体
         "plugin_data": get_astrbot_plugin_data_path(),  # 插件数据
         "config": get_astrbot_config_path(),  # 配置目录
@@ -79,6 +85,18 @@ def get_backup_directories() -> dict[str, str]:
         "webchat": get_astrbot_webchat_path(),  # WebChat 数据
         "skills": get_astrbot_skills_path(),  # Skills
     }
+    if include_knowledge_base:
+        directories["knowledge_base"] = get_astrbot_knowledge_base_path()
+    return directories
+
+
+def get_restorable_directories() -> dict[str, str]:
+    """导入端可识别的目录映射（包含导出端可能出现的全部目录类型）。
+
+    备份包里出现哪些目录由 manifest 决定，这里只是「认识」它们；
+    旧备份不含 knowledge_base，因此不会因为多了这个映射而改变行为。
+    """
+    return get_backup_directories(include_knowledge_base=True)
 
 
 # data 根目录下需要一并备份的配置文件。

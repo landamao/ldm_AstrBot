@@ -9,10 +9,11 @@ from .constants import (
     KB_METADATA_MODELS,
     MAIN_DB_MODELS,
     get_backup_directories,
+    get_restorable_directories,
 )
 
 # 导入导出器和导入器
-from .exporter import AstrBotExporter
+from .exporter import AstrBotExporter, create_pre_restore_backup
 from .importer import AstrBotImporter, ImportPreCheckResult
 
 __all__ = [
@@ -22,5 +23,7 @@ __all__ = [
     "MAIN_DB_MODELS",
     "KB_METADATA_MODELS",
     "get_backup_directories",
+    "get_restorable_directories",
+    "create_pre_restore_backup",
     "BACKUP_MANIFEST_VERSION",
 ]
