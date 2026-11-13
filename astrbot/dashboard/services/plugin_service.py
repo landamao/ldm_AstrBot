@@ -6,6 +6,7 @@ import json
 import os
 import ssl
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1902,10 +1903,11 @@ class PluginService:
                     public_message="缺少插件文件",
                 )
             logger.info(f"正在安装用户上传的插件「{upload_file.filename}」")
-            filename = str(upload_file.filename or "plugin.zip").replace("\\", "/")
+            # 落盘名不使用用户上传的文件名：既避开中文/超长/控制字符在容器
+            # locale 下的编码问题，也避免同名包并发上传互相覆盖。
             file_path = os.path.join(
                 get_astrbot_temp_path(),
-                f"plugin_upload_{os.path.basename(filename) or 'plugin.zip'}",
+                f"plugin_upload_{uuid.uuid4().hex}.zip",
             )
             await upload_file.save(file_path)
             # 先把上传内容按哈希存入缓存：覆盖确认后的第二次请求不再重传文件
@@ -1921,6 +1923,16 @@ class PluginService:
                         "保存插件压缩包失败，请重试。",
                         public_message="保存插件压缩包失败，请重试。",
                     ) from exc
+            else:
+                # store_archive 是把压缩包「移入」缓存目录，原路径已不存在；
+                # 后续解压必须换成缓存路径，否则 zipfile 打开时报 FileNotFoundError。
+                cached_path = resolve_archive(cache_token) if cache_token else None
+                if not cached_path:
+                    raise PluginServiceError(
+                        "保存插件压缩包失败，请重试。",
+                        public_message="保存插件压缩包失败，请重试。",
+                    )
+                file_path = cached_path
         try:
             plugin_info = await self.plugin_manager.install_plugin_from_file(
                 file_path,
