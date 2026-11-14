@@ -1,4 +1,4 @@
 import logging
 
-__version__ = "4.27.62"
+__version__ = "4.27.63"
 logger = logging.getLogger("astrbot")
