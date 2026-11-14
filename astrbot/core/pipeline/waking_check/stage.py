@@ -232,6 +232,7 @@ class WakingCheckStage(Stage):
                                 MessageChain().message(
                                     NATIVE_PERMISSION_MESSAGE.format(
                                         sender_id=event.get_sender_id(),
+                                        wake_prefix=获取第一个唤醒词(),
                                     ),
                                 ),
                             )

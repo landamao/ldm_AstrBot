@@ -88,6 +88,48 @@ def _select_image_generation_provider(
     return None, f"错误：找不到生图模型 `{needle}`。可用的生图模型有：\n{available}"
 
 
+def _image_commands_instance():
+    """从插件注册表中找到聊天侧 ImageCommands 实例（可能不存在）。"""
+    from astrbot.builtin_stars.builtin_commands.commands.image import ImageCommands
+    from astrbot.core.star.star import star_registry
+
+    for meta in star_registry:
+        inst = getattr(meta, "star_cls", None)
+        image_c = getattr(inst, "image_c", None)
+        if isinstance(image_c, ImageCommands):
+            return image_c
+    return None
+
+
+def _admin_only_deny(context) -> str:
+    """生图指令开启「仅允许管理员使用」时，拦截非管理员的 LLM 工具调用。
+
+    返回错误文案表示已拦截，空字符串表示放行。
+    与聊天指令 /image 的权限逻辑保持一致（复用 ImageCommands.admin_only）。
+    """
+    try:
+        event = getattr(context.context, "event", None)
+        if event is None or not hasattr(event, "is_admin"):
+            return ""
+        if event.is_admin():
+            return ""
+        image_cmds = _image_commands_instance()
+        if image_cmds is None or not image_cmds.admin_only():
+            return ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("生图工具权限检查异常，放行: %s", exc)
+        return ""
+    sender_id = event.get_sender_id()
+    logger.info(
+        "生图 LLM 工具被拦截：用户(ID=%s) 非管理员且生图指令已开启仅管理员使用。",
+        sender_id,
+    )
+    return (
+        f"错误：生图功能已开启「仅允许管理员使用」，当前用户(ID: {sender_id})不是管理员，"
+        "无法生成图片。请不要重试。"
+    )
+
+
 def _images_to_call_tool_result(
     images: list[GeneratedImage],
     summary: str,
@@ -176,6 +218,10 @@ class GenerateImageTool(FunctionTool[AstrAgentContext]):
         prompt = str(kwargs.get("prompt") or "").strip()
         if not prompt:
             return "错误：参数 prompt 不能为空。"
+
+        deny = _admin_only_deny(context)
+        if deny:
+            return deny
 
         plugin_context = context.context.context
         provider, error = _select_image_generation_provider(
@@ -268,6 +314,10 @@ class ListImageGenerationModelsTool(FunctionTool[AstrAgentContext]):
         context: ContextWrapper[AstrAgentContext],
         **kwargs,
     ) -> ToolExecResult:
+        deny = _admin_only_deny(context)
+        if deny:
+            return deny
+
         plugin_context = context.context.context
         providers = _iter_image_generation_providers(plugin_context)
         if not providers:

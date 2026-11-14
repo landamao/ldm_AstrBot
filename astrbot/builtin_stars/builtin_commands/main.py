@@ -198,14 +198,6 @@ class Main(star.Star):
         finally:
             event.should_call_llm(True)
 
-    @image.command("*")
-    async def image_fallback(self, event: AstrMessageEvent, cmd: str = "") -> None:
-        """未匹配的生图子指令，发送帮助"""
-        try:
-            await self.image_c.help(event)
-        finally:
-            event.should_call_llm(True)
-
     @filter.command("t2i")
     async def t2i(self, event: AstrMessageEvent) -> None:
         """开关文本转图片"""
