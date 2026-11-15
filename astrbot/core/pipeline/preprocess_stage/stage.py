@@ -147,17 +147,17 @@ class PreProcessStage(Stage):
             if isinstance(component, Record):
                 try:
                     original_path = await component.convert_to_file_path()
-                except DownloadFileSizeLimitError as e:
-                    logger.warning(f"语音超过下载上限，已跳过处理: {e}")
-                    continue
-                try:
                     self._track_temp_media(event, original_path)
                     record_path = await ensure_wav(original_path)
                     self._track_temp_media(event, record_path)
                     component.file = record_path
                     component.path = record_path
                     message_chain[idx] = component
+                except DownloadFileSizeLimitError as e:
+                    logger.warning(f"语音超过下载上限，已跳过处理: {e}")
+                    continue
                 except Exception as e:
+                    # 单条语音解码失败不应中断整条消息的处理流程。
                     logger.warning(f"Voice processing failed: {e}")
             elif isinstance(component, Image):
                 try:
@@ -208,17 +208,17 @@ class PreProcessStage(Stage):
                     if isinstance(reply_comp, Record):
                         try:
                             original_path = await reply_comp.convert_to_file_path()
-                        except DownloadFileSizeLimitError as e:
-                            logger.warning(f"引用语音超过下载上限，已跳过处理: {e}")
-                            continue
-                        try:
                             self._track_temp_media(event, original_path)
                             record_path = await ensure_wav(original_path)
                             self._track_temp_media(event, record_path)
                             reply_comp.file = record_path
                             reply_comp.path = record_path
                             component.chain[idx] = reply_comp
+                        except DownloadFileSizeLimitError as e:
+                            logger.warning(f"引用语音超过下载上限，已跳过处理: {e}")
+                            continue
                         except Exception as e:
+                            # 引用链里的语音同样不能拖垮整条消息。
                             logger.warning(
                                 f"Voice processing in reply chain failed: {e}"
                             )
