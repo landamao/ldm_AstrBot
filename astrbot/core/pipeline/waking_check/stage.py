@@ -181,6 +181,8 @@ class WakingCheckStage(Stage):
             passed = True
             permission_not_pass = False
             permission_filter_raise_error = False
+            # 指令组声明了 self_handle 且本次消息就是纯组名时，组 handler 需要被激活执行
+            self_handle_group = False
             if len(handler.event_filters) == 0:
                 continue
 
@@ -193,6 +195,13 @@ class WakingCheckStage(Stage):
                     elif not filter.filter(event, self.ctx.astrbot_config):
                         passed = False
                         break
+                    elif (
+                        isinstance(filter, CommandGroupFilter)
+                        and filter.self_handle
+                        and filter.equals(event.message_str.strip())
+                    ):
+                        # 仅纯组名命中；带子指令时 equals 为 False，仍由子指令处理
+                        self_handle_group = True
                 except Exception as e:
                     err_text = str(e)
                     # plugin 指令组仅输入组名时：发送好看的帮助文案，而不是默认树状错误
@@ -283,7 +292,7 @@ class WakingCheckStage(Stage):
                 is_group_cmd_handler = any(
                     isinstance(f, CommandGroupFilter) for f in handler.event_filters
                 )
-                if not is_group_cmd_handler:
+                if not is_group_cmd_handler or self_handle_group:
                     activated_handlers.append(handler)
                     if "parsed_params" in event.get_extra(default={}):
                         handlers_parsed_params[handler.handler_full_name] = (

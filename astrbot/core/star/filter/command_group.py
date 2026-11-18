@@ -15,10 +15,14 @@ class CommandGroupFilter(HandlerFilter):
         group_name: str,
         alias: set | None = None,
         parent_group: CommandGroupFilter | None = None,
+        self_handle: bool = False,
     ) -> None:
         self.group_name = group_name
         self.alias = alias if alias else set()
         self._original_group_name = group_name
+        # 纯组名（如 /ccb）时是否交由指令组函数自身处理。
+        # 默认 False 保持旧行为：抛「子指令名不存在」并回指令树。
+        self.self_handle = self_handle
         self.sub_command_filters: list[CommandFilter | CommandGroupFilter] = []
         self.custom_filter_list: list[CustomFilter] = []
         self.parent_group = parent_group
@@ -137,6 +141,10 @@ class CommandGroupFilter(HandlerFilter):
 
         message_str = event.message_str.strip()
         if self.equals(message_str):
+            if self.self_handle:
+                # 纯组名且声明了 self_handle：放行本 handler。
+                # waking_check 会据此把指令组 handler 加入激活列表（仅纯组名时）。
+                return True
             tree = (
                 self.group_name
                 + "\n"

@@ -218,12 +218,16 @@ def register_command_group(
     sub_command: str | None = None,
     alias: set | None = None,
     priority: int = 0,
+    self_handle: bool = False,
     **kwargs,
 ):
     """注册一个 CommandGroup
 
     Args:
         priority: 处理优先级，数值越大越先执行，默认为 0。
+        self_handle: 仅输入指令组名（不含子指令）时，是否交给指令组函数自己处理。
+            默认 False，保持旧行为（抛「子指令名不存在」并回指令树）；
+            为 True 时执行该函数，函数内可自行发帮助或做默认动作。
     """
     new_group = None
     if isinstance(command_group_name, RegisteringCommandable):
@@ -237,6 +241,7 @@ def register_command_group(
                 sub_command,
                 alias,
                 parent_group=command_group_name.parent_group,
+                self_handle=self_handle,
             )
             command_group_name.parent_group.add_sub_command_filter(new_group)
     # 根指令组
@@ -245,7 +250,11 @@ def register_command_group(
             "注册指令组时未提供 command_group_name 参数，插件加载失败。",
         )
     else:
-        new_group = CommandGroupFilter(command_group_name, alias)
+        new_group = CommandGroupFilter(
+            command_group_name,
+            alias,
+            self_handle=self_handle,
+        )
 
     def decorator(obj):
         if new_group:
