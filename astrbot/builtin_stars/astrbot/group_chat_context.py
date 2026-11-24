@@ -107,6 +107,7 @@ class GroupChatContext:
             image_caption_provider_id
         )
         image_caption_group_list = group_context_cfg.get("image_caption_group_list") or []
+        group_icl_group_list = group_context_cfg.get("group_icl_group_list") or []
         image_caption_min_interval = _non_negative_float(
             group_context_cfg.get("image_caption_min_interval", 0),
             0.0,
@@ -144,6 +145,7 @@ class GroupChatContext:
             "image_caption_prompt": image_caption_prompt,
             "image_caption_provider_id": image_caption_provider_id,
             "image_caption_group_list": image_caption_group_list,
+            "group_icl_group_list": group_icl_group_list,
             "image_caption_min_interval": image_caption_min_interval,
             "image_caption_lazy": image_caption_lazy,
             "image_caption_concurrency": image_caption_concurrency,
@@ -169,10 +171,8 @@ class GroupChatContext:
         group_list = cfg.get("image_caption_group_list") or []
         # 列表为空：不限制群；非空：使用与插件一致的黑白名单规则
         if group_list:
-            黑白名单 = 解析黑白名单(group_list)
             # 同时允许群号、会话 ID 命中（兼容不同填写习惯）
-            允许 = 检测黑白名单(group_id, 黑白名单) or 检测黑白名单(umo, 黑白名单)
-            if not 允许:
+            if not _群列表放行(event, group_list):
                 logger.info(
                     f"群聊上下文:自动理解图片:群黑白名单拦截 | "
                     f"会话={umo} | 群={group_id or '-'} | 已跳过"
@@ -557,6 +557,13 @@ class GroupChatContext:
 
         umo = event.unified_msg_origin
         cfg = self.cfg(event)
+        # 群聊上下文增强的群黑白名单：未通过则不记录该群消息
+        if not _群列表放行(event, cfg.get("group_icl_group_list") or []):
+            logger.info(
+                f"群聊上下文:群黑白名单拦截 | 会话={umo} | "
+                f"群={str(event.get_group_id() or '').strip() or '-'} | 不记录"
+            )
+            return
         final_message = await self._format_message(event, cfg)
 
         async with self._get_lock(umo):
@@ -596,6 +603,12 @@ class GroupChatContext:
             return
 
         cfg = self.cfg(event)
+        # 群聊上下文增强的群黑白名单：未通过则不注入历史（也不消费缓冲，配置改回后仍可用）
+        if not _群列表放行(event, cfg.get("group_icl_group_list") or []):
+            logger.debug(
+                f"群聊上下文:群黑白名单拦截 | 会话={umo} | 跳过历史注入"
+            )
+            return
         current_record = ""
 
         async with self._get_lock(umo):
@@ -873,7 +886,11 @@ def 检测黑白名单(
     黑白名单: tuple[set[str], set[str]],
     通配符=None,
 ) -> bool:
-    """检测值是否通过黑白名单。规则与 Tools.py 检测黑白名单一致。"""
+    """检测单个值是否通过黑白名单。规则与 Tools.py 检测黑白名单一致。
+
+    注意：需要同时用群号和会话 ID 判定时请用 `_群列表放行`，
+    否则白名单通配符会把被黑名单命中的另一个标识放过去。
+    """
     if 通配符 is None:
         通配符 = list(_ACCESS_WILDCARDS)
     黑名单 = 黑白名单[0]
@@ -901,6 +918,45 @@ def 检测黑白名单(
             return True
     # 规范使用通配符，为空则拒绝
     return False
+
+
+# 解析后的黑白名单缓存：配置不变时避免逐条消息重复解析
+_ACL_CACHE: OrderedDict[tuple[str, ...], tuple[set[str], set[str]]] = OrderedDict()
+_ACL_CACHE_MAX = 32
+
+
+def _编译黑白名单(group_list) -> tuple[set[str], set[str]]:
+    """按原始列表缓存解析结果。"""
+    key = tuple(i.strip() for i in group_list if isinstance(i, str) and i.strip())
+    cached = _ACL_CACHE.get(key)
+    if cached is not None:
+        _ACL_CACHE.move_to_end(key)
+        return cached
+    黑白名单 = 解析黑白名单(list(key))
+    _ACL_CACHE[key] = 黑白名单
+    _ACL_CACHE.move_to_end(key)
+    while len(_ACL_CACHE) > _ACL_CACHE_MAX:
+        _ACL_CACHE.popitem(last=False)
+    return 黑白名单
+
+
+def _群列表放行(event: AstrMessageEvent, group_list) -> bool:
+    """判断当前会话是否通过群黑白名单。
+
+    列表为空：不限制群；非空：群号或会话 ID 任一命中即通过（兼容两种填写习惯）。
+    黑名单优先，避免「all + /群号」时另一个标识被白名单通配符放行。
+    """
+    if not group_list:
+        return True
+    黑名单, 白名单 = _编译黑白名单(group_list)
+    通配符 = _ACCESS_WILDCARDS[0]
+    标识列表 = (
+        str(event.get_group_id() or "").strip(),
+        str(event.unified_msg_origin or "").strip(),
+    )
+    if 通配符 in 黑名单 or any(i and i in 黑名单 for i in 标识列表):
+        return False
+    return 通配符 in 白名单 or any(i and i in 白名单 for i in 标识列表)
 
 
 def _trim_left(
