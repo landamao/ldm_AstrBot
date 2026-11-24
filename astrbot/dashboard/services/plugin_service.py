@@ -120,6 +120,7 @@ class PluginService:
             EventType.OnCallingFuncToolEvent: "函数工具",
             EventType.OnAfterMessageSentEvent: "发送消息后",
             EventType.OnPluginErrorEvent: "插件报错时",
+            EventType.OnPlatformConnectedEvent: "适配器连上平台后",
         }
         self._logo_cache: dict[str, str] = {}
 

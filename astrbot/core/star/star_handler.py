@@ -48,6 +48,14 @@ class StarHandlerRegistry(Generic[T]):
     @overload
     def get_handlers_by_event_type(
         self,
+        event_type: Literal[EventType.OnPlatformConnectedEvent],
+        only_activated=True,
+        plugins_name: list[str] | None = None,
+    ) -> list[StarHandlerMetadata[Callable[..., Awaitable[Any]]]]: ...
+
+    @overload
+    def get_handlers_by_event_type(
+        self,
         event_type: Literal[EventType.AdapterMessageEvent],
         only_activated=True,
         plugins_name: list[str] | None = None,
@@ -176,6 +184,7 @@ class StarHandlerRegistry(Generic[T]):
                     not in (
                         EventType.OnAstrBotLoadedEvent,
                         EventType.OnPlatformLoadedEvent,
+                        EventType.OnPlatformConnectedEvent,
                         EventType.OnPluginLoadedEvent,
                         EventType.OnPluginUnloadedEvent,
                     )
@@ -224,6 +233,7 @@ class EventType(enum.Enum):
 
     OnAstrBotLoadedEvent = enum.auto()  # AstrBot 加载完成
     OnPlatformLoadedEvent = enum.auto()  # 平台加载完成
+    OnPlatformConnectedEvent = enum.auto()  # 平台适配器真正连上消息平台
 
     AdapterMessageEvent = enum.auto()  # 收到适配器发来的消息
     OnWaitingLLMRequestEvent = enum.auto()  # 等待调用 LLM（进入流程即通知，早于追补排队/打断收尾/获取锁）

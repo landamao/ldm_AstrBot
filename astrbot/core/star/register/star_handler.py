@@ -421,6 +421,47 @@ def register_on_platform_loaded(priority: int = 0, **kwargs):
     return decorator
 
 
+def register_on_platform_connected(
+    platform_name: str | None = None,
+    priority: int = 0,
+    **kwargs,
+):
+    """当平台适配器真正连上消息平台时触发。
+
+    与 `on_platform_loaded` 的区别：后者在适配器实例加载完成时就触发一次，
+    此时平台侧不一定已经连上（例如 OneBot 反向 WebSocket 还没建起来）。
+    本钩子由适配器在收到平台侧的连接事件后触发，断开重连会再次触发。
+
+    Hook 参数:
+        platform: 已连接的平台适配器实例，可用 `platform.meta()` 取适配器信息，
+            `platform.get_client()` 取原始客户端（如 aiocqhttp 的 `CQHttp`）
+        self_id: 平台侧的机器人账号（如 OneBot 的机器人 QQ 号），
+            无法确定时为 None
+
+    说明:
+        插件加载时若适配器早已连上，不会再补发本钩子；可在插件初始化时用
+        `context.get_platform_inst(id)` 取出实例并通过 `platform.is_connected`
+        查询当前连接状态。
+
+    Args:
+        platform_name: 只接收指定适配器的连接事件（如 "aiocqhttp"），
+            不传则接收所有适配器。
+        priority: 处理优先级，数值越大越先执行，默认为 0。
+    """
+
+    def decorator(awaitable):
+        _ = get_handler_or_create(
+            awaitable,
+            EventType.OnPlatformConnectedEvent,
+            priority=priority,
+            platform_name=platform_name,
+            **kwargs,
+        )
+        return awaitable
+
+    return decorator
+
+
 def register_on_plugin_error(priority: int = 0, **kwargs):
     """当插件处理消息异常时触发。
 

@@ -61,6 +61,23 @@ class Platform(abc.ABC):
             self._started_at = datetime.now()
 
     @property
+    def is_connected(self) -> bool:
+        """适配器是否已真正连上消息平台。
+
+        基类默认把「运行中」视为已连接，适用于启动即代表可用的适配器；
+        支持连接检测的适配器（如 aiocqhttp）会覆盖此属性，返回真实连接状态。
+        """
+        return self._status == PlatformStatus.RUNNING
+
+    @property
+    def connected_self_id(self) -> str | None:
+        """已连接的平台侧机器人账号（如 OneBot 的机器人 QQ 号）。
+
+        基类无法感知具体连接，固定返回 None；支持连接检测的适配器会覆盖。
+        """
+        return None
+
+    @property
     def errors(self) -> list[PlatformError]:
         """获取错误列表"""
         return self._errors
@@ -80,6 +97,21 @@ class Platform(abc.ABC):
         self._errors.clear()
         if self._status == PlatformStatus.ERROR:
             self._status = PlatformStatus.RUNNING
+
+    async def notify_connected(self, platform_self_id: str | None = None) -> None:
+        """通知框架该适配器已真正连上消息平台，并派发 on_platform_connected 钩子。
+
+        只应由支持连接检测的适配器在收到平台侧连接事件时调用
+        （如 aiocqhttp 收到 OneBot 的 `lifecycle.connect` 元事件）。
+        断开重连后应再次调用，插件可借此重建连接期状态。
+
+        Args:
+            platform_self_id: 平台侧的机器人账号（如 OneBot 的机器人 QQ 号），
+                无法确定时传 None。
+        """
+        from .connection_hooks import dispatch_platform_connected
+
+        await dispatch_platform_connected(self, platform_self_id)
 
     def unified_webhook(self) -> bool:
         """是否正在使用统一 Webhook 模式"""
@@ -126,6 +158,7 @@ class Platform(abc.ABC):
             "type": meta.name,
             "display_name": meta.adapter_display_name or meta.name,
             "status": self._status.value,
+            "connected": self.is_connected,
             "started_at": self._started_at.isoformat() if self._started_at else None,
             "error_count": len(self._errors),
             "last_error": {

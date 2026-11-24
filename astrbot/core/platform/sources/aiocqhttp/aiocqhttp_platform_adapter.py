@@ -103,8 +103,17 @@ class AiocqhttpAdapter(Platform):
                 return
 
         @self.bot.on_websocket_connection
-        def on_websocket_connection(_) -> None:
+        async def on_websocket_connection(event: Event) -> None:
+            platform_self_id = event.get("self_id")
             logger.info("aiocqhttp(OneBot v11) 适配器已连接。")
+            try:
+                # OneBot 侧每建立一次反向 WS 连接都会发 lifecycle.connect，
+                # 因此断线重连也会重新触发 on_platform_connected 钩子。
+                await self.notify_connected(
+                    str(platform_self_id) if platform_self_id else None,
+                )
+            except Exception:
+                logger.exception("派发 on_platform_connected 钩子时发生错误。")
 
     async def send_by_session(
         self,
@@ -511,3 +520,24 @@ class AiocqhttpAdapter(Platform):
 
     def get_client(self) -> CQHttp:
         return self.bot
+
+    @property
+    def is_connected(self) -> bool:
+        """是否有 OneBot 客户端还挂着反向 WebSocket 连接。
+
+        直接读 aiocqhttp 内部的连接表，断线后由库自身清理，不存在缓存过期问题。
+        """
+        api_clients = getattr(self.bot, "_wsr_api_clients", None)
+        event_clients = getattr(self.bot, "_wsr_event_clients", None)
+        return bool(api_clients) or bool(event_clients)
+
+    @property
+    def connected_self_id(self) -> str | None:
+        """当前连接的机器人 QQ 号。"""
+        api_clients = getattr(self.bot, "_wsr_api_clients", None)
+        if isinstance(api_clients, dict):
+            for self_id in api_clients:
+                # go-cqhttp 允许用 "*" 通配连接，此时拿不到具体账号
+                if self_id and self_id != "*":
+                    return str(self_id)
+        return None
