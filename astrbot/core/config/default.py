@@ -302,7 +302,7 @@ DEFAULT_CONFIG = {
     "provider_ltm_settings": {
         "group_icl_enable": False,
         "group_message_max_cnt": 300,
-        # 群聊上下文增强的群黑白名单：空=不限制；all/*=全部；/群号=黑名单。规则同图片转述。
+        # 上下文增强的群聊黑白名单：空=不限制；all/*=全部；/群号=黑名单。规则同图片转述。
         "group_icl_group_list": [],
         "image_caption": False,
         "image_caption_provider_id": "",
@@ -5034,10 +5034,10 @@ CONFIG_METADATA_3 = {
                         },
                     },
                     "provider_ltm_settings.group_icl_group_list": {
-                        "description": "群聊上下文群黑白名单",
+                        "description": "群聊黑白名单",
                         "type": "list",
                         "items": {"type": "string"},
-                        "hint": "为空时不限制群。规则：直接写群号为白名单；以 / 开头为黑名单；all 或 * 表示全部。示例：all + /123456 表示除 123456 外都记录上下文；仅 111,222 表示只在这两个群记录上下文。",
+                        "hint": "上下文增强的群聊黑白名单。为空时不限制群；黑名单里的群不启用上下文增强，自动理解图片也会一并不生效。规则：直接写群号为白名单；以 / 开头为黑名单；all 或 * 表示全部。示例：all + /123456 表示除 123456 外都启用；仅 111,222 表示只在这两个群启用。",
                         "condition": {
                             "provider_ltm_settings.group_icl_enable": True,
                         },
