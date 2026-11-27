@@ -32,7 +32,7 @@ class CachedImage:
 class ToolImageCache:
     """Manages cached images from tool calls.
 
-    Images are stored in data/temp/tool_images/ and can be retrieved by file path.
+    Images are stored in data/tmp/tool_images/ and can be retrieved by file path.
     """
 
     _instance: ClassVar["ToolImageCache | None"] = None

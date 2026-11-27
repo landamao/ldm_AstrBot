@@ -13,11 +13,14 @@ Root path:
 - Can be overridden with the ``LDMBOT_ROOT`` environment variable
   (data directory = ``<root>/data``).
 - ``LDMBOT_DATA_DIR`` takes precedence over ``LDMBOT_ROOT``.
+
+Temp path:
+- Always ``<data>/tmp``: temp artifacts stay inside the data directory (never
+  in the system temp dir) and are cleaned by ``TempDirCleaner``.
 """
 
 import os
 import sys
-import tempfile
 import types
 
 from astrbot.core.utils.runtime_env import is_packaged_desktop_runtime
@@ -50,7 +53,7 @@ def get_astrbot_root() -> str:
     if path := os.environ.get("LDMBOT_ROOT"):
         return os.path.realpath(path)
     if is_packaged_desktop_runtime():
-        return os.path.realpath(os.path.join(os.path.expanduser("~"), ".astrbot"))
+        return os.path.realpath(os.path.join(os.path.expanduser("~"), ".ldmbot"))
     # 默认跟随项目源码自身位置而非启动时的 cwd，避免在其他目录启动时
     # 把 data 建到别处。非源码树（如 pip 装进 site-packages）时回退 cwd。
     source_root = get_astrbot_path()
@@ -84,9 +87,12 @@ def get_astrbot_webchat_path() -> str:
     return os.path.realpath(os.path.join(get_astrbot_data_path(), "webchat"))
 
 
+_TEMP_DIR_NAME = "tmp"
+
+
 def get_astrbot_temp_path() -> str:
-    """Return the AstrBot temporary data directory path."""
-    return os.path.realpath(os.path.join(get_astrbot_data_path(), "temp"))
+    """Return the AstrBot temporary data directory path (``<data>/tmp``)."""
+    return os.path.realpath(os.path.join(get_astrbot_data_path(), _TEMP_DIR_NAME))
 
 
 def get_astrbot_skills_path() -> str:
@@ -100,8 +106,12 @@ def get_astrbot_workspaces_path() -> str:
 
 
 def get_astrbot_system_tmp_path() -> str:
-    """Return the shared system temporary directory used by local tools."""
-    return os.path.realpath(os.path.join(tempfile.gettempdir(), ".astrbot"))
+    """Return the shared temporary directory used by local tools.
+
+    统一落在 ``<data>/tmp``，不使用系统临时目录：data 目录可备份、可迁移，
+    且由 TempDirCleaner 按容量统一清理。
+    """
+    return get_astrbot_temp_path()
 
 
 def get_astrbot_site_packages_path() -> str:

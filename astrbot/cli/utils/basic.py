@@ -13,7 +13,7 @@ def check_astrbot_root(path: str | Path) -> bool:
         path = Path(path)
     if not path.exists() or not path.is_dir():
         return False
-    if not (path / ".astrbot").exists():
+    if not (path / ".ldmbot").exists():
         return False
     return True
 

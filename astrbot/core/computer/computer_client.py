@@ -21,7 +21,7 @@ from .booters.local import LocalBooter, resolve_windows_shell
 
 session_booter: dict[str, ComputerBooter] = {}
 local_booter: ComputerBooter | None = None
-_MANAGED_SKILLS_FILE = ".astrbot_managed_skills.json"
+_MANAGED_SKILLS_FILE = ".ldmbot_managed_skills.json"
 
 
 @dataclass(slots=True)

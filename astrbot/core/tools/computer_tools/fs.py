@@ -14,7 +14,7 @@ Behavior when `provider_settings.computer_use_require_admin=True`:
   implement them and the main agent does not expose them in local mode.
 - Member + local: read/grep are restricted to `data/skills`,
   plugin-provided `data/plugins/*/skills`,
-  the current session or project workspace, and `/tmp/.astrbot`; write/edit are
+  the current session or project workspace, and `data/tmp`; write/edit are
   restricted to the same local roots except plugin-provided Skills, which are
   read-only. Upload/download are denied by `check_admin_permission` if invoked.
 - Admin + sandbox: read/write/edit/grep are not path-restricted by this
@@ -96,7 +96,8 @@ def _restricted_env_path_labels(
             get_astrbot_temp_path(),
         ]
     )
-    return labels
+    # 系统临时目录已并入 data/tmp，去重避免提示里重复列出同一路径
+    return list(dict.fromkeys(labels))
 
 
 def get_astrbot_workspaces_path() -> str:

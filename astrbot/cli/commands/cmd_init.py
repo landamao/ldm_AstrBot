@@ -20,23 +20,23 @@ async def initialize_astrbot(astrbot_root: Path) -> None:
     """Execute AstrBot initialization logic"""
     from ..utils import resolve_cli_data_path
 
-    dot_astrbot = astrbot_root / ".astrbot"
+    dot_ldmbot = astrbot_root / ".ldmbot"
 
-    if not dot_astrbot.exists():
+    if not dot_ldmbot.exists():
         if click.confirm(
             f"Install ldm to this directory? {astrbot_root}",
             default=True,
             abort=True,
         ):
-            dot_astrbot.touch()
-            click.echo(f"Created {dot_astrbot}")
+            dot_ldmbot.touch()
+            click.echo(f"Created {dot_ldmbot}")
 
     data_path = resolve_cli_data_path(astrbot_root)
     paths = {
         "data": data_path,
         "config": data_path / "config",
         "plugins": data_path / "plugins",
-        "temp": data_path / "temp",
+        "tmp": data_path / "tmp",
     }
 
     for name, path in paths.items():

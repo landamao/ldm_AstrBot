@@ -82,7 +82,7 @@ def test_log_plugin_path_follows_custom_data_dir(custom_data_dir):
 def test_cli_resolve_data_path_honors_env(custom_data_dir, monkeypatch, tmp_path):
     project = tmp_path / "proj"
     project.mkdir()
-    (project / ".astrbot").touch()
+    (project / ".ldmbot").touch()
     monkeypatch.chdir(project)
 
     from astrbot.cli.utils.basic import resolve_cli_data_path
