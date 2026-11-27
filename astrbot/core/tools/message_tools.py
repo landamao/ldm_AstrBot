@@ -1,3 +1,4 @@
+import base64
 import csv
 import io
 import json
@@ -5,6 +6,7 @@ import os
 import shlex
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import Field
 from pydantic.dataclasses import dataclass
@@ -30,6 +32,117 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_system_tmp_path,
     get_astrbot_temp_path,
 )
+from astrbot.core.utils.media_utils import file_uri_to_path
+
+_HTTP_PREFIXES = ("http://", "https://")
+_BASE64_PREFIX = "base64://"
+
+# 组件类型别名：模型经常写成 text/photo/audio/at 之类的变体，
+# 这里统一收敛到规范类型，避免因为命名差异直接报 unsupported type。
+_COMPONENT_TYPE_ALIASES = {
+    "text": "plain",
+    "txt": "plain",
+    "plain_text": "plain",
+    "message": "plain",
+    "img": "image",
+    "photo": "image",
+    "picture": "image",
+    "image_url": "image",
+    "audio": "record",
+    "voice": "record",
+    "ptt": "record",
+    "silk": "record",
+    "attachment": "file",
+    "document": "file",
+    "doc": "file",
+    "at": "mention_user",
+    "mention": "mention_user",
+    "at_user": "mention_user",
+}
+
+_MEDIA_COMPONENT_FACTORIES = {
+    "image": Comp.Image,
+    "record": Comp.Record,
+    "video": Comp.Video,
+}
+
+_MEDIA_SOURCE_HINT = (
+    "Accepted source forms: absolute local path, path relative to the session "
+    "workspace, sandbox path, file:// URI, base64:// payload, or http(s):// URL. "
+    "`path` and `url` are interchangeable — put the source in either field."
+)
+
+
+def _strip_source_value(value: object) -> str:
+    """清理取值两侧的空白和模型偶尔带上的成对引号。"""
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    if not isinstance(value, str):
+        return ""
+
+    text = value.strip()
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return text
+
+
+def _classify_media_source(value: object) -> tuple[str, str]:
+    """把 path/url 的取值归一为 (kind, payload)。
+
+    kind 取值：
+    - ``url``：http(s) 地址，交给 ``fromURL``
+    - ``base64``：base64 载荷（``base64://`` 或 ``data:...;base64,``），交给 ``fromBase64``
+    - ``path``：本地/相对/沙箱路径，``file://`` URI 会先解码成本地路径
+
+    空值返回 ``("", "")``。
+    """
+    text = _strip_source_value(value)
+    if not text:
+        return "", ""
+
+    lowered = text.lower()
+    if lowered.startswith(_HTTP_PREFIXES):
+        return "url", text
+
+    if lowered.startswith("file:"):
+        try:
+            local_path = file_uri_to_path(text)
+        except Exception:
+            return "path", text
+        return "path", _strip_source_value(local_path)
+
+    if lowered.startswith(_BASE64_PREFIX):
+        payload = text[len(_BASE64_PREFIX) :].strip()
+        return ("base64", payload) if payload else ("", "")
+
+    if lowered.startswith("data:") and ";base64," in lowered:
+        payload = text.split(",", 1)[1].strip()
+        return ("base64", payload) if payload else ("", "")
+
+    return "path", text
+
+
+def _decode_base64_payload(payload: str) -> bytes:
+    """解码 base64 载荷，容忍换行、空格和缺失的 padding。"""
+    cleaned = "".join(payload.split())
+    padding = (-len(cleaned)) % 4
+    if padding:
+        cleaned += "=" * padding
+    return base64.b64decode(cleaned, validate=False)
+
+
+def _write_base64_to_temp(payload: str, name: str) -> str:
+    """把 base64 载荷落盘到临时目录，返回本地路径。"""
+    suffix = Path(name).suffix or ""
+    tmp_path = os.path.join(
+        get_astrbot_temp_path(),
+        f"smsend_{uuid.uuid4().hex[:8]}{suffix}",
+    )
+    with open(tmp_path, "wb") as fp:
+        fp.write(_decode_base64_payload(payload))
+    return tmp_path
 
 
 def _file_send_allowed_roots(
@@ -84,6 +197,8 @@ class SendMessageToUserTool(FunctionTool[AstrAgentContext]):
         "Supports various message types including `plain`, `image`, `record`, `video`, `file`, and `mention_user`. "
         "Use this tool to send media files (`image`, `record`, `video`, `file`), "
         "or when you need to proactively message the user(such as cron job). "
+        "For media components `path` and `url` are interchangeable: a local path, "
+        "a `file://` URI and an `http(s)://` URL are all accepted in either field. "
         "For normal plain text replies, DO NOT use this tool — output the content directly instead. "
         "By default (receive_result=false), the agent stops after sending — no follow-up reply is needed. "
         "Set receive_result=true only when you need to continue the conversation after sending."
@@ -100,6 +215,14 @@ class SendMessageToUserTool(FunctionTool[AstrAgentContext]):
                         "properties": {
                             "type": {
                                 "type": "string",
+                                "enum": [
+                                    "plain",
+                                    "image",
+                                    "record",
+                                    "video",
+                                    "file",
+                                    "mention_user",
+                                ],
                                 "description": (
                                     "Component type. One of: "
                                     "plain, image, record, video, file, mention_user. Record is voice message."
@@ -107,15 +230,28 @@ class SendMessageToUserTool(FunctionTool[AstrAgentContext]):
                             },
                             "text": {
                                 "type": "string",
-                                "description": "Text content for `plain` type.",
+                                "description": (
+                                    "Text content for `plain` type. For `file` type it is "
+                                    "used as the display file name."
+                                ),
                             },
                             "path": {
                                 "type": "string",
-                                "description": "File path for `image`, `record`, `video`, or `file` types. Both local path and sandbox path are supported.",
+                                "description": (
+                                    "Source for `image`, `record`, `video`, or `file` types. "
+                                    "Accepts an absolute local path, a path relative to the "
+                                    "session workspace, a sandbox path, or a `file://` URI. "
+                                    "`http(s)://` URLs are also accepted here."
+                                ),
                             },
                             "url": {
                                 "type": "string",
-                                "description": "URL for `image`, `record`, `video`, or `file` types.",
+                                "description": (
+                                    "Source for `image`, `record`, `video`, or `file` types. "
+                                    "Accepts `http://` / `https://` URLs, `file://` URIs, "
+                                    "`base64://` payloads, or a bare local path "
+                                    "(a local path here is treated exactly like `path`)."
+                                ),
                             },
                             "mention_user_id": {
                                 "type": "string",
@@ -215,6 +351,89 @@ class SendMessageToUserTool(FunctionTool[AstrAgentContext]):
 
         raise FileNotFoundError(f"{component_type} path does not exist: {path}")
 
+    async def _resolve_media_source(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        msg: dict,
+        *,
+        component_type: str,
+    ) -> tuple[str, str]:
+        """把组件里的 path/url 归一成可用的媒体来源。
+
+        两个字段语义等价，按 ``path`` → ``url`` 顺序尝试；HTTP(s) 与 base64
+        直接返回，本地路径/``file://``/沙箱路径走路径解析。第一个可用的来源胜出，
+        全部失败时把每个字段的失败原因和可用形式一起返回，方便模型自我纠正。
+
+        Returns:
+            ``("path", 本地路径)`` / ``("url", http地址)`` / ``("base64", 载荷)``
+        """
+        candidates: list[tuple[str, str, str]] = []
+        for field in ("path", "url"):
+            kind, value = _classify_media_source(msg.get(field))
+            if kind:
+                candidates.append((field, kind, value))
+
+        if not candidates:
+            raise ValueError(
+                f"{component_type} component requires a `path` or `url` field. "
+                f"{_MEDIA_SOURCE_HINT}"
+            )
+
+        details: list[str] = []
+        permission_blocked = False
+        for field, kind, value in candidates:
+            if kind in {"url", "base64"}:
+                return kind, value
+            try:
+                local_path, _ = await self._resolve_path_from_sandbox(
+                    context, value, component_type=component_type
+                )
+                return "path", local_path
+            except (FileNotFoundError, PermissionError) as exc:
+                permission_blocked = permission_blocked or isinstance(
+                    exc, PermissionError
+                )
+                details.append(f"{field} '{value}': {exc}")
+
+        message = (
+            f"cannot resolve {component_type} source ({'; '.join(details)}). "
+            f"{_MEDIA_SOURCE_HINT}"
+        )
+        if permission_blocked:
+            raise PermissionError(message)
+        raise FileNotFoundError(message)
+
+    async def _build_media_component(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        msg: dict,
+        component_type: str,
+    ) -> Comp.BaseMessageComponent:
+        """按归一后的来源构造 image/record/video/file 组件。"""
+        kind, value = await self._resolve_media_source(
+            context, msg, component_type=component_type
+        )
+
+        if component_type == "file":
+            raw_name = _strip_source_value(msg.get("text")) or _strip_source_value(
+                msg.get("file_name")
+            )
+            if kind == "base64":
+                name = raw_name or f"file_{uuid.uuid4().hex[:8]}"
+                return Comp.File(name=name, file=_write_base64_to_temp(value, name))
+            if kind == "path":
+                name = raw_name or _remote_basename(value) or "file"
+                return Comp.File(name=name, file=value)
+            remote_name = os.path.basename(urlsplit(value).path)
+            return Comp.File(name=raw_name or remote_name or "file", url=value)
+
+        factory = _MEDIA_COMPONENT_FACTORIES[component_type]
+        if kind == "path":
+            return factory.fromFileSystem(path=value)
+        if kind == "base64":
+            return factory.fromBase64(value)
+        return factory.fromURL(url=value)
+
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
@@ -229,6 +448,15 @@ class SendMessageToUserTool(FunctionTool[AstrAgentContext]):
             ):
                 return permission_error
         messages = kwargs.get("messages")
+        # 模型偶尔把数组写成 JSON 字符串，或直接把单段组件当对象传进来，
+        # 这两种都当作合法输入接收，避免无意义的失败。
+        if isinstance(messages, str):
+            try:
+                messages = json.loads(messages)
+            except json.JSONDecodeError:
+                return "error: messages must be a JSON array of component objects."
+        if isinstance(messages, dict):
+            messages = [messages]
         if not isinstance(messages, list) or not messages:
             return "error: messages parameter is empty or invalid."
 
@@ -237,83 +465,45 @@ class SendMessageToUserTool(FunctionTool[AstrAgentContext]):
             if not isinstance(msg, dict):
                 return f"error: messages[{idx}] should be an object."
 
-            msg_type = str(msg.get("type", "")).lower()
+            raw_type = _strip_source_value(msg.get("type")).lower()
+            msg_type = _COMPONENT_TYPE_ALIASES.get(raw_type, raw_type)
             if not msg_type:
                 return f"error: messages[{idx}].type is required."
 
             try:
                 if msg_type == "plain":
-                    text = str(msg.get("text", "")).strip()
+                    text = _strip_source_value(msg.get("text") or msg.get("content"))
                     if not text:
                         return f"error: messages[{idx}].text is required for plain component."
                     components.append(Comp.Plain(text=text))
-                elif msg_type == "image":
-                    path = msg.get("path")
-                    url = msg.get("url")
-                    if path:
-                        local_path, _ = await self._resolve_path_from_sandbox(
-                            context, path, component_type="image"
-                        )
-                        components.append(Comp.Image.fromFileSystem(path=local_path))
-                    elif url:
-                        components.append(Comp.Image.fromURL(url=url))
-                    else:
-                        return f"error: messages[{idx}] must include path or url for image component."
-                elif msg_type == "record":
-                    path = msg.get("path")
-                    url = msg.get("url")
-                    if path:
-                        local_path, _ = await self._resolve_path_from_sandbox(
-                            context, path, component_type="record"
-                        )
-                        components.append(Comp.Record.fromFileSystem(path=local_path))
-                    elif url:
-                        components.append(Comp.Record.fromURL(url=url))
-                    else:
-                        return f"error: messages[{idx}] must include path or url for record component."
-                elif msg_type == "video":
-                    path = msg.get("path")
-                    url = msg.get("url")
-                    if path:
-                        local_path, _ = await self._resolve_path_from_sandbox(
-                            context, path, component_type="video"
-                        )
-                        components.append(Comp.Video.fromFileSystem(path=local_path))
-                    elif url:
-                        components.append(Comp.Video.fromURL(url=url))
-                    else:
-                        return f"error: messages[{idx}] must include path or url for video component."
-                elif msg_type == "file":
-                    path = msg.get("path")
-                    url = msg.get("url")
-                    name = (
-                        msg.get("text")
-                        or (_remote_basename(path) if path else "")
-                        or (os.path.basename(url) if url else "")
-                        or "file"
+                elif msg_type in _MEDIA_COMPONENT_FACTORIES or msg_type == "file":
+                    components.append(
+                        await self._build_media_component(context, msg, msg_type)
                     )
-                    if path:
-                        local_path, _ = await self._resolve_path_from_sandbox(
-                            context, path, component_type="file"
-                        )
-                        components.append(Comp.File(name=name, file=local_path))
-                    elif url:
-                        components.append(Comp.File(name=name, url=url))
-                    else:
-                        return f"error: messages[{idx}] must include path or url for file component."
                 elif msg_type == "mention_user":
-                    mention_user_id = msg.get("mention_user_id")
+                    mention_user_id = _strip_source_value(
+                        msg.get("mention_user_id")
+                        or msg.get("user_id")
+                        or msg.get("qq")
+                        or msg.get("id")
+                    )
                     if not mention_user_id:
                         return f"error: messages[{idx}].mention_user_id is required for mention_user component."
                     components.append(Comp.At(qq=mention_user_id))
                 else:
+                    supported = ", ".join(
+                        ["plain", *_MEDIA_COMPONENT_FACTORIES, "file", "mention_user"]
+                    )
                     return (
-                        f"error: unsupported message type '{msg_type}' at index {idx}."
+                        f"error: unsupported message type '{raw_type or msg_type}' at "
+                        f"index {idx}. Supported types: {supported}."
                     )
             except FileNotFoundError as exc:
                 return f"error: {exc}"
             except PermissionError as exc:
                 return f"error: {exc}"
+            except ValueError as exc:
+                return f"error: messages[{idx}]: {exc}"
             except Exception as exc:
                 return f"error: failed to build messages[{idx}] component: {exc}"
 
